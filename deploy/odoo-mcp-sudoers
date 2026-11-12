@@ -1,0 +1,1 @@
+odoo-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart odoo-mcp.service

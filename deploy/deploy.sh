@@ -12,14 +12,15 @@ EVENT_COMMIT="${1:-}"
 [[ "$EVENT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid commit SHA" >&2; exit 2; }
 mkdir -p "$ROOT"/{releases,venvs,cache,deploy}
 exec 9>"$ROOT/deploy/deploy.lock"
-# Wait rather than drop a push arriving during another deployment.
 flock 9
 MIRROR="$ROOT/repository.git"
 if [[ ! -d "$MIRROR" ]]; then git clone --mirror "$REPO" "$MIRROR"; fi
 git --git-dir="$MIRROR" fetch --prune origin "+refs/heads/$BRANCH:refs/heads/$BRANCH"
 COMMIT="$(git --git-dir="$MIRROR" rev-parse "refs/heads/$BRANCH")"
-if [[ "$COMMIT" != "$EVENT_COMMIT" ]]; then
-  echo "Push event is behind current master; deploying latest master $COMMIT instead of $EVENT_COMMIT."
+if [[ "$COMMIT" != "$EVENT_COMMIT" ]]; then echo "Coalescing push; latest master is $COMMIT (event was $EVENT_COMMIT)."; fi
+if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMIT" ]]; then
+  echo "Already running latest commit $COMMIT; no restart required."
+  exit 0
 fi
 RELEASE="$ROOT/releases/$COMMIT"
 if [[ ! -d "$RELEASE" ]]; then
@@ -44,21 +45,22 @@ switch_links() {
   ln -sfn "$RELEASE" "$ROOT/current.next"; mv -Tf "$ROOT/current.next" "$ROOT/current"
   ln -sfn "$VENV" "$ROOT/venv.next"; mv -Tf "$ROOT/venv.next" "$ROOT/venv"
 }
+restart_service() { sudo -n /usr/bin/systemctl restart "$SERVICE"; }
 rollback() {
   echo "Deployment failed; restoring previous release." >&2
   if [[ -n "$OLD_TARGET" ]]; then ln -sfn "$OLD_TARGET" "$ROOT/current.rollback"; mv -Tf "$ROOT/current.rollback" "$ROOT/current"; fi
   if [[ -n "$OLD_VENV" ]]; then ln -sfn "$OLD_VENV" "$ROOT/venv.rollback"; mv -Tf "$ROOT/venv.rollback" "$ROOT/venv"; fi
-  systemctl restart "$SERVICE" || true
+  restart_service || true
 }
 switch_links
-systemctl restart "$SERVICE"
+restart_service
 healthy=0
 for ((i=0; i<HEALTH_TIMEOUT; i++)); do
-  if curl --fail --silent "$HEALTH_URL" >/dev/null 2>&1; then healthy=1; break; fi
+  if curl --fail --silent "$HEALTH_URL" | grep -q '"status":"ok"'; then healthy=1; break; fi
   sleep 1
 done
 if [[ "$healthy" != 1 ]]; then rollback; exit 1; fi
 printf '%s\n' "$COMMIT" > "$ROOT/deploy/last-successful-commit"
 echo "DEPLOY_SUCCESS commit=$COMMIT"
-mapfile -t old_releases < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E '^[0-9a-f]{40}$' | sort -r | grep -v "^$COMMIT$" | tail -n +3 || true)
+mapfile -t old_releases < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr | awk '{print $2}' | grep -E '^[0-9a-f]{40}$' | grep -v "^$COMMIT$" | tail -n +3 || true)
 for old in "${old_releases[@]}"; do rm -rf "$ROOT/releases/$old"; done
