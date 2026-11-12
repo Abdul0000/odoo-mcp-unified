@@ -14,9 +14,13 @@ mkdir -p "$ROOT"/{releases,venvs,cache,deploy}
 exec 9>"$ROOT/deploy/deploy.lock"
 flock 9
 MIRROR="$ROOT/repository.git"
+# Git safe.directory is evaluated from protected config. The deploy unit runs as root,
+# while the mirror may be owned by the unprivileged service account. Register only this
+# exact, root-controlled mirror path in system config before touching it.
+git config --system --add safe.directory "$MIRROR" 2>/dev/null || true
 if [[ ! -d "$MIRROR" ]]; then git clone --mirror "$REPO" "$MIRROR"; fi
-git -c safe.directory="$MIRROR" --git-dir="$MIRROR" fetch --prune origin "+refs/heads/$BRANCH:refs/heads/$BRANCH"
-COMMIT="$(git -c safe.directory="$MIRROR" --git-dir="$MIRROR" rev-parse "refs/heads/$BRANCH")"
+git --git-dir="$MIRROR" fetch --prune origin "+refs/heads/$BRANCH:refs/heads/$BRANCH"
+COMMIT="$(git --git-dir="$MIRROR" rev-parse "refs/heads/$BRANCH")"
 if [[ "$COMMIT" != "$EVENT_COMMIT" ]]; then echo "Coalescing push; latest master is $COMMIT (event was $EVENT_COMMIT)."; fi
 if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMIT" ]]; then
   echo "Already running latest commit $COMMIT; no restart required."
@@ -24,7 +28,7 @@ if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMI
 fi
 RELEASE="$ROOT/releases/$COMMIT"
 if [[ ! -d "$RELEASE" ]]; then
-  git -c safe.directory="$MIRROR" -c safe.directory="$ROOT" clone --shared --no-checkout "$MIRROR" "$RELEASE"
+  git clone --shared --no-checkout "$MIRROR" "$RELEASE"
   git -C "$RELEASE" checkout --detach "$COMMIT"
 fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
