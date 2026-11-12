@@ -1,0 +1,22 @@
+services:
+  odoo-agent:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      # Mount your checked-out Odoo repositories here and include this path in ODOO_AGENT_ALLOWED_ROOTS.
+      - ./repos:/workspace/repos
+      # Mount SSH keys read-only for GitHub/Odoo.sh access if needed.
+      - ~/.ssh:/home/agent/.ssh:ro
+      - agent_state:/tmp/odoo_agent_state
+      - agent_screenshots:/tmp/odoo_agent_screenshots
+      # V14 Self-Learning Agent: mount Odoo.sh src tree read-only so the agent
+      # can call workflow.find_core_file + repo.read to read real Odoo source.
+      # On Odoo.sh this path already exists; for local dev mount your Odoo source here.
+      # - /path/to/odoo/src:/home/odoo/src:ro
+
+volumes:
+  agent_state:
+  agent_screenshots:

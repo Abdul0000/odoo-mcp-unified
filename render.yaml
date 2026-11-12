@@ -1,0 +1,22 @@
+# Render blueprint for the free tier. Nothing here relies on a persistent disk:
+# ws_* tools keep state in GitHub (WIP branches) and signed tokens, not in /tmp.
+services:
+  - type: web
+    name: odoo-mcp
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: ODOO_AGENT_API_TOKEN
+        sync: false
+      - key: ODOO_CLIENTS          # JSON list; each client needs a GitHub "token" with contents:write
+        sync: false
+      - key: GITHUB_TOKEN          # optional fallback when a client has no token
+        sync: false
+      - key: ODOO_AGENT_TOON_OUTPUT
+        value: auto
+      - key: ODOO_AGENT_WS_AUTOCHECKPOINT
+        value: "true"
+      - key: ODOO_AGENT_WS_PROTECTED_BRANCHES
+        value: main,master,production,prod,live

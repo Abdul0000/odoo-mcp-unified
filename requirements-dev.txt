@@ -1,0 +1,4 @@
+-r requirements.txt
+# test-only; not installed in the production image
+jsonschema>=4.21
+pytest-asyncio>=0.24

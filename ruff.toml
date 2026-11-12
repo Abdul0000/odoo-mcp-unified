@@ -1,0 +1,12 @@
+target-version = "py312"
+line-length = 200
+extend-exclude = ["tests/fixtures"]
+
+[lint]
+# Real-bug rules only (syntax errors, undefined names, unused/shadowed imports, bare except).
+# Widen deliberately, one rule at a time, as the codebase is cleaned up.
+select = ["E9", "F", "E722", "B006"]
+ignore = ["F401"]  # re-export imports are used intentionally across routers
+
+[lint.per-file-ignores]
+"tests/*" = ["F841"]

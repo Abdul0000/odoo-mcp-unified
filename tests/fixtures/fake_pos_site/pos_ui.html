@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><title>POS</title></head>
+<body>
+  <div id="app">
+    <div class="products-widget" id="grid-placeholder"></div>
+    <div id="order"></div>
+    <div id="pay-area" style="display:none;">
+      <button class="o_pos_payment_button" onclick="document.getElementById('payment-screen').style.display='block'; document.getElementById('pay-area').style.display='none'; console.log('POS: payment screen opened');">Payment</button>
+    </div>
+    <div id="payment-screen" style="display:none;">
+      <button class="paymentmethod" onclick="document.getElementById('validate-area').style.display='block'; console.log('POS: payment method selected');">Cash</button>
+      <div id="validate-area" style="display:none;">
+        <button onclick="window.location.href='receipt.html'">Validate</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    console.log('POS: OWL app booting');
+    console.info('POS: loading product catalog');
+    setTimeout(function () {
+      console.log('POS: product catalog loaded, rendering tiles');
+      var article = document.createElement('article');
+      article.className = 'product-card';
+      article.textContent = 'Coca-Cola';
+      article.onclick = function () {
+        document.getElementById('order').innerText = '1x Coca-Cola';
+        document.getElementById('pay-area').style.display = 'block';
+        console.log('POS: product added to order');
+      };
+      document.getElementById('grid-placeholder').appendChild(article);
+    }, 1200);
+  </script>
+</body>
+</html>
