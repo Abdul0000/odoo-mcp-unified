@@ -15,8 +15,8 @@ exec 9>"$ROOT/deploy/deploy.lock"
 flock 9
 MIRROR="$ROOT/repository.git"
 if [[ ! -d "$MIRROR" ]]; then git clone --mirror "$REPO" "$MIRROR"; fi
-git --git-dir="$MIRROR" fetch --prune origin "+refs/heads/$BRANCH:refs/heads/$BRANCH"
-COMMIT="$(git --git-dir="$MIRROR" rev-parse "refs/heads/$BRANCH")"
+git -c safe.directory="$MIRROR" --git-dir="$MIRROR" fetch --prune origin "+refs/heads/$BRANCH:refs/heads/$BRANCH"
+COMMIT="$(git -c safe.directory="$MIRROR" --git-dir="$MIRROR" rev-parse "refs/heads/$BRANCH")"
 if [[ "$COMMIT" != "$EVENT_COMMIT" ]]; then echo "Coalescing push; latest master is $COMMIT (event was $EVENT_COMMIT)."; fi
 if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMIT" ]]; then
   echo "Already running latest commit $COMMIT; no restart required."
@@ -24,7 +24,7 @@ if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMI
 fi
 RELEASE="$ROOT/releases/$COMMIT"
 if [[ ! -d "$RELEASE" ]]; then
-  git clone --shared --no-checkout "$MIRROR" "$RELEASE"
+  git -c safe.directory="$MIRROR" clone --shared --no-checkout "$MIRROR" "$RELEASE"
   git -C "$RELEASE" checkout --detach "$COMMIT"
 fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
