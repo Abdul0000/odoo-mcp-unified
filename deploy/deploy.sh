@@ -4,7 +4,7 @@ umask 027
 ROOT="${DEPLOY_ROOT:-/opt/odoo-mcp}"
 REPO="${DEPLOY_REPOSITORY_URL:-https://github.com/Abdul0000/odoo-mcp-unified.git}"
 BRANCH="${DEPLOY_BRANCH:-master}"
-SERVICE="${DEPLOY_SERVICE:-odoo-mcp}"
+SERVICE="${DEPLOY_SERVICE:-odoo-mcp.service}"
 HEALTH_URL="${DEPLOY_HEALTH_URL:-http://127.0.0.1:8080/health}"
 HEALTH_TIMEOUT="${DEPLOY_HEALTH_TIMEOUT:-25}"
 PYTHON="${DEPLOY_PYTHON:-python3}"
