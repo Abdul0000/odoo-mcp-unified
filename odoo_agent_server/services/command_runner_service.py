@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from fastapi import HTTPException, status
 
@@ -24,7 +25,7 @@ class CommandRunnerService:
     def run(
         self,
         project_path: str,
-        command: str,
+        command: Literal["git_status", "git_diff", "python_compile", "pytest", "ruff_check", "list_files"],
         *,
         relative_path: str = ".",
         pattern: str | None = None,
@@ -40,14 +41,12 @@ class CommandRunnerService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="project_path must be an existing Git checkout")
         if not (project == workspace or workspace in project.parents):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Remote commands are restricted to WORKSPACE_ROOT checkouts")
-        if project.resolve() != project:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project path must be canonical")
         if not re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", relative_path) or relative_path.startswith("/") or ".." in Path(relative_path).parts:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="relative_path must be a safe project-relative path")
         target = (project / relative_path).resolve()
         if not (target == project or project in target.parents):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="relative_path escapes project checkout")
-        if target.is_symlink():
+        if target.is_symlink() or (target.exists() and not (target == project or project in target.parents)):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Symlink command targets are blocked")
 
         argv: list[str]
@@ -78,9 +77,8 @@ class CommandRunnerService:
         else:
             if not target.exists():
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target path not found")
-            from ..schemas import FileListItem
             items = RepoService().list_files(str(project), relative_path, max_depth=4, max_items=500)
             lines = [f"{item.kind}\t{item.path}\t{item.size if item.size is not None else ''}" for item in items]
             return CommandResult(command=["list_files", relative_path], cwd=str(project), exit_code=0, stdout="\n".join(lines)[:_MAX_OUTPUT])
 
-        return RepoService()._run(argv, cwd, timeout_seconds, env=RepoService()._git_env()) if command.startswith("git_") else RepoService()._run(argv, cwd, timeout_seconds)
+        runner = RepoService()\n        env = runner._git_env() if command.startswith("git_") else None\n        return runner._run(argv, cwd, timeout_seconds, env=env)
