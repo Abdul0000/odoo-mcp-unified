@@ -18,7 +18,7 @@ KillSignal=SIGTERM
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/odoo-mcp /var/log/odoo-mcp /opt/odoo-mcp
+ReadWritePaths=/var/lib/odoo-mcp /var/log/odoo-mcp /opt/odoo-mcp /workspace/repos /home/odoo/src
 LimitNOFILE=65536
 
 [Install]
