@@ -32,6 +32,8 @@ sudo install -m 644 deploy/webhook_receiver.py /opt/odoo-mcp/deploy/webhook_rece
 sudo install -m 644 deploy/odoo-mcp.service /etc/systemd/system/odoo-mcp.service
 sudo install -m 644 deploy/odoo-mcp-webhook.service /etc/systemd/system/odoo-mcp-webhook.service
 sudo install -m 644 deploy/odoo-mcp-deploy@.service /etc/systemd/system/odoo-mcp-deploy@.service
+sudo install -m 755 deploy/queue-deploy.sh /usr/local/sbin/odoo-mcp-queue-deploy
+sudo chown root:root /usr/local/sbin/odoo-mcp-queue-deploy
 sudo install -m 440 deploy/odoo-mcp-sudoers /etc/sudoers.d/odoo-mcp-deploy
 sudo visudo -cf /etc/sudoers.d/odoo-mcp-deploy
 sudo systemctl daemon-reload
@@ -40,11 +42,11 @@ sudo systemctl enable --now odoo-mcp-webhook.service
 
 The webhook receiver runs as the unprivileged `odoo-mcp` account. Its
 `NoNewPrivileges=false` setting is required only because sudo uses a setuid
-transition to invoke one narrowly allowlisted command:
-`/usr/bin/systemctl start odoo-mcp-deploy@*.service`. The receiver constructs
-that unit name only after validating a 40-character lowercase hexadecimal
-commit SHA. The template always executes the fixed root-owned deployment
-script; no shell command or arbitrary path is accepted from the request.
+transition to invoke one root-owned wrapper: `/usr/local/sbin/odoo-mcp-queue-deploy`.
+The wrapper accepts exactly one 40-character lowercase hexadecimal commit SHA
+and starts only the corresponding fixed systemd template instance. The template
+always executes the fixed root-owned deployment script; no shell command or
+arbitrary path is accepted from the request.
 Do not grant the webhook account any other sudo permission. The API remains
 unprivileged with `NoNewPrivileges=true`.
 
