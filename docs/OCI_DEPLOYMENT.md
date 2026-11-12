@@ -1,10 +1,10 @@
 # OCI fast deployment (no Docker, no GitHub Actions)
 
-Every push to `master` triggers a signed GitHub webhook. The receiver is
-stdlib-only Python. Deployment fetches the latest master SHA, prepares a
-versioned release and cached dependency environment, then atomically switches
-the active release. The app remains a single Uvicorn worker because its JSON
-file store and background jobs are not multi-process safe.
+Every push to `master` triggers a signed GitHub webhook. The unprivileged
+stdlib-only receiver validates the payload and queues a fixed systemd template
+unit. A root-owned oneshot deployment unit updates the bare Git mirror, builds
+a versioned release and cached dependency environment, atomically switches the
+active release, restarts the API and performs a health check.
 
 ## Runtime layout
 
@@ -17,144 +17,66 @@ file store and background jobs are not multi-process safe.
 - `/var/lib/odoo-mcp`: persistent app state.
 - `/var/log/odoo-mcp`: deployment logs.
 
-## One-time Ubuntu OCI setup
+## Installation and update
 
-1. Install prerequisites and create the service account and directories:
+Install prerequisites: `git python3 python3-venv python3-pip curl`. Create
+(or retain) the `odoo-mcp` system user and ensure it owns
+`/opt/odoo-mcp`, `/var/lib/odoo-mcp`, `/var/log/odoo-mcp`,
+`/workspace/repos`, and `/home/odoo`. Keep `/etc/odoo-mcp` root-owned.
 
-```bash
-sudo apt-get update
-sudo apt-get install -y git python3 python3-venv python3-pip curl
-sudo useradd --system --home /opt/odoo-mcp --shell /usr/sbin/nologin odoo-mcp
-sudo mkdir -p /opt/odoo-mcp/{releases,venvs,cache,deploy} /etc/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp /workspace/repos /home/odoo/src
-sudo mkdir -p /home/odoo/src/{user,enterprise,odoo}
-sudo chown -R odoo-mcp:odoo-mcp /opt/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp /workspace/repos /home/odoo
-sudo chmod 750 /etc/odoo-mcp
-```
-
-If the `odoo-mcp` account already exists, do not rerun `useradd`; continue
-with the directory and ownership commands.
-
-2. Bootstrap the stable deployment controller, webhook receiver and unit
-files from a temporary clone:
+Install deployment files from the repository:
 
 ```bash
-git clone --depth 1 --branch master https://github.com/Abdul0000/odoo-mcp-unified.git /tmp/odoo-mcp-bootstrap
-sudo install -m 755 /tmp/odoo-mcp-bootstrap/deploy/deploy.sh /opt/odoo-mcp/deploy/deploy.sh
-sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/webhook_receiver.py /opt/odoo-mcp/deploy/webhook_receiver.py
-sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp.service /etc/systemd/system/odoo-mcp.service
-sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp-webhook.service /etc/systemd/system/odoo-mcp-webhook.service
-sudo install -m 440 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp-sudoers /etc/sudoers.d/odoo-mcp-deploy
+sudo install -m 755 deploy/deploy.sh /opt/odoo-mcp/deploy/deploy.sh
+sudo install -m 644 deploy/webhook_receiver.py /opt/odoo-mcp/deploy/webhook_receiver.py
+sudo install -m 644 deploy/odoo-mcp.service /etc/systemd/system/odoo-mcp.service
+sudo install -m 644 deploy/odoo-mcp-webhook.service /etc/systemd/system/odoo-mcp-webhook.service
+sudo install -m 644 deploy/odoo-mcp-deploy@.service /etc/systemd/system/odoo-mcp-deploy@.service
+sudo install -m 440 deploy/odoo-mcp-sudoers /etc/sudoers.d/odoo-mcp-deploy
 sudo visudo -cf /etc/sudoers.d/odoo-mcp-deploy
-sudo chown -R odoo-mcp:odoo-mcp /opt/odoo-mcp
 sudo systemctl daemon-reload
+sudo systemctl enable --now odoo-mcp-webhook.service
 ```
 
-The deploy controller and webhook receiver live outside the release symlink,
-so a push cannot replace the currently executing deployment controller and
-the webhook can start before the first application release exists.
+The webhook user has only one privileged permission: starting the
+`odoo-mcp-deploy@<commit-sha>.service` template. The receiver validates the
+SHA against exactly 40 lowercase hexadecimal characters before constructing
+the instance name. The template always runs the fixed root-owned deploy script;
+it does not accept shell commands or arbitrary paths. The API remains an
+unprivileged service with `NoNewPrivileges=true`.
 
-The webhook receiver runs as the unprivileged `odoo-mcp` user. Its unit sets
-`NoNewPrivileges=false` because systemd's `NoNewPrivileges` restriction would
-otherwise prevent its explicitly allowlisted `sudo` command from restarting
-the API service. The sudoers rule must remain narrowly scoped to:
-
-```sudoers
-odoo-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart odoo-mcp.service
-```
-
-Do not grant the webhook user general sudo access. The API service itself
-continues to run with `NoNewPrivileges=true`.
-
-3. Create `/etc/odoo-mcp/odoo-mcp.env`, root-owned mode 600. Configure fresh
-secrets and client values; do not reuse deleted credentials:
-
-```env
-ODOO_AGENT_API_TOKEN=replace-with-a-long-random-secret
-ODOO_AGENT_STATE_DIR=/var/lib/odoo-mcp/state
-ODOO_AGENT_SCREENSHOT_DIR=/var/lib/odoo-mcp/screenshots
-ODOO_AGENT_ALLOWED_ROOTS=/workspace/repos,/var/lib/odoo-mcp,/home/odoo/src
-ODOO_AGENT_REQUIRE_APPROVAL=true
-ODOO_AGENT_PUBLIC_BASE_URL=https://mcp.example.com
-ODOO_CLIENTS=[]
-```
-
-Do not commit secrets or this file to GitHub. Systemd reads the root-owned
-environment file and passes it to the service on each restart. Add actual
-client configurations to `ODOO_CLIENTS` only after the API health check passes.
-
-```bash
-sudo chown root:root /etc/odoo-mcp/odoo-mcp.env
-sudo chmod 600 /etc/odoo-mcp/odoo-mcp.env
-```
-
-4. Create the webhook secret and environment:
+Create root-owned `/etc/odoo-mcp/odoo-mcp.env` with fresh secrets and client
+configuration. Never commit secrets. Create the webhook secret and environment:
 
 ```bash
 openssl rand -hex 32 | sudo tee /etc/odoo-mcp/webhook.secret >/dev/null
 sudo chown odoo-mcp:odoo-mcp /etc/odoo-mcp/webhook.secret
 sudo chmod 600 /etc/odoo-mcp/webhook.secret
-sudo cp /tmp/odoo-mcp-bootstrap/deploy/webhook.env.example /etc/odoo-mcp/webhook.env
 sudo chown root:odoo-mcp /etc/odoo-mcp/webhook.env
 sudo chmod 640 /etc/odoo-mcp/webhook.env
 ```
 
-5. Initialize the bare mirror and perform the first deployment. The unit files
-must be loaded before the deploy script attempts its first systemd restart:
+Configure the webhook payload URL as
+`https://mcp.example.com/github-webhook`, content type JSON, SSL verification
+enabled, and the secret matching `/etc/odoo-mcp/webhook.secret`. Subscribe to
+push events only. Proxy `/github-webhook` to `127.0.0.1:9001` via Caddy; keep
+the API on local port 8080 and do not expose 9001.
+
+## Deployment behavior
+
+- HMAC-SHA256, event, repository, branch, commit SHA and delivery are validated.
+- The receiver returns 202 after systemd accepts the one-shot deployment unit.
+- Deployments serialize using `flock`; simultaneous pushes coalesce to latest master.
+- Release dependencies are keyed by requirements hash and reusable.
+- Compile/import checks run before activation.
+- Failed restart or health check restores both active symlinks and restarts the old release.
+- The deployment unit writes logs to `/var/log/odoo-mcp/deploy.log`.
+
+Monitor with:
 
 ```bash
-sudo -u odoo-mcp git clone --mirror https://github.com/Abdul0000/odoo-mcp-unified.git /opt/odoo-mcp/repository.git
-SHA="$(git --git-dir=/opt/odoo-mcp/repository.git rev-parse refs/heads/master)"
-sudo -u odoo-mcp /opt/odoo-mcp/deploy/deploy.sh "$SHA"
-sudo systemctl enable --now odoo-mcp.service
-curl -fsS http://127.0.0.1:8080/health
-sudo systemctl enable --now odoo-mcp-webhook.service
-```
-
-6. Configure DNS and HTTPS in Caddy. The webhook receiver binds only to
-loopback port 9001; proxy this path through the HTTPS site:
-
-```caddy
-handle /github-webhook {
-    reverse_proxy 127.0.0.1:9001
-}
-```
-
-Do not expose port 9001 directly. Keep the application behind the HTTPS
-reverse proxy and local API listener on port 8080.
-
-## GitHub webhook
-
-Repository Settings → Webhooks → Add webhook:
-
-- Payload URL: `https://mcp.example.com/github-webhook`
-- Content type: `application/json`
-- Secret: exact contents of `/etc/odoo-mcp/webhook.secret`
-- SSL verification: enabled
-- Events: Just the push event
-
-## Fast deployment behavior
-
-- Receiver validates HMAC-SHA256, event, repository, branch, commit and delivery ID.
-- Pushes to non-master branches are ignored.
-- It responds HTTP 202 immediately and deploys asynchronously.
-- A local bare mirror makes later fetches incremental.
-- Deployments serialize with `flock`; queued triggers coalesce to latest master.
-- If the newest commit is already active, no restart is performed.
-- Requirements are hashed; unchanged dependencies reuse their existing venv.
-- Candidate release gets Python compile/import checks before activation.
-- The current symlink switches atomically, then systemd restarts one worker.
-- Health must return JSON status `ok`; otherwise the previous release is restored.
-- State, client configuration and secrets are outside release directories.
-- Previous releases are retained for rollback.
-
-## Monitoring and logs
-
-```bash
-sudo journalctl -u odoo-mcp -f
+sudo journalctl -u 'odoo-mcp-deploy@*' -f
 sudo journalctl -u odoo-mcp-webhook -f
 sudo tail -f /var/log/odoo-mcp/deploy.log
 curl -fsS https://mcp.example.com/health
 ```
-
-Configure an external uptime monitor against `https://mcp.example.com/health`
-every 1–5 minutes and alert on non-2xx responses.
