@@ -1,1 +1,2 @@
-odoo-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl start odoo-mcp-deploy@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service
+# Permit only the root-owned validator wrapper; it accepts exactly one 40-char lowercase SHA.
+odoo-mcp ALL=(root) NOPASSWD: /usr/local/sbin/odoo-mcp-queue-deploy *
