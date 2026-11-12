@@ -30,9 +30,6 @@ fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
 VENV="$ROOT/venvs/$REQ_HASH"
 if [[ ! -x "$VENV/bin/python" ]]; then
-  # Virtualenv scripts embed their interpreter's absolute path in their shebang.
-  # Build directly at the final stable path; moving a temporary venv breaks
-  # console scripts such as uvicorn because their shebangs retain the temp path.
   rm -rf "$VENV"
   "$PYTHON" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
@@ -52,21 +49,25 @@ switch_links() {
   ln -sfn "$RELEASE" "$ROOT/current.next"; mv -Tf "$ROOT/current.next" "$ROOT/current"
   ln -sfn "$VENV" "$ROOT/venv.next"; mv -Tf "$ROOT/venv.next" "$ROOT/venv"
 }
-restart_service() { sudo -n /usr/bin/systemctl restart "$SERVICE"; }
 rollback() {
-  echo "Deployment failed; restoring previous release." >&2
+  local code=$?
+  trap - ERR
+  echo "Deployment failed (exit=$code); restoring previous release." >&2
   if [[ -n "$OLD_TARGET" ]]; then ln -sfn "$OLD_TARGET" "$ROOT/current.rollback"; mv -Tf "$ROOT/current.rollback" "$ROOT/current"; fi
   if [[ -n "$OLD_VENV" ]]; then ln -sfn "$OLD_VENV" "$ROOT/venv.rollback"; mv -Tf "$ROOT/venv.rollback" "$ROOT/venv"; fi
-  restart_service || true
+  systemctl restart "$SERVICE" || true
+  exit "$code"
 }
+trap rollback ERR
 switch_links
-restart_service
+systemctl restart "$SERVICE"
 healthy=0
 for ((i=0; i<HEALTH_TIMEOUT; i++)); do
   if curl --fail --silent "$HEALTH_URL" | grep -q '"status":"ok"'; then healthy=1; break; fi
   sleep 1
 done
-if [[ "$healthy" != 1 ]]; then rollback; exit 1; fi
+if [[ "$healthy" != 1 ]]; then echo "Health check failed for $COMMIT" >&2; false; fi
+trap - ERR
 printf '%s\n' "$COMMIT" > "$ROOT/deploy/last-successful-commit"
 echo "DEPLOY_SUCCESS commit=$COMMIT"
 mapfile -t old_releases < <(find "$ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr | awk '{print $2}' | grep -E '^[0-9a-f]{40}$' | grep -v "^$COMMIT$" | tail -n +3 || true)
