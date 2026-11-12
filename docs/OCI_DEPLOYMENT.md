@@ -53,6 +53,18 @@ The deploy controller and webhook receiver live outside the release symlink,
 so a push cannot replace the currently executing deployment controller and
 the webhook can start before the first application release exists.
 
+The webhook receiver runs as the unprivileged `odoo-mcp` user. Its unit sets
+`NoNewPrivileges=false` because systemd's `NoNewPrivileges` restriction would
+otherwise prevent its explicitly allowlisted `sudo` command from restarting
+the API service. The sudoers rule must remain narrowly scoped to:
+
+```sudoers
+odoo-mcp ALL=(root) NOPASSWD: /usr/bin/systemctl restart odoo-mcp.service
+```
+
+Do not grant the webhook user general sudo access. The API service itself
+continues to run with `NoNewPrivileges=true`.
+
 3. Create `/etc/odoo-mcp/odoo-mcp.env`, root-owned mode 600. Configure fresh
 secrets and client values; do not reuse deleted credentials:
 
