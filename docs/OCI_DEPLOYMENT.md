@@ -38,12 +38,15 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now odoo-mcp-webhook.service
 ```
 
-The webhook user has only one privileged permission: starting the
-`odoo-mcp-deploy@<commit-sha>.service` template. The receiver validates the
-SHA against exactly 40 lowercase hexadecimal characters before constructing
-the instance name. The template always runs the fixed root-owned deploy script;
-it does not accept shell commands or arbitrary paths. The API remains an
-unprivileged service with `NoNewPrivileges=true`.
+The webhook receiver runs as the unprivileged `odoo-mcp` account. Its
+`NoNewPrivileges=false` setting is required only because sudo uses a setuid
+transition to invoke one narrowly allowlisted command:
+`/usr/bin/systemctl start odoo-mcp-deploy@*.service`. The receiver constructs
+that unit name only after validating a 40-character lowercase hexadecimal
+commit SHA. The template always executes the fixed root-owned deployment
+script; no shell command or arbitrary path is accepted from the request.
+Do not grant the webhook account any other sudo permission. The API remains
+unprivileged with `NoNewPrivileges=true`.
 
 Create root-owned `/etc/odoo-mcp/odoo-mcp.env` with fresh secrets and client
 configuration. Never commit secrets. Create the webhook secret and environment:
