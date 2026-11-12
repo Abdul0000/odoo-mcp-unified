@@ -1,0 +1,25 @@
+[Unit]
+Description=Odoo MCP Unified API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=odoo-mcp
+Group=odoo-mcp
+WorkingDirectory=/opt/odoo-mcp/current
+EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/odoo-mcp/current/.venv/bin/uvicorn odoo_agent_server.main:app --host 127.0.0.1 --port 8080 --workers 1
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/odoo-mcp /var/log/odoo-mcp /opt/odoo-mcp
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
