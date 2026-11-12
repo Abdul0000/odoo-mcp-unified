@@ -12,7 +12,10 @@ EnvironmentFile=/etc/odoo-mcp/webhook.env
 ExecStart=/usr/bin/python3 /opt/odoo-mcp/deploy/webhook_receiver.py
 Restart=always
 RestartSec=2
-NoNewPrivileges=true
+# sudo must be able to use its setuid transition for the single allowlisted
+# systemctl start odoo-mcp-deploy@*.service command. The receiver validates
+# the instance suffix as a 40-character hexadecimal commit before invoking it.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/log/odoo-mcp /opt/odoo-mcp
