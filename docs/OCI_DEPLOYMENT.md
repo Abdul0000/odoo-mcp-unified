@@ -19,45 +19,61 @@ file store and background jobs are not multi-process safe.
 
 ## One-time Ubuntu OCI setup
 
-1. Create the service account and directories:
+1. Install prerequisites and create the service account and directories:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y git python3 python3-venv python3-pip curl
 sudo useradd --system --home /opt/odoo-mcp --shell /usr/sbin/nologin odoo-mcp
-sudo mkdir -p /opt/odoo-mcp/{releases,venvs,cache,deploy} /etc/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp
-sudo chown -R odoo-mcp:odoo-mcp /opt/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp
+sudo mkdir -p /opt/odoo-mcp/{releases,venvs,cache,deploy} /etc/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp /workspace/repos /home/odoo/src
+sudo mkdir -p /home/odoo/src/{user,enterprise,odoo}
+sudo chown -R odoo-mcp:odoo-mcp /opt/odoo-mcp /var/lib/odoo-mcp /var/log/odoo-mcp /workspace/repos /home/odoo
 sudo chmod 750 /etc/odoo-mcp
-sudo apt-get update && sudo apt-get install -y git python3 python3-venv curl
 ```
 
-2. Bootstrap the deployment controller and unit files from a temporary clone:
+If the `odoo-mcp` account already exists, do not rerun `useradd`; continue
+with the directory and ownership commands.
+
+2. Bootstrap the stable deployment controller, webhook receiver and unit
+files from a temporary clone:
 
 ```bash
 git clone --depth 1 --branch master https://github.com/Abdul0000/odoo-mcp-unified.git /tmp/odoo-mcp-bootstrap
 sudo install -m 755 /tmp/odoo-mcp-bootstrap/deploy/deploy.sh /opt/odoo-mcp/deploy/deploy.sh
+sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/webhook_receiver.py /opt/odoo-mcp/deploy/webhook_receiver.py
 sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp.service /etc/systemd/system/odoo-mcp.service
 sudo install -m 644 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp-webhook.service /etc/systemd/system/odoo-mcp-webhook.service
 sudo install -m 440 /tmp/odoo-mcp-bootstrap/deploy/odoo-mcp-sudoers /etc/sudoers.d/odoo-mcp-deploy
 sudo visudo -cf /etc/sudoers.d/odoo-mcp-deploy
+sudo chown -R odoo-mcp:odoo-mcp /opt/odoo-mcp
+sudo systemctl daemon-reload
 ```
 
-The deploy controller is installed outside the release symlink so a push
-cannot replace the currently executing deployment script mid-run.
+The deploy controller and webhook receiver live outside the release symlink,
+so a push cannot replace the currently executing deployment controller and
+the webhook can start before the first application release exists.
 
-3. Create `/etc/odoo-mcp/odoo-mcp.env`, root-owned mode 600. Preserve your
-existing production values, especially `ODOO_CLIENTS` and credentials:
+3. Create `/etc/odoo-mcp/odoo-mcp.env`, root-owned mode 600. Configure fresh
+secrets and client values; do not reuse deleted credentials:
 
 ```env
 ODOO_AGENT_API_TOKEN=replace-with-a-long-random-secret
 ODOO_AGENT_STATE_DIR=/var/lib/odoo-mcp/state
 ODOO_AGENT_SCREENSHOT_DIR=/var/lib/odoo-mcp/screenshots
-ODOO_AGENT_ALLOWED_ROOTS=/workspace/repos,/var/lib/odoo-mcp
+ODOO_AGENT_ALLOWED_ROOTS=/workspace/repos,/var/lib/odoo-mcp,/home/odoo/src
 ODOO_AGENT_REQUIRE_APPROVAL=true
 ODOO_AGENT_PUBLIC_BASE_URL=https://mcp.example.com
-# Add your existing ODOO_CLIENTS and other credentials here.
+ODOO_CLIENTS=[]
 ```
 
 Do not commit secrets or this file to GitHub. Systemd reads the root-owned
-environment file and passes it to the service on each restart.
+environment file and passes it to the service on each restart. Add actual
+client configurations to `ODOO_CLIENTS` only after the API health check passes.
+
+```bash
+sudo chown root:root /etc/odoo-mcp/odoo-mcp.env
+sudo chmod 600 /etc/odoo-mcp/odoo-mcp.env
+```
 
 4. Create the webhook secret and environment:
 
@@ -70,17 +86,20 @@ sudo chown root:odoo-mcp /etc/odoo-mcp/webhook.env
 sudo chmod 640 /etc/odoo-mcp/webhook.env
 ```
 
-5. Initialize the bare mirror and deploy the current master SHA:
+5. Initialize the bare mirror and perform the first deployment. The unit files
+must be loaded before the deploy script attempts its first systemd restart:
 
 ```bash
 sudo -u odoo-mcp git clone --mirror https://github.com/Abdul0000/odoo-mcp-unified.git /opt/odoo-mcp/repository.git
 SHA="$(git --git-dir=/opt/odoo-mcp/repository.git rev-parse refs/heads/master)"
 sudo -u odoo-mcp /opt/odoo-mcp/deploy/deploy.sh "$SHA"
-sudo systemctl daemon-reload
-sudo systemctl enable --now odoo-mcp.service odoo-mcp-webhook.service
+sudo systemctl enable --now odoo-mcp.service
+curl -fsS http://127.0.0.1:8080/health
+sudo systemctl enable --now odoo-mcp-webhook.service
 ```
 
-6. Configure DNS and HTTPS in Caddy. Add this route to the existing site:
+6. Configure DNS and HTTPS in Caddy. The webhook receiver binds only to
+loopback port 9001; proxy this path through the HTTPS site:
 
 ```caddy
 handle /github-webhook {
@@ -88,8 +107,8 @@ handle /github-webhook {
 }
 ```
 
-Do not expose port 9001 directly. The application remains behind the existing
-HTTPS reverse proxy on localhost port 8080.
+Do not expose port 9001 directly. Keep the application behind the HTTPS
+reverse proxy and local API listener on port 8080.
 
 ## GitHub webhook
 
