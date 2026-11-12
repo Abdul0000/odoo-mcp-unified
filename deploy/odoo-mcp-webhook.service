@@ -12,10 +12,7 @@ EnvironmentFile=/etc/odoo-mcp/webhook.env
 ExecStart=/usr/bin/python3 /opt/odoo-mcp/deploy/webhook_receiver.py
 Restart=always
 RestartSec=2
-# This service runs unprivileged as odoo-mcp. It needs sudo only for the
-# narrowly allowlisted systemctl restart odoo-mcp.service command in
-# /etc/sudoers.d/odoo-mcp-deploy, so NoNewPrivileges must not block sudo.
-NoNewPrivileges=false
+NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/var/log/odoo-mcp /opt/odoo-mcp
