@@ -34,6 +34,8 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   "$PYTHON" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
 fi
+# The deployment unit runs as root, but the API reads the release and venv as odoo-mcp.
+chown -R odoo-mcp:odoo-mcp "$RELEASE" "$VENV"
 ln -sfn "$VENV" "$RELEASE/.venv"
 UVICORN_SHEBANG="$(head -n 1 "$VENV/bin/uvicorn")"
 if [[ "$UVICORN_SHEBANG" != "#!$VENV/bin/python"* ]]; then
