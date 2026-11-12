@@ -1,0 +1,11 @@
+[Unit]
+Description=Odoo MCP deployment for commit %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/odoo-mcp/webhook.env
+ExecStart=/opt/odoo-mcp/deploy/deploy.sh %i
