@@ -82,5 +82,5 @@ class CommandRunnerService:
             return CommandResult(command=["list_files", relative_path], cwd=str(project), exit_code=0, stdout="\n".join(lines)[:_MAX_OUTPUT])
 
         runner = RepoService()
-        env = runner._git_env() if command.startswith("git_") else None
-        return runner._run(argv, cwd, timeout_seconds, env=env)
+        runner_env = runner._git_env() if command.startswith("git_") else None
+        return runner._run(argv, cwd, timeout_seconds, env=runner_env)
