@@ -595,7 +595,6 @@ _PROVIDER_TOOL_NAMES = {
     "ws.lint",
     "ws.commit",
     "ws.discard",
-    "workspace.run",
     "connector.health",
     "skills.list",
     "skills.read",

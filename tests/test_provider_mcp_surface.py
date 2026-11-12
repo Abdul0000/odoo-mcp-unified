@@ -21,7 +21,6 @@ _PROVIDER_TOOLS = {
     "ws_lint",
     "ws_commit",
     "ws_discard",
-    "workspace_run",
     "connector_health",
     "skills_list",
     "skills_read",
@@ -383,14 +382,3 @@ def test_provider_health_exposes_live_identity_and_workflow_progress():
     assert structured["runtime"]["commit_sha"]
     assert structured["runtime"]["prompt_sha256"]
     assert {"active_count", "active", "recent"} <= set(structured["workflow_progress"])
-
-
-def test_workspace_runner_is_exposed_as_read_only_provider_tool():
-    tools = {tool["name"]: tool for tool in _mcp_tools_list()}
-    tool = tools["workspace_run"]
-    assert tool["annotations"]["readOnlyHint"] is True
-    assert tool["annotations"]["idempotentHint"] is True
-    assert set(tool["inputSchema"]["properties"]) >= {
-        "project_path", "command", "relative_path", "pattern", "timeout_seconds"
-    }
-

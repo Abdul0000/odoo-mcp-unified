@@ -645,32 +645,6 @@ For an explicit user-authorized force push and deploy:
 
 The force override applies only to `workflow.verify_against_core`. Blocking QA, Python/XML syntax, parser, manifest, and module-structure failures still stop deployment. Override mode, reason, and accepted findings are attached to the safe-deploy request and returned in workflow results for auditability.
 
-## Guarded local workspace command runner
-
-The provider MCP surface exposes `workspace_run` for bounded commands in an existing Git checkout beneath `WORKSPACE_ROOT`. It is not an interactive or arbitrary shell.
-
-Supported command names:
-- `git_status`, `git_diff`
-- `python_compile` (one Python file or a directory)
-- `pytest` (optional bounded test path/pattern)
-- `ruff_check`
-- `list_files`
-
-The runner builds argv arrays directly; it does not invoke a shell or accept shell operators, pipelines, arbitrary executable names, or command text. It rejects paths outside the configured workspace, requires a Git checkout, limits execution to 180 seconds, and truncates command output. It runs with the MCP service account's OS permissions. Production service secrets and deployment paths must not be placed under `WORKSPACE_ROOT`.
-
-Example MCP request:
-
-```json
-{
-  "project_path": "/workspace/repos/my-project",
-  "command": "pytest",
-  "relative_path": ".",
-  "timeout_seconds": 60
-}
-```
-
-The tool is for inspecting/testing local repo checkouts. Source edits and Git push still use the existing approved repository/workspace workflows.
-
 ## Workspace tools (`ws_*`) — stateless coding lane
 
 A coding loop that needs no checkout and no persistent disk (built for Render free).
