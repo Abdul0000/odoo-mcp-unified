@@ -24,7 +24,7 @@ if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMI
 fi
 RELEASE="$ROOT/releases/$COMMIT"
 if [[ ! -d "$RELEASE" ]]; then
-  git -c safe.directory="$MIRROR" clone --shared --no-checkout "$MIRROR" "$RELEASE"
+  git -c safe.directory="$MIRROR" -c safe.directory="$ROOT" clone --shared --no-checkout "$MIRROR" "$RELEASE"
   git -C "$RELEASE" checkout --detach "$COMMIT"
 fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
