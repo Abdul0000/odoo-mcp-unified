@@ -30,13 +30,20 @@ fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
 VENV="$ROOT/venvs/$REQ_HASH"
 if [[ ! -x "$VENV/bin/python" ]]; then
-  TMP_VENV="$ROOT/venvs/.build-$REQ_HASH-$$"
-  rm -rf "$TMP_VENV"
-  "$PYTHON" -m venv "$TMP_VENV"
-  "$TMP_VENV/bin/pip" install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
-  mv "$TMP_VENV" "$VENV"
+  # Virtualenv scripts embed their interpreter's absolute path in their shebang.
+  # Build directly at the final stable path; moving a temporary venv breaks
+  # console scripts such as uvicorn because their shebangs retain the temp path.
+  rm -rf "$VENV"
+  "$PYTHON" -m venv "$VENV"
+  "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
 fi
 ln -sfn "$VENV" "$RELEASE/.venv"
+UVICORN_SHEBANG="$(head -n 1 "$VENV/bin/uvicorn")"
+if [[ "$UVICORN_SHEBANG" != "#!$VENV/bin/python"* ]]; then
+  echo "Invalid uvicorn interpreter shebang: $UVICORN_SHEBANG" >&2
+  exit 1
+fi
+"$VENV/bin/python" -m uvicorn --version
 (cd "$RELEASE" && "$VENV/bin/python" -m compileall -q odoo_agent_server deploy)
 (cd "$RELEASE" && "$VENV/bin/python" -c "from odoo_agent_server.main import app; assert app")
 OLD_TARGET="$(readlink "$ROOT/current" 2>/dev/null || true)"
