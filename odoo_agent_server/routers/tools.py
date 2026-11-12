@@ -122,6 +122,7 @@ from ..schemas import (
     RepoWriteManySmartRequest,
     RepoWriteItem,
     RepoWriteRequest,
+    WorkspaceRunRequest,
     SelfRunRequest,
     JobRecord,
     JobStatus,
@@ -615,6 +616,13 @@ _TOOL_DESCRIPTORS = [
         title="Clone or update repository", description="Clone or refresh target repo and checkout/pull the target branch before coding", requires_approval=True),
     ToolDescriptor(name="repo.list_custom_modules",
         title="List custom Odoo modules", description="Discover custom Odoo modules from repo __manifest__.py files", read_only=True),
+    ToolDescriptor(
+        name="workspace.run",
+        title="Run a guarded development command",
+        description="Run one fixed command in a local Git checkout under WORKSPACE_ROOT: git status/diff, Python compile, pytest, Ruff, or bounded file listing. No shell strings, shell operators, arbitrary executables, or writes outside the checkout.",
+        read_only=True,
+        idempotent=True,
+    ),
     ToolDescriptor(name="repo.list",
         title="List repository files", description="List files inside an allowed project path", read_only=True),
     ToolDescriptor(name="repo.read",
@@ -1079,6 +1087,7 @@ _TOOL_INPUT_MODELS = {
     "qa.self_run": SelfRunRequest,
     "repo.prepare": RepoPrepareRequest,
     "repo.list_custom_modules": RepoCustomModulesRequest,
+    "workspace.run": WorkspaceRunRequest,
     "repo.list": RepoListRequest,
     "repo.read": RepoReadRequest,
     "repo.read_range": RepoReadRangeRequest,
@@ -9480,6 +9489,32 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         return repo_prepare(RepoPrepareRequest.model_validate(args))
     if name == "repo.list_custom_modules":
         return repo_custom_modules(RepoCustomModulesRequest.model_validate(args))
+    if name == "workspace.run":
+        from ..services.command_runner_service import CommandRunnerService
+        req = WorkspaceRunRequest.model_validate(args)
+        try:
+            result = await asyncio.to_thread(
+                CommandRunnerService().run,
+                req.project_path,
+                req.command,
+                relative_path=req.relative_path,
+                pattern=req.pattern,
+                timeout_seconds=req.timeout_seconds,
+            )
+        except Exception as exc:
+            JsonStore().log_audit("workspace.run", "blocked_or_failed", req.command, {
+                "project_path": req.project_path,
+                "relative_path": req.relative_path,
+                "error_type": type(exc).__name__,
+            })
+            raise
+        JsonStore().log_audit("workspace.run", "ok" if result.exit_code == 0 else "failed", req.command, {
+            "project_path": req.project_path,
+            "relative_path": req.relative_path,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+        })
+        return result
     if name == "repo.list":
         req = RepoListRequest.model_validate(args)
         return RepoService().list_files(req.project_path, req.relative_path, req.max_depth, req.max_items)
