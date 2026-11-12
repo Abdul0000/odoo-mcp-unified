@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small stdlib-only GitHub push receiver. Bind to loopback behind HTTPS proxy."""
+"""Signed GitHub push receiver; deployment is delegated to a fixed systemd unit."""
 from __future__ import annotations
 
 import hashlib
@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = os.environ.get("DEPLOY_REPOSITORY", "Abdul0000/odoo-mcp-unified")
 BRANCH = os.environ.get("DEPLOY_BRANCH", "master")
 SECRET_FILE = Path(os.environ.get("DEPLOY_WEBHOOK_SECRET_FILE", "/etc/odoo-mcp/webhook.secret"))
-DEPLOY_SCRIPT = Path(os.environ.get("DEPLOY_SCRIPT", "/opt/odoo-mcp/deploy/deploy.sh"))
+DEPLOY_UNIT = os.environ.get("DEPLOY_SYSTEMD_UNIT", "odoo-mcp-deploy@")
 MAX_BODY = 1_000_000
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _seen: set[str] = set()
@@ -30,7 +30,7 @@ def valid_signature(body: bytes, supplied: str, secret: bytes) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OdooMCPDeploy/1.0"
+    server_version = "OdooMCPDeploy/1.1"
 
     def respond(self, status: int, payload: dict) -> None:
         raw = json.dumps(payload).encode()
@@ -97,22 +97,21 @@ class Handler(BaseHTTPRequestHandler):
                 _seen.clear()
                 _seen.add(delivery)
         try:
-            log_dir = Path(os.environ.get("DEPLOY_LOG_DIR", "/var/log/odoo-mcp"))
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log = (log_dir / "deploy.log").open("ab")
-            subprocess.Popen(
-                [str(DEPLOY_SCRIPT), commit],
+            # The instance template accepts only a validated hexadecimal commit
+            # as its sole argument. The unprivileged receiver cannot execute
+            # arbitrary commands as root.
+            subprocess.run(
+                ["/usr/bin/systemctl", "start", f"{DEPLOY_UNIT}{commit}.service"],
+                check=True,
                 stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                close_fds=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
             )
-            log.close()
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             with _seen_lock:
                 _seen.discard(delivery)
-            self.respond(500, {"error": "could_not_start_deployment"})
+            self.respond(503, {"error": "could_not_queue_deployment"})
             return
         self.respond(202, {"status": "accepted", "commit": commit, "delivery": delivery})
 
