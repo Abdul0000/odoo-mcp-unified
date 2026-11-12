@@ -101,7 +101,7 @@ class Handler(BaseHTTPRequestHandler):
             # as its sole argument. The unprivileged receiver cannot execute
             # arbitrary commands as root.
             subprocess.run(
-                ["/usr/bin/sudo", "-n", "/usr/bin/systemctl", "start", f"{DEPLOY_UNIT}{commit}.service"],
+                ["/usr/bin/sudo", "-n", "/usr/local/sbin/odoo-mcp-queue-deploy", commit],
                 check=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
