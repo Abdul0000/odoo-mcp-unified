@@ -1101,6 +1101,15 @@ class FrontendVisualImplementRequest(BaseModel):
         return value
 
 
+
+class WorkspaceRunRequest(BaseProjectRequest):
+    """Run one fixed, bounded development command in an approved local checkout."""
+
+    command: Literal["git_status", "git_diff", "python_compile", "pytest", "ruff_check", "list_files"]
+    relative_path: str = Field(default=".", max_length=240)
+    pattern: str | None = Field(default=None, max_length=120)
+    timeout_seconds: int = Field(default=60, ge=1, le=180)
+
 class RepoListRequest(BaseProjectRequest):
     relative_path: str = Field(default=".")
     max_depth: int = Field(default=3, ge=1, le=8)
