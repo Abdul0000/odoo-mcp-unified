@@ -1,4 +1,4 @@
-"""Single-consumer worker: python -m odoo_agent_server.execution_worker.
+"""Bounded task worker: python -m odoo_agent_server.execution_worker.
 
 Only this service needs Docker access. The HTTP API enqueues work in JSON files.
 Commands run without network or credentials in resource-limited containers.
@@ -6,12 +6,14 @@ Commands run without network or credentials in resource-limited containers.
 from __future__ import annotations
 
 import fcntl
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import selectors
 import signal
 import subprocess
+import threading
 import time
 
 import httpx
@@ -26,9 +28,15 @@ class ExecutionWorker:
         self.service = service or ExecutionService()
         self.store = self.service.store
         self.stopping = False
+        self._heartbeat_lock = threading.Lock()
+        self._last_heartbeat = 0.0
 
     def heartbeat(self):
-        (self.store.root / "worker-heartbeat").write_text(str(time.time()))
+        with self._heartbeat_lock:
+            if time.monotonic() - self._last_heartbeat < 1:
+                return
+            self.store._write(self.store.root / "worker-heartbeat", time.time())
+            self._last_heartbeat = time.monotonic()
 
     @staticmethod
     def container_name(process_id):
@@ -49,8 +57,10 @@ class ExecutionWorker:
             clean = self.remove_container(record["id"])
             if clean is False:
                 self.store.update(record["request"]["workspace_id"], "workspace", status="quarantined", error="Container cleanup failed during recovery")
-            self.store.update(record["id"], "process", status="cleanup_failed" if clean is False else "interrupted",
-                              error="Worker restarted; inspect the workspace before retrying with a new request_id")
+                self.store.update(record["id"], "process", status="cleanup_failed", error="Container cleanup failed during recovery")
+            else:
+                self.service.finish_process(record, "interrupted",
+                                            error="Worker restarted; inspect the workspace before retrying with a new request_id")
         for record in self.store.active("agent"):
             self.store.update(record["id"], "agent", status="needs_review", error="Worker restarted during an agent turn; inspect task and process state before resubmitting")
 
@@ -64,7 +74,7 @@ class ExecutionWorker:
                 "--security-opt", "no-new-privileges", "--pids-limit", "128", "--cpus", "1",
                 "--memory", settings.execution_memory, "--memory-swap", settings.execution_memory,
                 "--user", f"{stat.st_uid}:{stat.st_gid}",
-                "--mount", f"type=bind,src={root},dst=/workspace",
+                "--mount", f"type=bind,src={root},dst=/workspace" + (",readonly" if req.check_name else ""),
                 "--mount", f"type=bind,src={root / '.git'},dst=/workspace/.git,readonly",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
                 "--workdir", "/workspace" + ("/" + str(cwd) if str(cwd) != "." else ""),
@@ -83,7 +93,8 @@ class ExecutionWorker:
         try:
             with (logs / f"{process_id}.log").open("wb", buffering=0) as output, selectors.DefaultSelector() as selector:
                 proc = subprocess.Popen(self.command(record), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, env={"PATH": os.defpath, "HOME": "/tmp"}, start_new_session=True)
+                                        stderr=subprocess.STDOUT, cwd=self.service.root(req.workspace_id),
+                                        env={"PATH": os.defpath, "HOME": "/tmp"}, start_new_session=True)
                 os.set_blocking(proc.stdout.fileno(), False)
                 os.set_blocking(proc.stdin.fileno(), False)
                 selector.register(proc.stdout, selectors.EVENT_READ)
@@ -149,8 +160,12 @@ class ExecutionWorker:
                 if proc.stdin and not proc.stdin.closed:
                     proc.stdin.close()
             self.store.take_input(process_id)
-            self.store.update(process_id, "process", status=status, exit_code=code, error=error,
-                              duration_seconds=round(time.monotonic() - start, 3), output_bytes=min(size, settings.execution_log_max_bytes))
+            details = {"exit_code": code, "error": error, "duration_seconds": round(time.monotonic() - start, 3),
+                       "output_bytes": min(size, settings.execution_log_max_bytes)}
+            if status == "cleanup_failed":
+                self.store.update(process_id, "process", status=status, **details)
+            else:
+                self.service.finish_process(record, status, **details)
 
     def agent_turn(self, record):
         from .execution_tools import AGENT_TOOL_NAMES, dispatch_execution, execution_function_tools
@@ -240,20 +255,32 @@ class ExecutionWorker:
         with (self.store.root / "worker.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.recover()
-            while not self.stopping:
-                self.heartbeat()
-                process = self.store.claim("process")
-                if process:
-                    self.execute(process)
-                    continue
-                agent = self.store.claim("agent")
-                if agent:
-                    try:
-                        self.agent_turn(agent)
-                    except Exception as exc:
-                        self.store.update(agent["id"], "agent", status="needs_review", error=f"Agent turn interrupted ({type(exc).__name__})")
-                    continue
-                time.sleep(0.5)
+            with ThreadPoolExecutor(max_workers=settings.execution_max_workers) as pool:
+                running = {}
+                while not self.stopping:
+                    self.heartbeat()
+                    for future, process in list(running.items()):
+                        if future.done():
+                            try:
+                                future.result()
+                            except Exception as exc:
+                                self.store.update(process["id"], "process", status="needs_review",
+                                                  error=f"Worker checkpoint failed ({type(exc).__name__}); inspect before retry")
+                            del running[future]
+                    if len(running) < settings.execution_max_workers:
+                        process = self.store.claim("process")
+                        if process:
+                            running[pool.submit(self.execute, process)] = process
+                            continue
+                    if not running:
+                        agent = self.store.claim("agent")
+                        if agent:
+                            try:
+                                self.agent_turn(agent)
+                            except Exception as exc:
+                                self.store.update(agent["id"], "agent", status="needs_review", error=f"Agent turn interrupted ({type(exc).__name__})")
+                            continue
+                    time.sleep(0.1)
 
 
 def main():

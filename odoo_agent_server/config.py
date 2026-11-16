@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     execution_root: str = Field(default="/var/lib/odoo-mcp/execution", alias="ODOO_AGENT_EXECUTION_ROOT")
     execution_image: str = Field(default="odoo-mcp-execution:local", alias="ODOO_AGENT_EXECUTION_IMAGE")
     execution_max_pending: int = Field(default=10, ge=1, le=100, alias="ODOO_AGENT_EXECUTION_MAX_PENDING")
+    execution_max_workers: int = Field(default=1, ge=1, le=4, alias="ODOO_AGENT_EXECUTION_MAX_WORKERS")
     execution_log_max_bytes: int = Field(default=2_000_000, ge=32000, le=20_000_000, alias="ODOO_AGENT_EXECUTION_LOG_MAX_BYTES")
     execution_memory: str = Field(default="384m", pattern=r"^[1-9][0-9]*[mg]$", alias="ODOO_AGENT_EXECUTION_MEMORY")
     agent_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")

@@ -1,16 +1,17 @@
 """Execution tool registry shared by MCP and the autonomous worker."""
 import time
 
-from .execution_schemas import AgentId, AgentStart, ExecutionRequest, ProcessId, ProcessInput, ProcessPoll, ProcessStart, WorkspaceFiles, WorkspaceId, WorkspaceOpen, WorkspacePublish
+from .execution_schemas import AgentId, AgentStart, ExecutionRequest, ProcessId, ProcessInput, ProcessPoll, ProcessStart, TaskPlan, WorkspaceFiles, WorkspaceId, WorkspaceOpen, WorkspacePublish
 from .services.execution_service import ExecutionService
 
 
 EXECUTION_TOOLS = {
     "execution.status": (ExecutionRequest, "Check execution worker heartbeat and autonomous model configuration.", True),
-    "execution.workspace_open": (WorkspaceOpen, "Create an isolated task clone from a prepared client checkout; request_id makes retries idempotent.", False),
+    "execution.workspace_open": (WorkspaceOpen, "Open isolated task on the configured branch; fetch and fast-forward by default, preserve source files. Retries are idempotent.", False),
+    "execution.task_plan": (TaskPlan, "Declare immutable named verification commands and optional skills once per task. Failed checks allow repair; current-tree passes are required to publish.", False),
     "execution.workspace_status": (WorkspaceId, "Read task branch and changed files. Work remains unpublished until explicitly pushed and deployed.", True),
-    "execution.files": (WorkspaceFiles, "List/read/search/write task files or inspect diff. Read before overwriting and supply expected_sha256.", False),
-    "execution.publish": (WorkspacePublish, "Commit task changes and optionally push to the task or configured deployment branch; verifies remote SHA. This does not deploy Odoo.", False),
+    "execution.files": (WorkspaceFiles, "List/read/search/diff or edit task files. Batch edits support exact replace/write/rename/delete with prevalidation and rollback. Existing edits require expected_sha256.", False),
+    "execution.publish": (WorkspacePublish, "Require current-tree check evidence, commit and push to the configured branch, verify remote SHA. Does not deploy Odoo.", False),
     "execution.process_start": (ProcessStart, "Queue argv in the task container: no network or credentials. Returns process_id, not a completed result.", False),
     "execution.process_poll": (ProcessPoll, "Read bounded command logs by byte offset and terminal exit status.", True),
     "execution.process_input": (ProcessInput, "Send bounded stdin to a queued/running command; eof closes input.", False),
@@ -19,7 +20,7 @@ EXECUTION_TOOLS = {
     "execution.agent_status": (AgentId, "Read persistent agent progress, token usage and final summary.", True),
     "execution.agent_cancel": (AgentId, "Stop an agent task and request cancellation of its running command.", False),
 }
-AGENT_TOOL_NAMES = {"execution_workspace_status", "execution_files", "execution_process_start", "execution_process_poll"}
+AGENT_TOOL_NAMES = {"execution_task_plan", "execution_workspace_status", "execution_files", "execution_process_start", "execution_process_poll"}
 
 
 def dispatch_execution(name, args, *, service=None):
@@ -34,10 +35,13 @@ def dispatch_execution(name, args, *, service=None):
         return {"status": "ready" if age is not None and age < 120 else "worker_unavailable",
                 "heartbeat_age_seconds": round(age, 1) if age is not None else None,
                 "mode": "chatgpt_mcp", "requires_model_key": False,
+                "max_parallel_commands": settings.execution_max_workers,
                 "agent_configured": bool(settings.agent_api_key and settings.agent_model),
                 "execution": "Docker; no network; task-only mount; bounded memory, runtime and logs"}
     if name == "execution.workspace_open":
         return svc.open(req)
+    if name == "execution.task_plan":
+        return svc.plan(req)
     if name == "execution.workspace_status":
         return svc.status(req.workspace_id)
     if name == "execution.files":

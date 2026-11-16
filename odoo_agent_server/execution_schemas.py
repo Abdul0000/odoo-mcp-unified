@@ -12,6 +12,8 @@ class WorkspaceOpen(ExecutionRequest):
     client_name: str | None = None
     project_path: str | None = None
     task_description: str = Field(min_length=1, max_length=12000)
+    branch: str | None = Field(default=None, max_length=200)
+    fresh: bool = True
     request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
@@ -19,12 +21,36 @@ class WorkspaceId(ExecutionRequest):
     workspace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
 
 
+class TaskCheck(ExecutionRequest):
+    name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    argv: list[str] = Field(min_length=1, max_length=100)
+    cwd: str = "."
+    timeout_seconds: int = Field(default=120, ge=1, le=1800)
+
+
+class TaskPlan(WorkspaceId):
+    checks: list[TaskCheck] = Field(min_length=1, max_length=12)
+    skills: list[str] = Field(default_factory=list, max_length=5)
+    max_repair_attempts: int = Field(default=3, ge=1, le=10)
+
+
+class FileEdit(ExecutionRequest):
+    operation: Literal["write", "replace", "delete", "rename"] = "replace"
+    path: str
+    expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    content: str | None = Field(default=None, max_length=500000)
+    old_text: str | None = Field(default=None, min_length=1, max_length=500000)
+    new_text: str | None = Field(default=None, max_length=500000)
+    destination: str | None = None
+
+
 class WorkspaceFiles(WorkspaceId):
-    operation: Literal["list", "read", "write", "search", "diff"] = "list"
+    operation: Literal["list", "read", "write", "batch", "search", "diff"] = "list"
     path: str = "."
     content: str | None = Field(default=None, max_length=500000)
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     query: str | None = Field(default=None, min_length=1, max_length=1000)
+    edits: list[FileEdit] | None = Field(default=None, min_length=1, max_length=25)
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=16000, ge=1, le=32000)
 
@@ -40,6 +66,7 @@ class WorkspacePublish(WorkspaceId):
 class ProcessStart(WorkspaceId):
     argv: list[str] = Field(min_length=1, max_length=100)
     cwd: str = "."
+    check_name: str | None = Field(default=None, max_length=80)
     timeout_seconds: int = Field(default=120, ge=1, le=1800)
     request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
