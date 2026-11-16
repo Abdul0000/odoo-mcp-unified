@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git nodejs npm ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends git nodejs ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt requirements-dev.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt ruff \
@@ -7,3 +7,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt ruff \
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /workspace
 CMD ["python", "--version"]
+# Debian's npm package pulls hundreds of build packages. Install only the pinned
+# official npm distribution, retaining the existing Python/Node image layers.
+RUN python -c "import base64,hashlib,io,pathlib,tarfile,urllib.request; data=urllib.request.urlopen('https://registry.npmjs.org/npm/-/npm-10.9.4.tgz',timeout=60).read(); expected='OnUG836FwboQIbqtefDNlyR0gTHzIfwRfE3DuiNewBvnMnWEpB0VEXwBlFVgqpNzIgYo/MHh3d2Hel/pszapAA=='; assert base64.b64encode(hashlib.sha512(data).digest()).decode()==expected,'npm checksum mismatch'; root=pathlib.Path('/opt/npm'); root.mkdir(); tarfile.open(fileobj=io.BytesIO(data),mode='r:gz').extractall(root,filter='data'); pathlib.Path('/usr/local/bin/npm').symlink_to(root/'package/bin/npm-cli.js'); pathlib.Path('/usr/local/bin/npx').symlink_to(root/'package/bin/npx-cli.js')" \
+    && npm --version
