@@ -210,6 +210,7 @@ def test_publish_requires_checks_for_exact_content_and_repairs_are_allowed(execu
     (root / "hello.py").write_text("syntax error!\n")
     assert verify(service, ws, monkeypatch)["status"] == "failed"
     assert service.status(ws)["phase"] == "repair"
+    assert service.status(ws)["next_call"]["tool"] == "execution_files"
     # Investigation and repairs remain available after a failed check.
     read = service.files(WorkspaceFiles(workspace_id=ws, operation="read", path="hello.py"))
     service.files(WorkspaceFiles(workspace_id=ws, operation="write", path="hello.py", content="VALUE = 1\n", expected_sha256=read["sha256"]))
@@ -226,7 +227,8 @@ def test_publish_requires_checks_for_exact_content_and_repairs_are_allowed(execu
 
 def test_verification_plan_cannot_be_downgraded_or_command_substituted(execution):
     service, ws, _, _ = execution
-    service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "test", "argv": ["python", "-m", "pytest"]}]))
+    planned = service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "test", "argv": ["python", "-m", "pytest"]}]))
+    assert planned["phase"] == "inspect" and planned["next_call"]["tool"] == "execution_files"
     with pytest.raises(HTTPException, match="409"):
         service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "test", "argv": ["true"]}]))
     with pytest.raises(HTTPException, match="409"):
@@ -360,6 +362,8 @@ def test_bounded_parallel_worker_runs_distinct_tasks_without_mixing_state(execut
     assert set(seen) == {ws, other}
     assert not service.store.pending("process")
     assert service.workspace(ws)["request"]["task_description"] != service.workspace(other)["request"]["task_description"]
+    recent = dispatch_execution("execution_status", {}, service=service)["recent_tasks"]
+    assert {row["workspace_id"] for row in recent} == {ws, other}
 
 
 def test_agent_missing_config_is_explicit(execution, monkeypatch):

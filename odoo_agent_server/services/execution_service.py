@@ -117,7 +117,9 @@ class ExecutionService:
             source_branch = git(["branch", "--show-current"], source).strip()
             if client and source_branch != client.branch:
                 raise HTTPException(409, "Source checkout branch differs from the configured client branch; source preserved")
-            git(["clone", "--no-hardlinks", "--no-checkout", "--", str(source), str(path)], source)
+            # Local clones hard-link immutable Git objects; worktree files and the
+            # index stay independent. Containers mount all Git metadata read-only.
+            git(["clone", "--local", "--no-checkout", "--", str(source), str(path)], source)
             configured_branch = client.branch if client else source_branch
             branch = request.branch or configured_branch
             if not RepoService()._safe_branch_name(branch):
@@ -169,13 +171,15 @@ class ExecutionService:
         next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id}}
         if not record.get("checks"):
             next_call = {"tool": "execution_task_plan", "arguments": {"workspace_id": workspace_id}, "requires": ["checks"]}
-        elif verification.get("next_check"):
+        elif verification.get("next_check") and phase not in {"inspect", "repair"}:
             check = verification["next_check"]
             next_call = {"tool": "execution_process_start", "arguments": {"workspace_id": workspace_id, **check,
                          "check_name": check["name"], "request_id": f"check-{workspace_id[:8]}-{os.urandom(6).hex()}"}}
             next_call["arguments"].pop("name")
         elif verification.get("ready") and phase != "done":
             next_call = {"tool": "execution_publish", "arguments": {"workspace_id": workspace_id}, "requires": ["message", "request_id"]}
+        if phase == "repair":
+            next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id, "operation": "diff"}}
         if verification.get("needs_input") or phase in {"needs_review", "needs_input"}:
             next_call = None
         if busy:

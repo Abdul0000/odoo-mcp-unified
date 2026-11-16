@@ -176,6 +176,9 @@ class ExecutionStore:
     def pending(self, kind):
         return [self.decode(row) for row in self._rows(kind) if row["status"] in {"queued", "running"}]
 
+    def recent(self, kind, limit=8):
+        return [self.decode(row) for row in sorted(self._rows(kind), key=lambda row: row["updated"], reverse=True)[:limit]]
+
     def send_input(self, process_id, data, eof):
         with self._lock(self.root / "queue.lock"):
             record = self.get(process_id, "process")

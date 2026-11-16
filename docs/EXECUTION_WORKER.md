@@ -55,7 +55,9 @@ Refresh the ChatGPT custom MCP connection to discover the added tools.
 2. `execution_workspace_open(client_name, task_description, request_id)` creates a
    separate local clone on the configured branch. It fetches and fast-forwards
    the task clone by default; the source checkout is never moved. Dirty source
-   and diverged histories are rejected with files preserved. A different branch
+   and unpublished/diverged histories are rejected with files preserved. Immutable
+   Git objects use local hard links to avoid copying large pack files; worktree
+   files/index remain independent and container Git metadata stays read-only. A different branch
    requires an explicit `branch`. `fresh=false` is available for offline inspection;
    publishing to an existing source branch still requires a known remote base.
 3. Declare acceptance commands once with `execution_task_plan(workspace_id,
@@ -84,6 +86,8 @@ Refresh the ChatGPT custom MCP connection to discover the added tools.
    next call. Phases include inspect/edit/verify/repair/commit/push/done and explicit
    needs_input/needs_review. Each workspace owns its state independently of the
    legacy per-client workflow guard. Repeat searches and reads are allowed during repair.
+   `execution_status.recent_tasks` lists recent task IDs for resuming after a new
+   chat; its last-known phases are not verification proof. Refresh workspace status.
 7. `execution_publish` requires every planned check to pass against current source,
    then commits and optionally pushes. Default target is the configured branch.
    It rejects an advanced remote and never force-pushes or automatically rebases
