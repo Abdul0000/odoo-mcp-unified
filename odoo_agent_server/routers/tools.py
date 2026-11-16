@@ -24,6 +24,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..auth import AuthDependency
 from ..config import settings, get_odoo_clients, normalise_client
+from ..execution_tools import EXECUTION_TOOLS, dispatch_execution
 from ..schemas import (
     CommandResult,
     WsExtendRequest,
@@ -1181,6 +1182,8 @@ def list_tools(include_deprecated: bool = False, strict_names: bool = True) -> l
         )
 
     visible = _TOOL_DESCRIPTORS if include_deprecated else [t for t in _TOOL_DESCRIPTORS if not t.deprecated]
+    if not settings.execution_enabled:
+        visible = [t for t in visible if t.name not in EXECUTION_TOOLS]
     ordered = sorted(visible, key=lambda item: _agent_priority(item.name))
     result = [item.model_copy(update={"requires_approval": approval_required(item.name)}) for item in ordered]
     if strict_names:
@@ -9015,6 +9018,11 @@ _WS_HANDLERS: dict[str, tuple[type[BaseModel], typing.Callable[[typing.Any, typi
 
 # Single source of truth for ws.* input models (the registry above is derived, not duplicated).
 _TOOL_INPUT_MODELS.update({_name: _model for _name, (_model, _) in _WS_HANDLERS.items()})
+_TOOL_INPUT_MODELS.update({name: model for name, (model, _description, _readonly) in EXECUTION_TOOLS.items()})
+_TOOL_DESCRIPTORS.extend(
+    ToolDescriptor(name=name, description=description, read_only=readonly)
+    for name, (_model, description, readonly) in EXECUTION_TOOLS.items()
+)
 
 
 async def _dispatch_ws(name: str, args: dict) -> dict:
@@ -9055,6 +9063,8 @@ async def _dispatch(name: str, args: dict) -> object:
 
 
 async def _dispatch_inner(name: str, args: dict) -> object:
+    if name in EXECUTION_TOOLS:
+        return await asyncio.to_thread(dispatch_execution, name, args)
     if name.startswith("ws."):
         return await _dispatch_ws(name, args)
     if name == "connector.health":

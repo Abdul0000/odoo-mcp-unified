@@ -86,7 +86,7 @@ class ReaDependencyService:
             for model in models:
                 found.append({
                     "module": module, "model": model, "role": "defines" if own else "extends",
-                    "inherits": inherits if own else [x for x in inherits if x != model],
+                    "inherits": inherits,
                     "delegates": delegated, "fields": [f for f in fields if f["model"] == model],
                     "path": path, "line": cls.lineno,
                 })
@@ -323,7 +323,7 @@ class ReaDependencyService:
                 texts[path] = source
         fetch_files: dict[str, str] = {}
         fetch_bytes = sum(
-            len(text.encode("utf-8")) for _priority, path, _module, _meta in selected_files
+            len(texts[path].encode("utf-8")) for _priority, path, _module, _meta in selected_files
             if path in texts
         )
         for _priority, path, _module, meta in selected_files:
@@ -364,7 +364,8 @@ class ReaDependencyService:
 
         model_modules: dict[str, set[str]] = {}
         for row in model_rows:
-            model_modules.setdefault(row["model"], set()).add(row["module"])
+            if row["role"] == "defines":
+                model_modules.setdefault(row["model"], set()).add(row["module"])
         cross_links: list[dict[str, Any]] = []
         for row in model_rows:
             for parent in row["inherits"] + row["delegates"]:

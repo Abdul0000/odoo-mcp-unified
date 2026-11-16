@@ -21,6 +21,7 @@ from .path_service import resolve_allowed_path
 from .module_path_service import is_ignored_source_path
 from .lock_service import RepoLockService
 from .odoo_package_wiring_service import OdooPackageWiringService
+from .git_identity import same_repository
 
 _TEXT_LIMIT_HINT = "File is too large for this endpoint. Increase max_bytes or use a narrower file."
 
@@ -1224,9 +1225,7 @@ class RepoService:
         return name or "repo"
 
     def _remote_matches(self, configured: str, expected: str) -> bool:
-        if configured == expected:
-            return True
-        return self._repo_name_from_url(configured) == self._repo_name_from_url(expected)
+        return same_repository(configured, expected)
 
     def _safe_repo_folder_name(self, value: str) -> bool:
         return bool(re.fullmatch(r"[A-Za-z0-9._-]+", value)) and value not in {".", ".."}
@@ -1256,6 +1255,7 @@ class RepoService:
             )
 
     def _safe_join(self, project: Path, relative_path: str) -> Path:
+        project = project.resolve()
         if not relative_path:
             relative_path = "."
         rel = Path(relative_path)

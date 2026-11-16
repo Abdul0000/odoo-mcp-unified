@@ -49,6 +49,16 @@ fi
 "$VENV/bin/python" -m uvicorn --version
 (cd "$RELEASE" && "$VENV/bin/python" -m compileall -q odoo_agent_server deploy)
 (cd "$RELEASE" && "$VENV/bin/python" -c "from odoo_agent_server.main import app; assert app")
+# Once the isolated worker is installed, validate each release in its container
+# before switching the running API. No application secrets enter this container.
+if systemctl is-enabled --quiet odoo-mcp-execution.service; then
+  docker build -f "$RELEASE/deploy/Dockerfile.execution" -t odoo-mcp-execution:local "$RELEASE"
+  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --user "$(stat -c '%u:%g' "$RELEASE")" --env HOME=/tmp \
+    --memory 512m --cpus 1 --pids-limit 256 --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+    --mount "type=bind,src=$RELEASE,dst=/workspace,readonly" --workdir /workspace \
+    odoo-mcp-execution:local python -m pytest -q -p no:cacheprovider -o addopts=""
+fi
 OLD_TARGET="$(readlink "$ROOT/current" 2>/dev/null || true)"
 OLD_VENV="$(readlink "$ROOT/venv" 2>/dev/null || true)"
 switch_links() {
@@ -62,11 +72,15 @@ rollback() {
   if [[ -n "$OLD_TARGET" ]]; then ln -sfn "$OLD_TARGET" "$ROOT/current.rollback"; mv -Tf "$ROOT/current.rollback" "$ROOT/current"; fi
   if [[ -n "$OLD_VENV" ]]; then ln -sfn "$OLD_VENV" "$ROOT/venv.rollback"; mv -Tf "$ROOT/venv.rollback" "$ROOT/venv"; fi
   systemctl restart "$SERVICE" || true
+  systemctl try-restart odoo-mcp-execution.service || true
   exit "$code"
 }
 trap rollback ERR
 switch_links
 systemctl restart "$SERVICE"
+if systemctl is-active --quiet odoo-mcp-execution.service; then
+  systemctl restart odoo-mcp-execution.service
+fi
 healthy=0
 for ((i=0; i<HEALTH_TIMEOUT; i++)); do
   if curl --fail --silent "$HEALTH_URL" | grep -q '"status":"ok"'; then healthy=1; break; fi

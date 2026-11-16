@@ -102,7 +102,7 @@ class McpOperationGuardService:
         return data
 
     def before_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-        if tool_name in _FUNCTIONAL_OPERATION_TOOLS:
+        if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return None
         client_name = self._client_name(arguments)
         state = self._load(client_name)
@@ -208,7 +208,7 @@ class McpOperationGuardService:
         return None
 
     def after_tool_call(self, tool_name: str, arguments: dict[str, Any], structured: dict[str, Any]) -> None:
-        if tool_name in _FUNCTIONAL_OPERATION_TOOLS:
+        if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return
         client_name = self._client_name(arguments)
         state = self._load(client_name)
@@ -268,7 +268,7 @@ class McpOperationGuardService:
         """
         if not isinstance(structured, dict):
             return structured
-        if tool_name in _FUNCTIONAL_OPERATION_TOOLS:
+        if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return structured
         op = self._load(self._client_name(arguments)).get("mcp_operation_guard", {}).get("current", {})
         out = dict(structured)

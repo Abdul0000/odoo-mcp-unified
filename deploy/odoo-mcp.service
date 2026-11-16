@@ -10,6 +10,7 @@ Group=odoo-mcp
 WorkingDirectory=/opt/odoo-mcp/current
 EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
 Environment=PYTHONUNBUFFERED=1
+UMask=0007
 ExecStart=/opt/odoo-mcp/current/.venv/bin/uvicorn odoo_agent_server.main:app --host 127.0.0.1 --port 8080 --workers 1
 Restart=always
 RestartSec=2

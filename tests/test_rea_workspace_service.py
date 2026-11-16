@@ -15,7 +15,7 @@ class ReaWorkspaceSnapshotTests(unittest.TestCase):
         edit = service.edit(ws_id, [{
             "path": "models/rea_snapshot_probe.py",
             "op": "write",
-            "content": "from odoo import models\\n\\nclass ReaSnapshotProbe(models.Model):\\n    _name = 'rea.snapshot.probe'\\n",
+            "content": "from odoo import models\n\nclass ReaSnapshotProbe(models.Model):\n    _name = 'rea.snapshot.probe'\n",
         }])
         self.assertEqual(edit["status"], "ok", edit.get("findings"))
 

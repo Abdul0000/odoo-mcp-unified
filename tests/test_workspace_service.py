@@ -498,6 +498,14 @@ class Efficiency(unittest.TestCase):
         self.assertLess(best, 0.5)
         self.assertIsInstance(out, list)
 
+    def test_closest_shortlist_keeps_exact_and_nearby_source(self):
+        filler = [f"field_{i} = fields.Integer(default={i})" for i in range(4000)]
+        text = "\n".join([*filler, "def compute_discount(self):", "    return self.amount * 0.1"])
+        exact = _closest(text, "def compute_discount(self):\n    return self.amount * 0.2")
+        self.assertEqual(exact[0]["line"], 4001)
+        nearby = _closest(text, "def compute_discounts(self):")
+        self.assertEqual(nearby[0]["line"], 4001)
+
     def test_js_lint_is_cached_by_content(self):
         calls = []
         orig = _lint._lint_js_uncached

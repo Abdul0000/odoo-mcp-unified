@@ -1,0 +1,26 @@
+[Unit]
+Description=Odoo MCP isolated execution worker
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=odoo-executor
+Group=odoo-mcp
+SupplementaryGroups=docker
+WorkingDirectory=/opt/odoo-mcp/current
+EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
+Environment=PYTHONUNBUFFERED=1
+Environment=ODOO_AGENT_EXECUTION_ENABLED=true
+ExecStart=/opt/odoo-mcp/current/.venv/bin/python -m odoo_agent_server.execution_worker
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/odoo-mcp/execution
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

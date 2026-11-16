@@ -1,0 +1,69 @@
+"""Compact contracts for local task workspaces and the durable execution worker."""
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WorkspaceOpen(ExecutionRequest):
+    client_name: str | None = None
+    project_path: str | None = None
+    task_description: str = Field(min_length=1, max_length=12000)
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class WorkspaceId(ExecutionRequest):
+    workspace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+class WorkspaceFiles(WorkspaceId):
+    operation: Literal["list", "read", "write", "search", "diff"] = "list"
+    path: str = "."
+    content: str | None = Field(default=None, max_length=500000)
+    expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    query: str | None = Field(default=None, min_length=1, max_length=1000)
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=16000, ge=1, le=32000)
+
+
+class WorkspacePublish(WorkspaceId):
+    message: str = Field(min_length=1, max_length=2000)
+    branch: str | None = Field(default=None, max_length=200)
+    push: bool = True
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    approval_id: str | None = None
+
+
+class ProcessStart(WorkspaceId):
+    argv: list[str] = Field(min_length=1, max_length=100)
+    cwd: str = "."
+    timeout_seconds: int = Field(default=120, ge=1, le=1800)
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+class ProcessId(ExecutionRequest):
+    process_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+class ProcessPoll(ProcessId):
+    offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=16000, ge=1, le=32000)
+
+
+class ProcessInput(ProcessId):
+    data: str = Field(default="", max_length=16000)
+    eof: bool = False
+
+
+class AgentStart(WorkspaceId):
+    task: str = Field(min_length=1, max_length=16000)
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    max_turns: int = Field(default=20, ge=1, le=50)
+    max_output_tokens: int = Field(default=4000, ge=256, le=8000)
+
+
+class AgentId(ExecutionRequest):
+    task_id: str = Field(pattern=r"^[a-f0-9]{32}$")

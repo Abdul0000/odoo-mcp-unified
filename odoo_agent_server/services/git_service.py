@@ -13,6 +13,7 @@ from .client_resolver_service import ClientResolverService
 from .path_service import resolve_allowed_path
 from .repo_service import RepoService
 from .lock_service import RepoLockService
+from .git_identity import same_repository
 
 
 class GitService:
@@ -360,6 +361,4 @@ class GitService:
             )
 
     def _remote_matches(self, configured: str, expected: str) -> bool:
-        if configured == expected:
-            return True
-        return self.repo._repo_name_from_url(configured) == self.repo._repo_name_from_url(expected)
+        return same_repository(configured, expected)

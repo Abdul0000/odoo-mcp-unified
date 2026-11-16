@@ -645,6 +645,9 @@ _PROVIDER_TOOL_NAMES = {
 # Claude Code over a remote MCP transport). It keeps the server-owned composite
 # workflow, the workspace lane, polling, and discovery, and drops tools that are
 # only useful for manual REST/debug flows.
+from ..execution_tools import EXECUTION_TOOLS
+_PROVIDER_TOOL_NAMES.update(EXECUTION_TOOLS)
+
 _PROVIDER_TOOL_NAMES_MINIMAL = {
     "ws.open",
     "ws.status",
@@ -683,6 +686,7 @@ _PROVIDER_TOOL_NAMES_MINIMAL = {
 
 # Backward-compatible names retained for tests/imports; all provider routes use
 # the same minimal flow.
+_PROVIDER_TOOL_NAMES_MINIMAL.update(EXECUTION_TOOLS)
 _CLAUDE_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _CHATGPT_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _GROK_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
@@ -843,6 +847,9 @@ def _tools_for_profile(profile: str | None = None, *, minimal: bool = False) -> 
     # debugging/admin use, but not to provider agents. A lean subset is available
     # for clients with a tight planning-context budget.
     allowed = _PROVIDER_TOOL_NAMES_MINIMAL if minimal else _PROVIDER_TOOL_NAMES
+    if profile == "execution":
+        allowed = set(EXECUTION_TOOLS) | {"connector.health", "client.check", "workflow.agent_instructions",
+                                        "workflow.module_install_and_check", "jobs.get", "artifacts.read"}
     return [tool for tool in tools if tool.name in allowed]
 
 
@@ -890,23 +897,16 @@ def _remote_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
             non_null = [item for item in value.get("anyOf", []) if not (isinstance(item, dict) and item.get("type") == "null")]
             if len(non_null) == 1:
                 base = clean(non_null[0])
-                if "description" in value and isinstance(base, dict):
-                    base.setdefault("description", " ".join(str(value["description"]).split())[:36])
                 return base
-            return {
-                "type": "string",
-                "description": " ".join(str(value.get("description", "JSON value")).split())[:36],
-            }
+            return {"type": "string"}
 
         out: dict[str, Any] = {}
         for key, child in value.items():
             if key in {"$defs", "title", "default", "examples", "computed_fields"}:
                 continue
             if key == "description" and isinstance(child, str):
-                # Tool descriptions carry the workflow contract. Field docs only
-                # need a compact hint; long examples materially inflate every
-                # tools/list response and the provider's planning context.
-                out[key] = " ".join(str(child).split())[:36]
+                # Keep constraints and semantic tool descriptions. Repeated field
+                # prose inflates the manifest; full field docs remain in REST schemas.
                 continue
             if key == "additionalProperties":
                 # Keep strict false, but drop complex schemas under additionalProperties.
@@ -932,7 +932,7 @@ _claude_schema = _remote_compatible_schema
 def _tool_to_mcp(tool, profile: str | None = None) -> dict[str, Any]:
     title = getattr(tool, "title", None) or _humanize_tool_name(tool.name)
     output_schema = tool_output_schema(tool.name)
-    if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
+    if profile in {"provider", "claude", "chatgpt", "grok", "qwen", "execution"}:
         # Some remote-MCP builds are strict and can fail while
         # validating the initial tool list. For ChatGPT, keep initialize/tools/list
         # anonymous but mark every tool call as OAuth-protected so the client can
@@ -1119,7 +1119,8 @@ async def _handle_shell(
             },
         )
     if method == "tools/list":
-        return _shell_response(request_id, {"tools": _cached_tools_list(profile, minimal=minimal)})
+        manifest_profile = "execution" if request is not None and request.query_params.get("profile") == "execution" else profile
+        return _shell_response(request_id, {"tools": _cached_tools_list(manifest_profile, minimal=minimal)})
     if method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments") or {}

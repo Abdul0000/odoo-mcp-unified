@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import difflib
+import heapq
 import fnmatch
 import hashlib
 import json
@@ -97,8 +98,19 @@ def _closest(text: str, needle: str, limit: int = 3) -> list[dict[str, Any]]:
     positions: dict[str, list[int]] = {}
     for i, row in enumerate(lines):
         positions.setdefault(row.strip(), []).append(i)
+    candidates = list(positions)
+    if len(candidates) > 256:
+        # SequenceMatcher.ratio on every line dominates CPU on small OCI VMs.
+        # A trigram shortlist bounds expensive comparisons without changing edits:
+        # this function only returns advisory snippets after a failed match.
+        width = min(3, len(first))
+        grams = {first[i:i + width] for i in range(len(first) - width + 1)}
+        def rank(row):
+            row_grams = {row[i:i + width] for i in range(max(0, len(row) - width + 1))}
+            return (row == first, len(grams & row_grams), -abs(len(row) - len(first)))
+        candidates = heapq.nlargest(128, candidates, key=rank)
     scored = []
-    for cand in difflib.get_close_matches(first, list(positions), n=8, cutoff=0.6):
+    for cand in difflib.get_close_matches(first, candidates, n=8, cutoff=0.6):
         for i in positions[cand][:3]:
             window = "\n".join(lines[i : i + n])
             scored.append((difflib.SequenceMatcher(None, probe, window).ratio(), i))

@@ -66,7 +66,8 @@ def test_phase9_transitive_reverse_cycles_and_cross_module_model_fields():
     )
 
     assert {row["module"] for row in result["transitive_dependencies"]} == {"b_mod", "c_mod"}
-    assert {row["module"] for row in result["reverse_dependents"]} == {"d_mod", "e_mod"}
+    # b/c are reverse dependents too: the a -> b -> c -> a cycle is bidirectionally reachable.
+    assert {row["module"] for row in result["reverse_dependents"]} == {"b_mod", "c_mod", "d_mod", "e_mod"}
     assert any(set(cycle) >= {"a_mod", "b_mod", "c_mod"} for cycle in result["dependency_cycles"])
     assert any(
         row["source_module"] == "a_mod" and row["target_module"] == "b_mod" and row["kind"] == "extends_model"

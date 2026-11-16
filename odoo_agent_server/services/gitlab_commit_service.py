@@ -143,7 +143,7 @@ class GitLabRepo:
         if not exists:
             if not create_from:
                 raise GitHubError(404, f"branch '{branch}' does not exist")
-            self.request("POST", f"/repository/branches", {"branch": branch, "ref": create_from})
+            self.request("POST", "/repository/branches", {"branch": branch, "ref": create_from})
         current = self.head(branch)["commit"]
         if expected_head and current != expected_head:
             raise GitHubError(409, "branch head changed before commit", path=branch)
@@ -203,7 +203,6 @@ class GitLabRepo:
             if current == sha:
                 return
             raise GitHubError(422, "GitLab ref updates are performed through branch commits, not detached SHA updates", path=branch)
-        encoded = urllib.parse.quote(branch, safe="")
         self.request("POST", "/repository/branches", {"branch": branch, "ref": sha})
 
     def delete_branch(self, branch: str):
