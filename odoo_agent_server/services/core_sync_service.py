@@ -26,6 +26,11 @@ Safety:
 from __future__ import annotations
 
 import re
+import hashlib
+import json
+import functools
+import inspect
+from contextvars import ContextVar
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +45,60 @@ _sha_cache: dict[str, tuple[str | None, float]] = {}
 _negative_cache: dict[str, float] = {}
 _SHA_CACHE_TTL = 30.0  # don't hit odoosh.deployed_sha more than once per 30s
 _NEGATIVE_CACHE_TTL = 120.0
+_deadline = ContextVar("core_inspection_deadline", default=None)
+
+
+def bounded_inspection(fn):
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def async_wrapped(*args, **kwargs):
+            if _deadline.get() is not None:
+                return await fn(*args, **kwargs)
+            token = _deadline.set(time.monotonic() + 30)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                _deadline.reset(token)
+        return async_wrapped
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        if _deadline.get() is not None:
+            return fn(*args, **kwargs)
+        token = _deadline.set(time.monotonic() + 20)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _deadline.reset(token)
+    return wrapped
+
+
+def _remaining(default):
+    deadline = _deadline.get()
+    return max(0, min(default, deadline - time.monotonic())) if deadline else default
+
+
+def cache_root(remote_root, client):
+    if client is None:
+        return Path(remote_root)
+    identity = "|".join(str(getattr(client, name, "") or "") for name in
+                        ("name", "repo", "branch", "odoosh_ssh_host", "odoosh_ssh_user", "odoosh_db_name", "odoosh_odoo_path"))
+    key = hashlib.sha256(identity.encode()).hexdigest()[:24]
+    root_key = hashlib.sha256(str(remote_root).encode()).hexdigest()[:16]
+    return Path(settings.state_dir) / "core_sources" / key / root_key
+
+
+def source_roots(client_name=None):
+    client = _resolve_client_for_sync(client_name=client_name)
+    roots = ClientResolverService().search_roots(client)
+    return [cache_root(root, client) for root in roots]
+
+
+def _remote_root(root, client):
+    if client:
+        for remote in ClientResolverService().search_roots(client):
+            if Path(root) == cache_root(remote, client):
+                return remote
+    return root
 
 
 def _module_lock(remote_root: str, module_name: str) -> Lock:
@@ -79,7 +138,11 @@ def _deployed_sha(client: ResolvedClient | None = None) -> str | None:
     try:
         from .odoosh_service import OdooShService
 
-        result = OdooShService(client).deployed_sha()
+        budget = max(1, int(_remaining(10)))
+        try:
+            result = OdooShService(client).deployed_sha(timeout_seconds=budget)
+        except TypeError:  # compatibility with old integrations/test doubles
+            result = OdooShService(client).deployed_sha()
         if result.exit_code == 0 and result.stdout:
             lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
             sha = lines[-1] if lines else None
@@ -106,12 +169,23 @@ def _resolve_client_for_sync(client_name: str | None = None, client: ResolvedCli
 
 
 def _target_for_sync(client: ResolvedClient | None):
+    if client is not None and not (client.odoosh_ssh_host and client.odoosh_ssh_user):
+        return None  # Never borrow another client's process-global SSH identity.
     try:
         from .odoosh_service import OdooShService
 
         return OdooShService(client)._target()  # reuse client-aware SSH/key resolution
     except Exception:  # noqa: BLE001 - caller treats None as sync unavailable
         return None
+
+
+def source_transport_ready(client_name):
+    client = _resolve_client_for_sync(client_name=client_name)
+    target = _target_for_sync(client) if client else None
+    if target is None or _remaining(1) <= 0:
+        return False
+    key = f"transport:{target.user}@{target.host}:{target.port}:{target.key_path or ''}"
+    return _negative_cache.get(key, 0) <= time.monotonic()
 
 
 def _normalise_root(remote_root: str, client: ResolvedClient | None) -> str:
@@ -143,7 +217,7 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
     """
     if not settings.core_sync_enabled:
         return False
-    if not module_name or "/" in module_name or module_name.startswith("."):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module_name or ""):
         return False
 
     selected_client = _resolve_client_for_sync(client_name=client_name, client=client)
@@ -151,15 +225,32 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
     if target is None:
         return False
 
-    source_root = _normalise_root(remote_root, selected_client)
-    local_dir = Path(source_root) / module_name
+    source_root = _normalise_root(str(_remote_root(remote_root, selected_client)), selected_client)
+    local_dir = cache_root(source_root, selected_client) / module_name
+    managed = selected_client is not None
     marker = local_dir / ".synced_sha"
-    sha = _deployed_sha(selected_client)
     key_path = str(target.key_path or "")
-    negative_key = f"{target.user}@{target.host}:{target.port}:{key_path}:{source_root}:{module_name}:{sha or 'unknown'}"
+    transport_key = f"transport:{target.user}@{target.host}:{target.port}:{key_path}"
+    negative_key = f"{transport_key}:{source_root}:{module_name}"
+    identity_file = local_dir / ".source_identity.json"
+    if managed and identity_file.exists():
+        try:
+            identity = json.loads(identity_file.read_text())
+            if identity.get("root") == source_root and time.time() - identity.get("synced_at", 0) < settings.core_sync_max_age_seconds:
+                return True
+        except (OSError, ValueError):
+            pass
     now = time.monotonic()
+    if _remaining(timeout_seconds) <= 0 or _negative_cache.get(transport_key, 0) > now:
+        return False
     negative_until = _negative_cache.get(negative_key, 0.0)
     if negative_until > now and not (local_dir.exists() and any(local_dir.iterdir())):
+        return False
+    if managed and negative_until > now:
+        return False
+    sha = _deployed_sha(selected_client)
+    timeout_seconds = max(0, int(_remaining(timeout_seconds)))
+    if timeout_seconds <= 0:
         return False
 
     def remember_failure() -> None:
@@ -171,7 +262,10 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
                 _negative_cache.clear()
         _negative_cache[negative_key] = time.monotonic() + _NEGATIVE_CACHE_TTL
 
-    with _module_lock(remote_root, module_name):
+    lock = _module_lock(str(local_dir.parent), module_name)
+    if not lock.acquire(timeout=max(.001, _remaining(timeout_seconds))):
+        return False
+    try:
         if local_dir.exists() and local_dir.is_dir():
             has_content = any(local_dir.iterdir())
             if sha and has_content:
@@ -181,7 +275,7 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
                     cached_sha = None
                 if cached_sha == sha:
                     return True
-            elif not sha and has_content:
+            elif not managed and not sha and has_content:
                 try:
                     age = time.time() - local_dir.stat().st_mtime
                 except OSError:
@@ -196,7 +290,7 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
             local_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             remember_failure()
-            return local_dir.exists()
+            return False if managed else local_dir.exists()
 
         ssh_opts = [
             "-o", "StrictHostKeyChecking=accept-new",
@@ -213,18 +307,21 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
         ]
         try:
             completed = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_seconds + 5,
+                cmd, capture_output=True, text=True, timeout=max(1, _remaining(timeout_seconds)),
             )
         except (subprocess.TimeoutExpired, OSError):
             remember_failure()
-            return local_dir.exists() and any(local_dir.iterdir()) if local_dir.exists() else False
+            _negative_cache[transport_key] = time.monotonic() + _NEGATIVE_CACHE_TTL
+            return False if managed else local_dir.exists() and any(local_dir.iterdir())
 
         if completed.returncode != 0:
             # Sync failed (module may genuinely not exist on that root, or
             # transient network issue) — leave whatever was there before and
             # let the caller's normal not-found path handle it.
             remember_failure()
-            return local_dir.exists() and any(local_dir.iterdir()) if local_dir.exists() else False
+            if completed.returncode == 255 or any(word in (getattr(completed, "stderr", "") or "").lower() for word in ("permission denied", "connection timed out", "connection refused")):
+                _negative_cache[transport_key] = time.monotonic() + _NEGATIVE_CACHE_TTL
+            return False if managed else local_dir.exists() and any(local_dir.iterdir())
 
         if sha:
             try:
@@ -232,4 +329,8 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
             except OSError:
                 pass
         _negative_cache.pop(negative_key, None)
+        if managed:
+            identity_file.write_text(json.dumps({"root": source_root, "synced_at": time.time(), "sha": sha}))
         return True
+    finally:
+        lock.release()

@@ -260,3 +260,8 @@ def test_vetted_expert_deltas_stay_compact_and_in_existing_owners():
     assert "ON-DEMAND TRACE BUDGET" in debug
     assert "do not force diagrams" in debug
     assert service.list()["count"] == len(EXPECTED)
+def test_skill_matching_uses_word_boundaries_and_preserves_pos_prefix():
+    from odoo_agent_server.services.skill_service import SkillService
+    assert SkillService.recommend('fix syntax error in Python helper') is None
+    assert SkillService.recommend('correct tax reconciliation')['name'] == 'odoo-accounting-development'
+    assert SkillService.recommend('fix pos_order receipt')['name'] == 'odoo-pos-development'

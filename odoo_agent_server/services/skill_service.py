@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from fastapi import HTTPException, status
 
@@ -244,7 +245,7 @@ class SkillService:
         text = f" {str(task_description or '').lower()} "
         ranked: list[tuple[int, int, str, list[str]]] = []
         for priority, (name, terms) in enumerate(_ROUTING_TERMS.items()):
-            matched = [term for term in terms if term in text]
+            matched = [term for term in terms if re.search(r"(?<!\w)" + re.escape(term.strip()) + ("" if term.endswith("_") else r"(?!\w)"), text)]
             if matched:
                 score = sum(3 if " " in term or "." in term or "_" in term else 1 for term in matched)
                 ranked.append((score, -priority, name, matched))

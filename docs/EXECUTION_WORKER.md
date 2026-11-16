@@ -13,6 +13,9 @@ default. Existing Odoo authentication and deployment policies are unchanged.
 The HTTP API creates work in `ODOO_AGENT_EXECUTION_ROOT` (default
 `/var/lib/odoo-mcp/execution`). Atomic JSON files and cross-process file locks handle
 idempotent submission, bounded queues and atomic claims. No database is required.
+The record files remain authoritative. A small active/recent JSON index avoids
+scanning completed history during queue polling. An atomic journal repairs index
+updates after interruption; existing deployments build the index once on migration.
 One separate `odoo-executor` systemd service owns
 the worker lock. Only this account joins the Docker group; the API does not need it.
 Docker access is privileged: do not expose that socket to the task container.
@@ -52,7 +55,7 @@ Refresh the ChatGPT custom MCP connection to discover the added tools.
 ## Chat-controlled coding
 
 1. Select/prepare the existing client checkout with `client_check`.
-2. `execution_workspace_open(client_name, task_description, request_id)` creates a
+2. `execution_workspace_open(client_name, task_description, request_id)` queues a
    separate local clone on the configured branch. It fetches and fast-forwards
    the task clone by default; the source checkout is never moved. Dirty source
    and unpublished/diverged histories are rejected with files preserved. Immutable
@@ -60,9 +63,18 @@ Refresh the ChatGPT custom MCP connection to discover the added tools.
    files/index remain independent and container Git metadata stays read-only. A different branch
    requires an explicit `branch`. `fresh=false` is available for offline inspection;
    publishing to an existing source branch still requires a known remote base.
+   Poll the returned `execution_workspace_status` until ready. An initializing
+   retry is explicitly running, never success. A restart during initialization
+   reports interrupted work and preserves files for inspection. Use `scope_paths`
+   for known module directories to avoid checking out unrelated modules.
 3. Declare acceptance commands once with `execution_task_plan(workspace_id,
-   checks=[{name, argv, cwd, timeout_seconds}], skills=[...])`. Choose relevant
-   existing tests/checks for the requested change. Plans cannot be downgraded later.
+   checks=[{name, argv, cwd, timeout_seconds, layer}], skills=[...])`. Choose relevant
+   existing tests/checks for the requested change. Required layers default to
+   `unit`; explicitly select `syntax` for a syntax-only task. Layers are syntax,
+   unit, build, orm and integration. No-op/print-only checks are rejected.
+   Plans may add checks/layers and writable output directories or increase a
+   timeout; removing/replacing checks or dropping required layers is rejected.
+   Changing a check's execution configuration invalidates its previous evidence.
    Optional skill content is returned once; names and content hashes stay with the
    task. Skills guide the model; the server does not infer semantic correctness.
 4. `execution_files` supports list/read/search/write/diff and `batch` edits.
@@ -77,22 +89,38 @@ Refresh the ChatGPT custom MCP connection to discover the added tools.
    close stdin with `execution_process_input`; stop via `execution_process_cancel`.
    To record verification, pass `check_name` and the exact planned argv/cwd/timeout.
    Verification mounts source read-only; put generated test data/caches in `/tmp`.
+   Checks may declare up to two untracked `output_dirs`; these receive disposable
+   writable tmpfs mounts. They cannot hide tracked or untracked source files.
+   Worker status publishes actual image capabilities. Missing Odoo/npm runtimes
+   fail preflight, and detected runtime/output failures do not consume the repair
+   streak. npm is included in the standard image; Odoo is a separately configured
+   test runtime, not assumed from generic Python availability.
    It records exit status against the exact prospective Git tree (including new
    files, deletions and modes). Edits invalidate old evidence. An ordinary command
    exit 0 does not count as a planned check. Interrupted rechecks invalidate prior
-   success. Failed checks allow investigation/edit/retest up to the task's
-   `max_repair_attempts` (default 3); exhaustion requires a new scoped task.
+   success. Evidence is also tied to the runtime image ID. Failed checks allow
+   investigation/edit/retest; `max_repair_attempts` (default 3) limits repetition
+   of the same check on the same tree. Different checks and actual source progress
+   do not share that failure streak.
 6. `execution_workspace_status` returns persisted phase, missing checks and the
    next call. Phases include inspect/edit/verify/repair/commit/push/done and explicit
    needs_input/needs_review. Each workspace owns its state independently of the
    legacy per-client workflow guard. Repeat searches and reads are allowed during repair.
    `execution_status.recent_tasks` lists recent task IDs for resuming after a new
    chat; its last-known phases are not verification proof. Refresh workspace status.
-7. `execution_publish` requires every planned check to pass against current source,
-   then commits and optionally pushes. Default target is the configured branch.
+   A technical `argument_request` is a template to complete, not an executable
+   next_call or a request to ask the user for routine test selection. User approval
+   continues to use a separate `input_request`. Verification readiness proves only
+   the declared scope; read passed_layers and orm_verified before making claims.
+7. `execution_publish` queues publication after checking the planned verification
+   against current source. Poll `execution_status(operation_id)` to its result.
+   Default target is the configured branch.
    It rejects an advanced remote and never force-pushes or automatically rebases
    tested changes. It verifies both the committed tree and remote SHA. Existing
    approval policy still applies. A successful commit alone is not a pushed task.
+   The approval response contains an exact resume call after explicit user consent.
+   Status remains readable while the Git mutation lock is held; a restart during
+   publication requires SHA inspection rather than automatic replay.
 8. Run the existing Odoo deployment/upgrade verification workflow with that SHA.
    A commit or push is never reported as a confirmed deployment.
 
@@ -109,6 +137,11 @@ Example plan and verification call:
 The image contains generic Python/Node tooling, not a complete Odoo runtime.
 Odoo-native checks still require the existing Odoo test/deployment environment;
 passing container checks must never be presented as live Odoo functional proof.
+
+Core-source discovery uses client/build-specific cache directories under the
+state directory. A cached directory is validated before use; a failed refresh
+cannot silently reuse a different client's source. Source lookup shares a bounded
+remote inspection budget and caches transport failures before further SSH probes.
 
 Submission request IDs are immutable: same ID and payload returns existing work;
 changed payload with the same ID is rejected. For a publish with uncertain outcome,

@@ -40,6 +40,7 @@ class WorkflowProgressService:
             "client_name": client_name,
             "module_name": module_name,
             "phases_ms": {},
+            "subphases_ms": {},
             "cache_hit": None,
             "queue_wait_ms": 0,
             "terminal": False,
@@ -48,6 +49,7 @@ class WorkflowProgressService:
     def phase(self, operation_id: str, phase: str, **extra: Any) -> dict[str, Any]:
         now = self._now()
         return JsonStore().update_workflow_progress(operation_id, {
+            "subphases_ms": self._closed_subphase(operation_id, now),
             "status": "running",
             "current_phase": phase,
             "phase_started_at": now,
@@ -88,6 +90,7 @@ class WorkflowProgressService:
     ) -> dict[str, Any]:
         now = self._now()
         changes: dict[str, Any] = {
+            "subphases_ms": self._closed_subphase(operation_id, now),
             "status": str(status or "completed")[:100],
             "current_phase": "completed",
             "last_progress_at": now,
@@ -104,6 +107,7 @@ class WorkflowProgressService:
     def fail(self, operation_id: str, exc: BaseException) -> dict[str, Any]:
         now = self._now()
         return JsonStore().update_workflow_progress(operation_id, {
+            "subphases_ms": self._closed_subphase(operation_id, now),
             "status": "failed",
             "current_phase": "failed",
             "error_type": type(exc).__name__,
@@ -111,6 +115,21 @@ class WorkflowProgressService:
             "finished_at": now,
             "terminal": True,
         })
+
+    def _closed_subphase(self, operation_id, now):
+        previous = JsonStore().get_workflow_progress(operation_id) or {}
+        timings = dict(previous.get("subphases_ms") or {})
+        if previous.get("terminal") or not previous.get("phase_started_at"):
+            return timings
+        try:
+            start = datetime.fromisoformat(previous["phase_started_at"].replace("Z", "+00:00"))
+            stop = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            elapsed = max(0, round((stop - start).total_seconds() * 1000))
+            phase = previous.get("current_phase") or "unknown"
+            timings[phase] = timings.get(phase, 0) + elapsed
+        except (TypeError, ValueError):
+            pass
+        return timings
 
     @staticmethod
     def summary(limit: int = 5) -> dict[str, Any]:

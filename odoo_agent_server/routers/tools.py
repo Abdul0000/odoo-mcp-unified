@@ -25,6 +25,7 @@ from pydantic import BaseModel, ValidationError
 from ..auth import AuthDependency
 from ..config import settings, get_odoo_clients, normalise_client
 from ..execution_tools import EXECUTION_TOOLS, dispatch_execution
+from ..services.core_sync_service import bounded_inspection
 from ..schemas import (
     CommandResult,
     WsExtendRequest,
@@ -310,7 +311,7 @@ _TOOL_DESCRIPTORS = [
         name="ws.open",
         title="Open coding workspace",
         description=(
-            "START HERE for any Odoo code change. Opens a module on the client's GitHub branch with no clone: returns ws_id, "
+            "Use the provider REST workspace when execution is unavailable. Opens a module on the configured GitHub/GitLab branch: returns ws_id, "
             "depends and the file index. Unfinished work from an earlier session is resumed automatically. create=true starts a new module."
         ),
         read_only=False,
@@ -410,7 +411,7 @@ _TOOL_DESCRIPTORS = [
         name="workflow.agent_instructions",
         title="Load agent instructions",
         description=(
-            "CALL THIS FIRST in every session before any other tool. "
+            "Load shared rules after client_check selects and validates the client. "
             "Returns full agent rules, flow, error guide, and repo config from the connector. "
             "Follow these instructions exactly for every task."
         ),
@@ -4596,6 +4597,7 @@ async def _workflow_odoo_code_change(payload: OdooCodeChangeRequest) -> dict[str
     return result
 
 
+@bounded_inspection
 async def _workflow_odoo_code_change_impl(payload: OdooCodeChangeRequest) -> dict[str, Any]:
     """Provider-safe composite Odoo code-change workflow.
 

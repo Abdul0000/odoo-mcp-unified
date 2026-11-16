@@ -100,14 +100,24 @@ def _module_dir(root: Path, module_name: str) -> Path | None:
 
 def _iter_module_dirs(module_name: str, client_name: str | None = None) -> list[Path]:
     dirs: list[Path] = []
-    for root in _SRC_ROOTS:
+    for root in _effective_roots(client_name):
         found = _module_dir(root, module_name)
+        if root.is_relative_to(Path(settings.state_dir) / "core_sources"):
+            if not core_sync_service.ensure_module_synced(str(root), module_name, client_name=client_name):
+                continue
         if not found:
             core_sync_service.ensure_module_synced(str(root), module_name, client_name=client_name)
             found = _module_dir(root, module_name)
         if found:
             dirs.append(found)
     return dirs
+
+
+def _effective_roots(client_name=None):
+    client = core_sync_service._resolve_client_for_sync(client_name=client_name)
+    if client_name and client is None:
+        return []
+    return core_sync_service.source_roots(client_name) if client else _SRC_ROOTS
 
 
 def _core_source_available(client_name: str | None = None) -> bool:
@@ -125,11 +135,14 @@ def _core_source_available(client_name: str | None = None) -> bool:
     report CRITICAL/push-blocking findings for perfectly valid Odoo code,
     purely because core source isn't reachable, not because the code is wrong.
     """
-    if any(root.exists() and any(root.iterdir()) for root in _SRC_ROOTS if root.exists()):
+    selected = core_sync_service._resolve_client_for_sync(client_name=client_name)
+    if selected:
+        return core_sync_service.source_transport_ready(selected.name)
+    if any(root.exists() and any(root.iterdir()) for root in _effective_roots(client_name) if root.exists()):
         return True
     if not settings.core_sync_enabled:
         return False
-    if settings.odoosh_ssh_host:
+    if not client_name and settings.odoosh_ssh_host:
         return True
     if client_name:
         try:
@@ -263,7 +276,7 @@ def _find_template_content(template_name: str, local_xml_contents: dict[str, str
     # Try module prefix first for speed: web.SomeTemplate -> module web.
     module_hint = template_name.split(".", 1)[0] if "." in template_name else None
     module_dirs = _iter_module_dirs(module_hint, client_name=client_name) if module_hint else []
-    search_dirs = module_dirs or [root for root in _SRC_ROOTS if root.exists()]
+    search_dirs = module_dirs or [root for root in _effective_roots(client_name) if root.exists()]
     for search_dir in search_dirs:
         for xml_file in search_dir.rglob("*.xml"):
             content = _read_file(str(xml_file), max_bytes=1048576)

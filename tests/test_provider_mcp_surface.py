@@ -238,8 +238,12 @@ def test_provider_workflow_accepts_up_to_fifty_atomic_writes():
         OdooCodeChangeRequest(module_name="x_module", task_description="Update module XML", writes=[*writes, writes[0]])
 
 
-def test_provider_tool_contract_stays_within_context_budget():
+@pytest.mark.parametrize("execution_enabled", [False, True])
+def test_provider_tool_contract_stays_within_context_budget(monkeypatch, execution_enabled):
     import json
+    monkeypatch.setattr(settings, "execution_enabled", execution_enabled)
+    monkeypatch.setattr(settings, "agent_api_key", None)
+    monkeypatch.setattr(settings, "agent_model", None)
 
     tools = _mcp_tools_list()
     # Budget re-measured after adding the explicit approval-continuation action. Keep headroom small so growth is noticed.

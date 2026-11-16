@@ -59,7 +59,7 @@ def test_grok_operation_guard_blocks_duplicate_scope_and_backwards_reads(tmp_pat
     (module / "__manifest__.py").write_text("{'name': 'x'}\n", encoding="utf-8")
 
     svc = McpOperationGuardService()
-    base = {"client_name": "ClientA", "project_path": str(project), "module_name": "sample_website_module"}
+    base = {"client_name": "ClientA", "project_path": str(project), "module_name": "sample_website_module", "operation_id": "task-one"}
 
     assert svc.before_tool_call("workflow.start_session", base) is None
     svc.after_tool_call("workflow.start_session", base, {"status": "ok"})
@@ -76,9 +76,7 @@ def test_grok_operation_guard_blocks_duplicate_scope_and_backwards_reads(tmp_pat
     svc.after_tool_call("repo.write", write_args, {"status": "ok"})
 
     backwards = svc.before_tool_call("repo.read", base | {"relative_path": "sample_website_module/static/src/scss/page_widget.scss"})
-    assert backwards is not None
-    assert backwards["status"] == "phase_guard"
-    assert backwards["next_call"]["tool"] == "workflow.odoo_code_change"
+    assert backwards is None
 
     repeated_write = svc.before_tool_call("repo.write", write_args)
     assert repeated_write is not None
@@ -89,7 +87,7 @@ def test_grok_operation_guard_blocks_tools_after_terminal_pass(tmp_path, monkeyp
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
     project = tmp_path / "repo"
     svc = McpOperationGuardService()
-    base = {"client_name": "Test", "project_path": str(project), "module_name": "x"}
+    base = {"client_name": "Test", "project_path": str(project), "module_name": "x", "operation_id": "task-one"}
 
     assert svc.before_tool_call("workflow.scope_advice", base) is None
     svc.after_tool_call("workflow.scope_advice", base, {"status": "ok"})
@@ -116,3 +114,16 @@ def test_functional_operations_bypass_code_phase_guard(tmp_path, monkeypatch):
     assert service.before_tool_call("odoo.flow_test", arguments) is None
     service.after_tool_call("odoo.flow_test", arguments, {"status": "preview"})
     assert service.before_tool_call("odoo.flow_test", arguments) is None
+def test_guard_isolates_operations_and_failed_verification_enters_repair(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    service = McpOperationGuardService()
+    a = {'client_name':'A', 'operation_id':'task-a'}
+    b = {'client_name':'A', 'operation_id':'task-b'}
+    service.after_tool_call('workflow.verify_against_core', a, {'status':'failed','verified':False})
+    state = service._load(service._scope_key(a))['mcp_operation_guard']['current']
+    assert state['phase'] == 'repair' and not state['core_verified']
+    assert service.before_tool_call('repo.read', a) is None
+    service.after_tool_call('jobs.get', b, {'status':'passed'})
+    assert service.before_tool_call('repo.read', a) is None
+    assert service.before_tool_call('skills.read', {'name':'odoo-backend-development'}) is None
+    assert service.before_tool_call('repo.read', {'client_name':'A'}) is None

@@ -20,7 +20,7 @@ Be decisive, evidence-bound, scope-locked, and outcome-driven.
 - Clear bounded code-change: one focused inspection, one complete write set, proportional verification, and one deployment cycle when enabled.
 - Copy session IDs and returned arguments; add only required generated fields. Never repeat a completed phase.
 - Only authoritative proof permits completion. Stop immediately on verified terminal success.
-- A result carrying `next_call` is an instruction: run it in the same turn.
+- A result carrying `next_call` is an instruction: run it in the same turn. For `argument_request`, generate its required technical arguments first. Honor `input_request` before resuming a user decision.
 
 ## PRE-EXECUTION PLAN
 
@@ -38,7 +38,7 @@ Owners include `odoo-view-development`, `odoo-backend-development`, `odoo-fronte
 
 ## WORKSPACE LANE
 
-For GitHub/GitLab addon edits use `ws_open` → `ws_read`/`ws_grep` → `ws_edit` → fix findings until commit_ready → `ws_commit` → its deployment next_call. create=true opens a new addon. Prefer search/replace for existing files. New files auto-wire imports/manifest; failed edits change nothing. Use `ws_scaffold`, `ws_extend`, `ws_outline`, and `ws_symbol` to reduce reads/writes and verify source. Reopen a rejected ws_id to resume unfinished work. Edits reach the client branch only after ws_commit; report its branch and commit link. Push alone is never success.
+When execution is unavailable, use `ws_open` → `ws_read`/`ws_grep` → `ws_edit` → fix findings until commit_ready → `ws_commit` → its deployment next_call. create=true opens a new addon. Prefer search/replace. New files auto-wire imports/manifest; failed edits change nothing. Use `ws_scaffold`, `ws_extend`, `ws_outline`, and `ws_symbol` to reduce calls. Reopen rejected workspaces to resume. Report branch and commit link; push alone is not deployment.
 
 Use `workflow_odoo_code_change` for checkout work or unusable provider configuration. GitHub 401/403 or GitLab insufficient_scope requires the user to repair token permissions.
 
@@ -46,7 +46,7 @@ Static REA accepts ws_id/module_name: `rea_xray_module`, `rea_upstream_compare`,
 
 ## ORACLE EXECUTION LANE
 
-`execution_workspace_open` isolates a task on the configured branch, fetching/fast-forwarding without moving source. Dirty source is preserved and rejected. Declare relevant checks and skills once via `execution_task_plan`. Inspect/edit via `execution_files` with read SHA. Run exact planned commands with `check_name`; poll to terminal. Checks use read-only source. Failures permit reread/search/edit/retest within the repair budget. Edits invalidate evidence. Follow workspace status; `execution_publish` requires verification.ready=true and verifies pushed SHA. Odoo workflows prove deployment. Containers have no network/credentials. ChatGPT supplies reasoning; no backend model key is needed.
+`execution_workspace_open` queues a fresh same-branch clone; poll workspace_status. Use scope_paths for known modules. Declare checks/layers via `execution_task_plan` (required layer defaults to unit). Inspect/edit with read SHA. Run exact checks with check_name; poll to terminal. Source is read-only; use /tmp or output_dirs for builds. Repair permits reread/edit/retest; source/runtime changes invalidate evidence. `execution_publish` queues verified push: poll execution_status(operation_id). Report passed_layers only; orm_verified is separate from unit/syntax proof. Odoo workflows prove deployment. Commands have no network/credentials. ChatGPT supplies reasoning; no backend model key is needed.
 
 ## COMPOSITE WORKFLOW
 
@@ -84,7 +84,7 @@ For XML/QWeb/views/actions, use `odoo-view-development`. Resolve parent/XML ID, 
 - An explicit module-wide/redesign request denotes module scope; multiple objects in the addon are not target ambiguity.
 - Modify custom addon source directly when it owns the behavior. Extend Odoo core/enterprise through a custom addon; never edit vendor source.
 - `workflow_profile` sets effort: one complete write set for small work; dependency-ordered local batches for large work. Commit/push once after verification.
-- Only `needs_clarification` permits a user question; resolve minor choices from source and conventions.
+- Ask for material `needs_clarification`, required user decisions or external blockers. Resolve technical choices from source.
 
 ## CODE QUALITY CONTRACT
 

@@ -3296,3 +3296,17 @@ def test_ambiguous_or_complex_task_keeps_two_pass_flow(tmp_path):
     assert writes == []
     assert strategy is None
     assert reason == "autopatch_not_requested"
+def test_progress_records_individual_inspection_subphases(tmp_path, monkeypatch):
+    from odoo_agent_server.config import settings
+    from odoo_agent_server.services.workflow_progress_service import WorkflowProgressService
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    times = iter(['2026-11-17T00:00:00+00:00','2026-11-17T00:00:01+00:00','2026-11-17T00:00:04+00:00','2026-11-17T00:00:06+00:00'])
+    progress = WorkflowProgressService()
+    monkeypatch.setattr(progress, '_now', lambda: next(times))
+    progress.start('audit-progress', client_name='A', module_name='x')
+    progress.phase('audit-progress', 'focused_target_search')
+    progress.phase('audit-progress', 'scope_resolution')
+    result = progress.finish('audit-progress', status='needs_writes', metrics={'total_ms':6000,'phases_ms':{'focused_inspection':5000}})
+    assert result['subphases_ms']['focused_target_search'] == 3000
+    assert result['subphases_ms']['scope_resolution'] == 2000
+    assert result['phases_ms']['focused_inspection'] == 5000

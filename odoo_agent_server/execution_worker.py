@@ -69,6 +69,9 @@ class ExecutionWorker:
         root = self.service.root(req.workspace_id).resolve()
         cwd = self.service.target(req.workspace_id, req.cwd, directory=True).relative_to(root)
         stat = root.stat()
+        check = next((c for c in self.service.workspace(req.workspace_id).get("checks", []) if c["name"] == req.check_name), {})
+        outputs = [arg for directory in check.get("output_dirs", []) for arg in
+                   ("--tmpfs", f"/workspace/{directory}:rw,nosuid,nodev,size=64m,mode=1777")]
         return ["docker", "run", "--pull", "never", "--rm", "--init", "-i", "--name", self.container_name(record["id"]),
                 "--label", "io.odoo-mcp.execution=true", "--network", "none", "--read-only", "--cap-drop", "ALL",
                 "--security-opt", "no-new-privileges", "--pids-limit", "128", "--cpus", "1",
@@ -79,7 +82,24 @@ class ExecutionWorker:
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
                 "--workdir", "/workspace" + ("/" + str(cwd) if str(cwd) != "." else ""),
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
-                settings.execution_image, *req.argv]
+                *outputs,
+                record.get("runtime_id") if str(record.get("runtime_id", "")).startswith("sha256:") else settings.execution_image, *req.argv]
+
+    def refresh_capabilities(self):
+        probe = "import importlib.util,shutil,json;print(json.dumps({'python':True,'odoo':importlib.util.find_spec('odoo') is not None,'npm':bool(shutil.which('npm')),'node':bool(shutil.which('node'))}))"
+        try:
+            result = subprocess.run(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                                     "--memory", "96m", "--pids-limit", "64", "--user", f"{os.getuid()}:{os.getgid()}",
+                                     settings.execution_image, "python", "-c", probe],
+                                    env={"PATH": os.defpath, "HOME": "/tmp"}, capture_output=True, text=True, timeout=15)
+            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            image = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", settings.execution_image],
+                                   env={"PATH": os.defpath, "HOME": "/tmp"}, capture_output=True, text=True, timeout=5)
+            if image.returncode == 0:
+                value["image_id"] = image.stdout.strip()
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            value = {}
+        self.store._write(self.store.root / "capabilities.json", {**value, "image": settings.execution_image})
 
     def execute(self, record):
         process_id = record["id"]
@@ -162,6 +182,13 @@ class ExecutionWorker:
             self.store.take_input(process_id)
             details = {"exit_code": code, "error": error, "duration_seconds": round(time.monotonic() - start, 3),
                        "output_bytes": min(size, settings.execution_log_max_bytes)}
+            if status == "failed" and req.check_name and (logs / f"{process_id}.log").exists():
+                with (logs / f"{process_id}.log").open("rb") as stream:
+                    stream.seek(max(0, stream.seek(0, 2) - 4000))
+                    tail = stream.read().decode("utf-8", errors="replace")
+                if any(token in tail for token in ("No module named 'odoo'", "npm: not found", "Read-only file system")):
+                    status = "runtime_unavailable"
+                    details["error"] = "Check runtime or writable build output configuration is unavailable; source verification did not pass"
             if status == "cleanup_failed":
                 self.store.update(process_id, "process", status=status, **details)
             else:
@@ -255,6 +282,7 @@ class ExecutionWorker:
         with (self.store.root / "worker.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.recover()
+            self.refresh_capabilities()
             with ThreadPoolExecutor(max_workers=settings.execution_max_workers) as pool:
                 running = {}
                 while not self.stopping:

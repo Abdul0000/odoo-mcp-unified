@@ -100,6 +100,12 @@ class ClientResolverService:
             self._log_resolution(selected, "project_path", client_name, project_path)
             return selected
 
+        # An explicit generic repository must never inherit another client's
+        # token/database merely because that client is the only configured one.
+        if project_path and not require_complete:
+            self._log_resolution(None, "explicit_generic_project", client_name, project_path)
+            return None
+
         # Only use Odoo target matching when the caller explicitly provides
         # odoo_url/odoo_db. Never infer a client from process-wide environment
         # values in multi-client mode; those can be stale from another request.

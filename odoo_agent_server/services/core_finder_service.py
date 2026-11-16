@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from ..schemas import ListModuleFilesResult  # noqa: F401
 
 from . import core_sync_service
+from ..config import settings
 from .client_resolver_service import ClientResolverService
 from .module_path_service import is_ignored_source_path
 from ..schemas import (
@@ -233,6 +234,7 @@ class CoreFinderService:
     # Public API -- find_core_file
     # ------------------------------------------------------------------
 
+    @core_sync_service.bounded_inspection
     def find_core_file(
         self,
         module_name: str,
@@ -397,6 +399,7 @@ class CoreFinderService:
     # Public API -- scope_advice  (NEW -- Pillar 2: Adaptive Scope)
     # ------------------------------------------------------------------
 
+    @core_sync_service.bounded_inspection
     def scope_advice(
         self,
         custom_module_name: str,
@@ -555,6 +558,8 @@ class CoreFinderService:
         if has_mixin:
             reached_level = ScopeLevel.L2
             for mixin_module, mixin_type, mixin_kw in _KNOWN_MIXINS:
+                if not any(model.startswith(mixin_module + ".") for model in inherit_models):
+                    continue
                 result = self.find_core_file(mixin_module, mixin_type, mixin_kw, search_roots, client_name=client_name)
                 if result.best_match:
                     add_instruction(ScopeReadInstruction(
@@ -571,13 +576,7 @@ class CoreFinderService:
             target_module = inherit_models[0].split(".")[0] if inherit_models else custom_module_name
             for _, root in roots:
                 root_path = Path(root)
-                module_dir = self._find_module_dir(root_path, target_module)
-                if not module_dir:
-                    try:
-                        core_sync_service.ensure_module_synced(root, target_module, client_name=client_name)
-                    except TypeError:
-                        core_sync_service.ensure_module_synced(root, target_module)
-                    module_dir = self._find_module_dir(root_path, target_module)
+                module_dir = self._module_dir_with_sync(root_path, root, target_module, client_name=client_name)
                 models_dir = module_dir / "models" if module_dir else root_path / target_module / "models"
                 if models_dir.exists():
                     add_instruction(ScopeReadInstruction(
@@ -709,10 +708,14 @@ class CoreFinderService:
         resolver = ClientResolverService()
         client = resolver.resolve_client(client_name=client_name, require_complete=False) if client_name else resolver.resolve_client(require_complete=False)
         if client:
-            return [(i + 1, root) for i, root in enumerate(resolver.search_roots(client))]
+            return [(i + 1, str(core_sync_service.cache_root(root, client))) for i, root in enumerate(resolver.search_roots(client))]
         return _DEFAULT_ROOTS
 
     def _module_dir_with_sync(self, root_path: Path, root: str, module_name: str, client_name: str | None = None) -> Path | None:
+        if root_path.is_relative_to(Path(settings.state_dir) / "core_sources"):
+            if not core_sync_service.ensure_module_synced(root, module_name, client_name=client_name):
+                return None
+            return self._find_module_dir(root_path, module_name)
         module_dir = self._find_module_dir(root_path, module_name) if root_path.exists() else None
         if module_dir:
             return module_dir

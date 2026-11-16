@@ -53,6 +53,7 @@ def worker_for(service, monkeypatch):
     worker = ExecutionWorker(service=service)
     monkeypatch.setattr(worker, "remove_container", lambda _id: None)
     monkeypatch.setattr(worker, "command", lambda record: record["request"]["argv"])
+    monkeypatch.setattr(worker, "refresh_capabilities", lambda: None)
     return worker
 
 
@@ -149,8 +150,8 @@ def test_pending_commands_block_file_access_and_failed_cleanup_quarantines(execu
     monkeypatch.setattr(worker, "remove_container", lambda _: False)
     worker.execute(record)
     assert service.poll(record["id"])["status"] == "cleanup_failed"
-    with pytest.raises(HTTPException):
-        service.status(ws)
+    assert not service.status(ws)["success_allowed"]
+    assert service.status(ws)["state_class"] == "blocked"
 
 
 def test_recovery_never_replays_ambiguous_commands(execution, monkeypatch):
@@ -194,7 +195,7 @@ def test_publish_commits_and_verifies_remote_without_mutating_source(execution, 
 
 def verify(service, ws, monkeypatch, *, code="import ast; ast.parse(open('hello.py').read())", name="syntax"):
     argv = [sys.executable, "-c", code]
-    service.plan(TaskPlan(workspace_id=ws, checks=[{"name": name, "argv": argv}]))
+    service.plan(TaskPlan(workspace_id=ws, checks=[{"name": name, "argv": argv, "layer": "syntax"}], required_layers=["syntax"]))
     result = service.start_process(ProcessStart(workspace_id=ws, argv=argv, check_name=name,
                                                request_id="verify-" + str(time.time_ns())))
     worker_for(service, monkeypatch).execute(service.store.claim("process"))
@@ -229,7 +230,7 @@ def test_verification_plan_cannot_be_downgraded_or_command_substituted(execution
     service, ws, _, _ = execution
     planned = service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "test", "argv": ["python", "-m", "pytest"]}]))
     assert planned["phase"] == "inspect" and planned["next_call"]["tool"] == "execution_files"
-    with pytest.raises(HTTPException, match="409"):
+    with pytest.raises(HTTPException):
         service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "test", "argv": ["true"]}]))
     with pytest.raises(HTTPException, match="409"):
         service.start_process(ProcessStart(workspace_id=ws, check_name="test", argv=["true"], request_id="fake-check"))
@@ -383,11 +384,19 @@ def test_mcp_publish_approval_is_structured_and_resumes_exact_request(execution,
     monkeypatch.setattr(settings, "approval_required_actions_raw", "git.push")
     client = TestClient(app)
     def call(name, arguments):
-        return client.post('/mcp', headers={"Authorization": "Bearer " + settings.api_token}, json={
+        result = client.post('/mcp', headers={"Authorization": "Bearer " + settings.api_token}, json={
             "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}).json()['result']
+        if name == "execution_publish":
+            for _ in range(100):
+                control = result["structuredContent"]
+                if control.get("status") not in {"queued", "running"}:
+                    break
+                time.sleep(.01)
+                result = call("execution_status", {"operation_id": control["operation_id"]})
+        return result
     args = {"workspace_id": ws, "message": "Verified feature", "request_id": "approved-publish"}
     pending = call("execution_publish", args)
-    assert pending["isError"]
+    assert not pending["isError"]
     control = pending["structuredContent"]
     assert control["status"] == "approval_required" and control["state_class"] == "input_required"
     assert control["approval_id"] and control["input_request"]["requires_explicit_user_consent"]
@@ -489,3 +498,175 @@ def test_failed_checkpoint_keeps_the_previous_json_record(execution, monkeypatch
     assert path.read_bytes() == before
     assert list(path.parent.iterdir()) == [path]
     assert service.store.update(workspace, "workspace", checkpoint="recovered")["checkpoint"] == "recovered"
+
+
+def test_initialization_retry_never_claims_success_and_restart_is_explicit(execution):
+    from odoo_agent_server.services.execution_service import _INSTANCE
+    service, _, source, _ = execution
+    req = WorkspaceOpen(project_path=str(source), task_description="pending", request_id="pending-open")
+    record, _ = service.store.create("workspace", req.request_id, req.model_dump(), status="initializing", data={"owner_instance": _INSTANCE})
+    result = dispatch_execution("execution_workspace_open", req.model_dump(), service=service)
+    assert not result["success_allowed"] and result["state_class"] == "running"
+    assert result["next_call"]["arguments"]["workspace_id"] == record["id"]
+    service.store.update(record["id"], "workspace", owner_instance="previous-api")
+    result = service.status(record["id"])
+    assert result["status"] == "interrupted" and not result["success_allowed"]
+    assert result["next_call"] is None
+
+
+def test_task_templates_and_nested_tool_schemas_are_explicit(execution):
+    service, ws, _, _ = execution
+    status = service.status(ws)
+    assert status["next_call"] is None
+    assert status["argument_request"]["required_generated_arguments"] == ["checks"]
+    client = TestClient(app)
+    response = client.post('/mcp?profile=execution', headers={"Authorization": "Bearer " + settings.api_token},
+                           json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()['result']['tools']
+    tools = {t["name"]: t for t in response}
+    check = tools['execution_task_plan']['inputSchema']['properties']['checks']['items']
+    assert {'argv', 'name', 'layer', 'output_dirs'} <= set(check['properties'])
+    assert {'skills_list', 'skills_read', 'workflow_module_test'} <= set(tools)
+
+
+def test_runtime_preflight_and_verification_scope_are_not_full_odoo_proof(execution, monkeypatch):
+    service, ws, _, _ = execution
+    for argv in (["true"], ["python", "-c", "print('ok')"]):
+        with pytest.raises(HTTPException):
+            service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "fake", "argv": argv}]))
+    with pytest.raises(HTTPException) as unavailable:
+        service.plan(TaskPlan(workspace_id=ws, checks=[{"name": "native", "argv": ["odoo"], "layer": "orm"}], required_layers=["orm"]))
+    assert unavailable.value.detail["error_code"] == "runtime_unavailable"
+    verify(service, ws, monkeypatch)
+    result = service.verification(ws)
+    assert result["ready"] and result["passed_layers"] == ["syntax"]
+    assert result["scope"] == "declared_checks_only" and not result["orm_verified"] and not result["deployment_verified"]
+
+
+def test_failure_budget_tracks_equivalent_failure_and_resets_on_source_progress(execution, monkeypatch):
+    service, ws, _, _ = execution
+    argv = [sys.executable, "-c", "raise SystemExit(1)"]
+    service.plan(TaskPlan(workspace_id=ws, checks=[{"name": n, "argv": argv} for n in ['unit', 'lint', 'integration']]))
+    worker = worker_for(service, monkeypatch)
+    for name in ['unit', 'lint', 'integration']:
+        service.start_process(ProcessStart(workspace_id=ws, argv=argv, check_name=name, request_id='fail-' + name))
+        worker.execute(service.store.claim('process'))
+    assert not service.verification(ws)["needs_input"]
+    for i in range(2):
+        service.start_process(ProcessStart(workspace_id=ws, argv=argv, check_name='unit', request_id=f'repeat-unit-{i}'))
+        worker.execute(service.store.claim('process'))
+    assert service.verification(ws)["needs_input"]
+    read = service.files(WorkspaceFiles(workspace_id=ws, operation='read', path='hello.py'))
+    service.files(WorkspaceFiles(workspace_id=ws, operation='write', path='hello.py', content='VALUE=2\n', expected_sha256=read['sha256']))
+    service.start_process(ProcessStart(workspace_id=ws, argv=argv, check_name='unit', request_id='repaired-unit'))
+    worker.execute(service.store.claim('process'))
+    assert not service.verification(ws)["needs_input"]
+
+
+def test_queue_index_replays_crash_and_avoids_history_scan(execution, monkeypatch):
+    service, ws, _, _ = execution
+    request = ProcessStart(workspace_id=ws, argv=["python", "--version"], request_id="journal-recovery")
+    real = service.store._write
+    def fail_index(path, value):
+        if path.name == 'indexes.json':
+            raise OSError('crash after record write')
+        return real(path, value)
+    with monkeypatch.context() as patch:
+        patch.setattr(service.store, '_write', fail_index)
+        with pytest.raises(OSError):
+            service.store.create('process', request.request_id, request.model_dump())
+    recovered = ExecutionStore()
+    monkeypatch.setattr(recovered, '_rows', lambda _kind: (_ for _ in ()).throw(AssertionError('history scan')))
+    assert len(recovered.pending('process')) == 1
+    assert recovered.claim('process')['request']['request_id'] == request.request_id
+    assert recovered.claim('process') is None
+
+
+def test_scoped_checkout_preserves_full_git_tree(execution):
+    service, _, source, _ = execution
+    for module in ['module_a', 'module_b']:
+        (source / module).mkdir()
+        (source / module / 'model.py').write_text('VALUE = 1\n')
+    for args in [['add', '.'], ['commit', '-m', 'modules'], ['push', 'origin', 'staging']]:
+        subprocess.run(['git', *args], cwd=source, capture_output=True, check=True)
+    result = service.open(WorkspaceOpen(project_path=str(source), task_description='scoped', request_id='scoped-open', scope_paths=['module_a']))
+    root = service.root(result['workspace_id'])
+    assert (root / 'module_a/model.py').is_file()
+    assert not (root / 'module_b').exists()
+    expected = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=source, text=True).strip()
+    assert service.tree(result['workspace_id']) == expected
+
+
+def test_untracked_build_outputs_use_tmpfs_and_cannot_hide_source(execution):
+    service, ws, _, _ = execution
+    service.plan(TaskPlan(workspace_id=ws, checks=[{'name':'build','argv':['node','--version'],'layer':'build','output_dirs':['dist']}],required_layers=['build']))
+    p = service.start_process(ProcessStart(workspace_id=ws, check_name='build', argv=['node','--version'], request_id='build-output'))
+    record = service.store.get(p['process_id'], 'process')
+    command = ExecutionWorker(service=service).command(record)
+    assert any('/workspace/dist:rw' in arg for arg in command)
+    assert any('dst=/workspace,readonly' in arg for arg in command)
+    with pytest.raises(HTTPException):
+        service.validate_check(ws, {'argv':['python','--version'],'layer':'build','output_dirs':['hello.py']})
+
+
+def test_async_initialization_returns_running_and_resumes_without_duplicate_clone(execution, monkeypatch):
+    service, _, source, _ = execution
+    release = threading.Event()
+    real = service._initialize
+    def slow(*args):
+        assert release.wait(timeout=3)
+        return real(*args)
+    monkeypatch.setattr(service, '_initialize', slow)
+    request = WorkspaceOpen(project_path=str(source), task_description='async', request_id='async-open')
+    try:
+        result = dispatch_execution('execution_workspace_open', request.model_dump(), service=service)
+        assert result['state_class'] == 'running' and not result['success_allowed']
+        assert service.open(request)['id'] == result['id']
+    finally:
+        release.set()
+    for _ in range(100):
+        result = service.status(result['workspace_id'])
+        if result['status'] == 'ready':
+            break
+        time.sleep(.02)
+    assert result['status'] == 'ready' and result['argument_request']['tool'] == 'execution_task_plan'
+
+
+def test_async_push_progress_does_not_wait_for_git_mutation_lock(execution, monkeypatch):
+    from odoo_agent_server.services import execution_service as module
+    service, ws, _, _ = execution
+    verify(service, ws, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    real = module.git
+    def slow(argv, *args, **kwargs):
+        if argv[0] == 'push':
+            entered.set()
+            assert release.wait(timeout=3)
+        return real(argv, *args, **kwargs)
+    monkeypatch.setattr(module, 'git', slow)
+    request = WorkspacePublish(workspace_id=ws, message='verified async push', request_id='async-push')
+    result = dispatch_execution('execution_publish', request.model_dump(), service=service)
+    try:
+        assert entered.wait(timeout=2)
+        started = time.monotonic()
+        status = service.status(ws)
+        assert time.monotonic() - started < .3 and status['state_class'] == 'running'
+        with pytest.raises(HTTPException):
+            service.files(WorkspaceFiles(workspace_id=ws, operation='read', path='hello.py'))
+    finally:
+        release.set()
+    for _ in range(100):
+        final = service.operation_status(result['operation_id'])
+        if final['status'] not in {'queued','running'}:
+            break
+        time.sleep(.02)
+    assert final['status'] == 'succeeded' and final['pushed']
+
+
+def test_commit_only_operation_reports_commit_success_without_claiming_push(execution):
+    service, ws, _, _ = execution
+    request = WorkspacePublish(workspace_id=ws, message='local commit', request_id='commit-only', push=False)
+    operation, _ = service.store.create('operation', 'commit-only-result', request.model_dump(), status='succeeded',
+                                        data={'result': {'commit': 'a' * 40, 'pushed': False}})
+    result = service.operation_status(operation['id'])
+    assert result['success_allowed'] and result['state_class'] == 'succeeded'
+    assert result['pushed'] is False

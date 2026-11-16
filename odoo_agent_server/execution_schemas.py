@@ -8,12 +8,17 @@ class ExecutionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ExecutionStatus(ExecutionRequest):
+    operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
 class WorkspaceOpen(ExecutionRequest):
     client_name: str | None = None
     project_path: str | None = None
     task_description: str = Field(min_length=1, max_length=12000)
     branch: str | None = Field(default=None, max_length=200)
     fresh: bool = True
+    scope_paths: list[str] = Field(default_factory=list, max_length=25)
     request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
@@ -26,12 +31,15 @@ class TaskCheck(ExecutionRequest):
     argv: list[str] = Field(min_length=1, max_length=100)
     cwd: str = "."
     timeout_seconds: int = Field(default=120, ge=1, le=1800)
+    layer: Literal["syntax", "unit", "build", "orm", "integration"] = "unit"
+    output_dirs: list[str] = Field(default_factory=list, max_length=2)
 
 
 class TaskPlan(WorkspaceId):
     checks: list[TaskCheck] = Field(min_length=1, max_length=12)
     skills: list[str] = Field(default_factory=list, max_length=5)
     max_repair_attempts: int = Field(default=3, ge=1, le=10)
+    required_layers: list[Literal["syntax", "unit", "build", "orm", "integration"]] = Field(default_factory=lambda: ["unit"], min_length=1, max_length=5)
 
 
 class FileEdit(ExecutionRequest):

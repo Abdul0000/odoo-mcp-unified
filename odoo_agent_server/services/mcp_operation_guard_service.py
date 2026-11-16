@@ -44,7 +44,7 @@ _FUNCTIONAL_OPERATION_TOOLS = {
     "odoo.mutation_audit",
 }
 _UNIQUE_ONCE_TOOLS = {"repo.list_custom_modules", "workflow.list_module_files", "workflow.scope_advice", "workflow.find_similar_view"}
-_MAX_SEARCH_CALLS = 2
+_MAX_SEARCH_CALLS = 8
 _FRONTEND_SUFFIXES = (".xml", ".css", ".scss", ".js", ".qweb")
 
 
@@ -104,7 +104,9 @@ class McpOperationGuardService:
     def before_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return None
-        client_name = self._client_name(arguments)
+        client_name = self._scope_key(arguments)
+        if client_name is None:
+            return None  # Never attach unrelated calls/chats to a global operation.
         state = self._load(client_name)
         guard = state.setdefault("mcp_operation_guard", {})
         op = guard.setdefault("current", self._new_operation(arguments))
@@ -146,7 +148,7 @@ class McpOperationGuardService:
 
         # Once an edit is made, Grok must not jump back into discovery/read loops.
         # It must diff/QA/verify, then safe_deploy, then jobs.get.
-        if phase in {"verify", "deploy", "poll"} and tool_name in (_DISCOVERY_TOOLS | _READ_TOOLS):
+        if phase in {"deploy", "poll"} and tool_name in (_DISCOVERY_TOOLS | _READ_TOOLS):
             return self._guard_payload(
                 status="phase_guard",
                 message=(
@@ -178,7 +180,7 @@ class McpOperationGuardService:
                 next_call=self._next_call(op),
             )
         # Same-tool/same-arguments duplicate guard. Do not block polling.
-        if tool_name not in _ALLOWED_REPEAT_TOOLS and op.get("last_signature") == sig:
+        if tool_name not in _ALLOWED_REPEAT_TOOLS and not (phase == "repair" and tool_name in _READ_TOOLS) and op.get("last_signature") == sig:
             return self._guard_payload(
                 status="duplicate_guard",
                 message="This exact tool call was already performed in this operation. Do not repeat it; continue with the next workflow phase.",
@@ -210,7 +212,9 @@ class McpOperationGuardService:
     def after_tool_call(self, tool_name: str, arguments: dict[str, Any], structured: dict[str, Any]) -> None:
         if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return
-        client_name = self._client_name(arguments)
+        client_name = self._scope_key(arguments)
+        if client_name is None:
+            return
         state = self._load(client_name)
         guard = state.setdefault("mcp_operation_guard", {})
         op = guard.setdefault("current", self._new_operation(arguments))
@@ -222,6 +226,13 @@ class McpOperationGuardService:
         counts = op.setdefault("tool_counts", {})
         counts[tool_name] = int(counts.get(tool_name, 0) or 0) + 1
 
+        failed_verification = tool_name in _VERIFY_TOOLS and (
+            str(structured.get("status", "")).lower() in {"failed", "error", "errors"}
+            or structured.get("verified") is False or structured.get("push_blocked") is True)
+        if failed_verification:
+            op.update(phase="repair", core_verified=False, last_signature=None, tool_counts={})
+            self._save(state, client_name)
+            return
         if tool_name in _READ_TOOLS:
             op.setdefault("read_tools", []).append(tool_name)
             op["phase"] = op.get("phase") or "discovery"
@@ -237,7 +248,7 @@ class McpOperationGuardService:
         elif tool_name == "qa.self_run":
             op["qa_seen"] = True
             op["phase"] = "verify"
-        elif tool_name == "workflow.verify_against_core":
+        elif tool_name == "workflow.verify_against_core" and str(structured.get("status", "")).lower() in {"ok", "passed", "success"}:
             op["core_verified"] = True
             op["phase"] = "deploy"
         elif tool_name == "workflow.safe_deploy_module":
@@ -270,7 +281,10 @@ class McpOperationGuardService:
             return structured
         if tool_name in _FUNCTIONAL_OPERATION_TOOLS or tool_name.startswith("execution."):
             return structured
-        op = self._load(self._client_name(arguments)).get("mcp_operation_guard", {}).get("current", {})
+        scope = self._scope_key(arguments)
+        if scope is None:
+            return structured
+        op = self._load(scope).get("mcp_operation_guard", {}).get("current", {})
         out = dict(structured)
         status_value = str(out.get("status") or out.get("state") or "").lower()
         result = out.get("result")
@@ -347,6 +361,14 @@ class McpOperationGuardService:
                     return client.name
             except Exception:
                 return None
+        return None
+
+    def _scope_key(self, arguments):
+        for field in ("operation_id", "coding_session_id", "workspace_session_id", "ws_id", "job_id"):
+            value = arguments.get(field) if isinstance(arguments, dict) else None
+            if value:
+                identity = f"{self._client_name(arguments) or ''}:{field}:{value}"
+                return "operation-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
         return None
 
 

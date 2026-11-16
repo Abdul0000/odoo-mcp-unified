@@ -261,9 +261,9 @@ class OdooShService:
         script = "set -e; cd ~/src/user; git status --short --branch; git rev-parse --abbrev-ref HEAD || true; git rev-parse HEAD"
         return self.run_shell(script, timeout_seconds=30)
 
-    def deployed_sha(self) -> CommandResult:
+    def deployed_sha(self, timeout_seconds: int = 30) -> CommandResult:
         script = "set -e; cd ~/src/user; git rev-parse HEAD"
-        return self.run_shell(script, timeout_seconds=30)
+        return self.run_shell(script, timeout_seconds=timeout_seconds)
 
     # NON-BLOCKING single check — MCP agents poll this instead of blocking wait
     @staticmethod

@@ -257,7 +257,9 @@ def _ensure_provider_control_envelope(value: Any, *, is_error: bool = False) -> 
     if explicit_state not in _CONTROL_STATE_CLASSES:
         explicit_state = ""
 
-    if explicit_state:
+    if isinstance(out.get("argument_request"), dict):
+        state_class = "action_required"
+    elif explicit_state:
         state_class = explicit_state
     elif completion_required and input_required:
         state_class = "input_required"
@@ -281,7 +283,7 @@ def _ensure_provider_control_envelope(value: Any, *, is_error: bool = False) -> 
         # successful terminal result.
         state_class = "succeeded"
 
-    if state_class in {"running", "action_required"} and next_call is None:
+    if state_class in {"running", "action_required"} and next_call is None and not isinstance(out.get("argument_request"), dict):
         state_class = "blocked"
     completion_required = state_class in {"running", "action_required", "input_required"}
     terminal = not completion_required
@@ -341,7 +343,8 @@ def _ensure_provider_control_envelope(value: Any, *, is_error: bool = False) -> 
         if isinstance(out.get("next_call"), dict):
             out.setdefault("recovery_call", out["next_call"])
             out["next_call"] = None
-    elif not isinstance(out.get("next_call"), dict) and out["state_class"] != "input_required":
+    elif (not isinstance(out.get("next_call"), dict) and out["state_class"] != "input_required"
+          and not isinstance(out.get("argument_request"), dict)):
         out["next_call"] = None
         out["completion_required"] = False
         out["terminal"] = True
@@ -850,6 +853,7 @@ def _tools_for_profile(profile: str | None = None, *, minimal: bool = False) -> 
     allowed = _PROVIDER_TOOL_NAMES_MINIMAL if minimal else _PROVIDER_TOOL_NAMES
     if profile == "execution":
         allowed = set(EXECUTION_TOOLS) | {"connector.health", "client.check", "workflow.agent_instructions",
+                                        "skills.list", "skills.read", "workflow.module_test",
                                         "workflow.module_install_and_check", "jobs.get", "artifacts.read"}
     return [tool for tool in tools if tool.name in allowed]
 
@@ -889,6 +893,7 @@ def _remote_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 "OdooDebugReportReplay",
                 "OdooDebugRuntimeReplay",
                 "OdooDynamicFlowStep",
+                "TaskCheck", "FileEdit",
             }:
                 target = definitions.get(definition_name)
                 if isinstance(target, dict):
@@ -957,17 +962,9 @@ def _tool_to_mcp(tool, profile: str | None = None) -> dict[str, Any]:
                 "type": "object",
                 "properties": {
                     "status": {"type": "string"},
-                    "state_class": {"type": "string"},
-                    "outcome": {"type": "string"},
-                    "message": {"type": "string"},
-                    "job_id": {"type": ["string", "null"]},
-                    "terminal": {"type": "boolean"},
                     "success_allowed": {"type": "boolean"},
-                    "completion_required": {"type": "boolean"},
                     "next_call": {"type": ["object", "null"]},
-                    "input_required": {"type": "boolean"},
                     "input_request": {"type": ["object", "null"]},
-                    "error": {"type": ["string", "object", "null"]},
                 },
                 "required": list(_CONTROL_REQUIRED_FIELDS),
                 "additionalProperties": True,
@@ -1226,6 +1223,12 @@ async def _handle_shell(
             message = str(exc)
             error_payload = {"status": "failed", "error": message,
                              "error_code": type(exc).__name__, "retryable": None}
+            if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+                error_payload["details"] = exc.detail
+                error_payload["error_code"] = exc.detail.get("error_code", type(exc).__name__)
+                if exc.detail.get("error_code") == "runtime_unavailable":
+                    error_payload.update(status="configuration_required", state_class="blocked", success_allowed=False,
+                                         required_runtime=exc.detail.get("required_runtime"))
             if (isinstance(exc, HTTPException) and isinstance(exc.detail, dict)
                     and exc.detail.get("approval_required") and exc.detail.get("approval_id")):
                 # Keep the gate machine-readable. A stringified HTTPException hides

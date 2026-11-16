@@ -6,24 +6,48 @@ with only the task clone mounted, no host credentials and no network.
 from __future__ import annotations
 
 import hashlib
+import ast
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore
+from uuid import uuid4
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
 
 from ..config import settings, mask_repo_url
-from ..execution_schemas import WorkspaceFiles
+from ..execution_schemas import WorkspaceFiles, TaskCheck
 from .client_resolver_service import ClientResolverService
 from .execution_store import ExecutionStore
 from .path_service import resolve_allowed_path
 from .repo_service import RepoService
 from .approval_service import ApprovalService
 from .skill_service import SkillService
+
+_INSTANCE = uuid4().hex
+_IO_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="execution_git")
+_IO_SLOTS = BoundedSemaphore(6)
+
+
+def _submit_io(callback):
+    if not _IO_SLOTS.acquire(blocking=False):
+        raise HTTPException(429, "Git operation queue is full; finish/poll active work before retrying")
+    def run():
+        try:
+            callback()
+        finally:
+            _IO_SLOTS.release()
+    try:
+        return _IO_POOL.submit(run)
+    except Exception:
+        _IO_SLOTS.release()
+        raise
 
 
 def enabled():
@@ -94,7 +118,7 @@ class ExecutionService:
             raise HTTPException(404, "Working directory not found")
         return target
 
-    def open(self, request):
+    def open(self, request, *, background=False):
         client = ClientResolverService().resolve_client(request.client_name, project_path=request.project_path, require_complete=False)
         source_raw = request.project_path or (client.path if client else None) or settings.target_project_path
         if not source_raw:
@@ -102,9 +126,19 @@ class ExecutionService:
         source = resolve_allowed_path(source_raw)
         if not (source / ".git").exists():
             raise HTTPException(409, "Prepare this client's repository with client_check(validate=true) before opening a task")
-        record, created = self.store.create("workspace", request.request_id, request.model_dump(), status="initializing")
+        record, created = self.store.create("workspace", request.request_id, request.model_dump(), status="initializing", data={"owner_instance": _INSTANCE})
         if not created:
-            return self.status(record["id"]) if record["status"] == "ready" else self.public(record)
+            return self.status(record["id"])
+        if background:
+            try:
+                _submit_io(lambda: self._initialize(request, client, source, record))
+            except Exception:
+                self.store.update(record["id"], "workspace", status="failed", error="Initialization queue full; source preserved. Retry with a fresh request_id after active work finishes.")
+                raise
+            return self.status(record["id"])
+        return self._initialize(request, client, source, record)
+
+    def _initialize(self, request, client, source, record):
         path = self.root(record["id"])
         try:
             if git(["status", "--porcelain"], source).strip():
@@ -120,6 +154,10 @@ class ExecutionService:
             # Local clones hard-link immutable Git objects; worktree files and the
             # index stay independent. Containers mount all Git metadata read-only.
             git(["clone", "--local", "--no-checkout", "--", str(source), str(path)], source)
+            if request.scope_paths:
+                if any(Path(p).is_absolute() or any(part in {"..", ".git"} for part in Path(p).parts) or "\0" in p for p in request.scope_paths):
+                    raise HTTPException(400, "Use repository-relative module directories for scope_paths")
+                git(["sparse-checkout", "set", "--cone", "--", *request.scope_paths], path)
             configured_branch = client.branch if client else source_branch
             branch = request.branch or configured_branch
             if not RepoService()._safe_branch_name(branch):
@@ -154,6 +192,25 @@ class ExecutionService:
         return {k: v for k, v in record.items() if k not in {"request", "source_path", "conversation", "pending_response"}}
 
     def status(self, workspace_id):
+        record = self.store.get(workspace_id, "workspace")
+        if record["status"] != "ready":
+            pending = record["status"] in {"queued", "initializing"}
+            if pending and record.get("owner_instance") != _INSTANCE:
+                record = self.store.update(workspace_id, "workspace", status="interrupted", error="API restarted during initialization; source preserved. Inspect this task and open a fresh request_id.")
+                pending = False
+            return {**self.public(record), "workspace_id": workspace_id, "phase": record["status"],
+                    "success_allowed": False, "completion_required": pending,
+                    "state_class": "running" if pending else "blocked",
+                    "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id}} if pending else None}
+        # Publishing owns the mutation lock; progress reads must not wait behind
+        # a slow network push or attempt to inspect files mid-commit.
+        if record.get("publishing") and record.get("publishing_owner") != _INSTANCE:
+            record = self.store.update(workspace_id, "workspace", publishing=False, phase="needs_review",
+                                       error="API restarted during publishing; inspect local and remote SHA before any new publish")
+        if record.get("publishing"):
+            return {**self.public(record), "workspace_id": workspace_id, "success_allowed": False,
+                    "completion_required": True, "state_class": "running",
+                    "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id}}}
         with self.store.workspace_lock(workspace_id):
             return self._status(workspace_id)
 
@@ -164,23 +221,36 @@ class ExecutionService:
         busy = bool(pending)
         verification = self.verification(workspace_id) if not busy else {"ready": False, "reason": "command_pending"}
         phase = record.get("phase", "inspect")
-        if phase in {"commit", "done"} and not busy and record.get("published_tree") != verification.get("tree"):
-            phase = "edit"
+        if phase in {"commit", "done"} and not busy:
+            if record.get("published_tree") != verification.get("tree"):
+                phase = "edit"
+            elif not verification.get("ready"):
+                phase = "verify"
         if verification.get("ready") and phase in {"inspect", "edit", "verify", "repair"}:
             phase = "verify"
         next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id}}
-        if not record.get("checks"):
-            next_call = {"tool": "execution_task_plan", "arguments": {"workspace_id": workspace_id}, "requires": ["checks"]}
+        argument_request = None
+        if not record.get("checks") or "required_layers" not in record:
+            next_call = None
+            argument_request = {"tool": "execution_task_plan", "arguments": {"workspace_id": workspace_id},
+                                "required_generated_arguments": ["checks"],
+                                "instruction": "Generate task-specific verification commands from source and acceptance criteria; call execution_task_plan. No user input is needed for technical test selection."}
+            if record.get("checks"):
+                argument_request["arguments"]["checks"] = record["checks"]
+                argument_request["required_generated_arguments"] = ["checks", "required_layers"]
+                argument_request["instruction"] = "Classify existing checks into verification layers and declare required_layers. Preserve their names/commands; rerun after upgrade."
         elif verification.get("next_check") and phase not in {"inspect", "repair"}:
-            check = verification["next_check"]
+            check = {k: v for k, v in verification["next_check"].items() if k in {"name", "argv", "cwd", "timeout_seconds"}}
             next_call = {"tool": "execution_process_start", "arguments": {"workspace_id": workspace_id, **check,
                          "check_name": check["name"], "request_id": f"check-{workspace_id[:8]}-{os.urandom(6).hex()}"}}
             next_call["arguments"].pop("name")
         elif verification.get("ready") and phase != "done":
-            next_call = {"tool": "execution_publish", "arguments": {"workspace_id": workspace_id}, "requires": ["message", "request_id"]}
+            next_call = {"tool": "execution_publish", "arguments": {"workspace_id": workspace_id,
+                         "message": record["request"]["task_description"][:2000],
+                         "request_id": f"publish-{workspace_id[:8]}-{verification['tree'][:16]}"}}
         if phase == "repair":
             next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id, "operation": "diff"}}
-        if verification.get("needs_input") or phase in {"needs_review", "needs_input"}:
+        if verification.get("needs_input") or phase in {"needs_review", "needs_input", "configuration_required"}:
             next_call = None
         if busy:
             process = pending[0]
@@ -189,8 +259,9 @@ class ExecutionService:
             next_call = None
         return {**self.public(record), "workspace_id": record["id"], "changes": dirty,
                 "phase": phase, "verification": verification, "changes_truncated": len(dirty) >= 32000,
+                "argument_request": argument_request,
                 "success_allowed": phase == "done",
-                "input_required": phase in {"needs_review", "needs_input"},
+                "input_required": phase in {"needs_review", "needs_input", "configuration_required"},
                 "completion_required": phase != "done", "deployment": "not_deployed", "next_call": next_call}
 
     def tree(self, workspace_id):
@@ -212,31 +283,93 @@ class ExecutionService:
             self.assert_idle(request.workspace_id)
             workspace = self.workspace(request.workspace_id)
             checks = [c.model_dump() for c in request.checks]
+            if not set(request.required_layers).issubset({c["layer"] for c in checks}):
+                raise HTTPException(400, "Every required verification layer needs a planned check")
             if len({c["name"] for c in checks}) != len(checks):
                 raise HTTPException(400, "Check names must be unique")
             for check in checks:
                 self.target(request.workspace_id, check["cwd"], directory=True)
                 self.validate_argv(check["argv"])
+                self.validate_check(request.workspace_id, check)
             skills = [SkillService().read(name) for name in dict.fromkeys(request.skills)]
             skill_refs = [{"name": s["name"], "sha256": hashlib.sha256(s["content"].encode()).hexdigest()} for s in skills]
-            contract = {"checks": checks, "selected_skills": skill_refs, "max_repair_attempts": request.max_repair_attempts}
-            if workspace.get("checks") and any(workspace.get(k) != v for k, v in contract.items()):
-                raise HTTPException(409, "Task verification plan is immutable; start a new task for changed acceptance checks")
+            previous_skills = {s["name"]: s for s in workspace.get("selected_skills", [])}
+            changed_skills = {s["name"] for s in skill_refs if previous_skills.get(s["name"]) != s}
+            skill_refs = list({**previous_skills, **{s["name"]: s for s in skill_refs}}.values())
+            contract = {"checks": checks, "selected_skills": skill_refs, "max_repair_attempts": request.max_repair_attempts,
+                        "required_layers": sorted(set(request.required_layers))}
+            old = {c["name"]: TaskCheck.model_validate(c).model_dump() for c in workspace.get("checks", [])}
+            new = {c["name"]: c for c in checks}
+            legacy_plan = "required_layers" not in workspace
+            def strengthens(name, check):
+                candidate = new.get(name, {})
+                semantic_fields = ("name", "argv", "cwd") if legacy_plan else ("name", "argv", "cwd", "layer")
+                return (all(candidate.get(k) == check[k] for k in semantic_fields)
+                        and set(check["output_dirs"]).issubset(candidate.get("output_dirs", []))
+                        and candidate.get("timeout_seconds", 0) >= check["timeout_seconds"])
+            if old and (any(not strengthens(name, check) for name, check in old.items())
+                        or (not legacy_plan and not set(workspace["required_layers"]).issubset(contract["required_layers"]))
+                        or workspace.get("max_repair_attempts", 3) != request.max_repair_attempts):
+                raise HTTPException(409, "Plans may add checks/layers, but cannot remove or replace acceptance checks or reset the repair budget")
+            results = workspace.get("check_results", {})
+            for name, check in old.items():
+                if new[name] != check:
+                    results.pop(name, None)
+            contract["check_results"] = results
             self.store.update(request.workspace_id, "workspace", **contract)
-            return {**self._status(request.workspace_id), "skills": skills if not workspace.get("checks") else []}
+            return {**self._status(request.workspace_id), "skills": [s for s in skills if s["name"] in changed_skills]}
 
     def verification(self, workspace_id):
         workspace = self.workspace(workspace_id)
         tree = self.tree(workspace_id)
         results = workspace.get("check_results", {})
+        runtime_id = self.runtime_id()
         missing = [c for c in workspace.get("checks", []) if not (
-            results.get(c["name"], {}).get("status") == "succeeded" and results[c["name"]].get("tree") == tree)]
-        exhausted = workspace.get("repair_attempts", 0) >= workspace.get("max_repair_attempts", 3)
-        return {"ready": bool(workspace.get("checks")) and not missing and not exhausted,
+            results.get(c["name"], {}).get("status") == "succeeded" and results[c["name"]].get("tree") == tree
+            and results[c["name"]].get("runtime_id") == runtime_id)]
+        failures = workspace.get("failure_streaks", {})
+        exhausted = any(value.get("count", 0) >= workspace.get("max_repair_attempts", 3) and value.get("tree") == tree for value in failures.values())
+        passed_layers = sorted({c.get("layer", "unspecified") for c in workspace.get("checks", []) if c not in missing})
+        required = workspace.get("required_layers", ["unit"])
+        missing_layers = sorted(set(required) - set(passed_layers))
+        return {"ready": bool(workspace.get("checks")) and "required_layers" in workspace and not missing and not missing_layers and not exhausted,
                 "tree": tree, "missing_checks": [c["name"] for c in missing],
+                "scope": "declared_checks_only", "passed_layers": passed_layers, "missing_layers": missing_layers,
+                "orm_verified": "orm" in passed_layers, "deployment_verified": False,
                 "next_check": missing[0] if missing and not exhausted else None,
                 "repair_attempts": workspace.get("repair_attempts", 0), "needs_input": exhausted,
                 "results": results}
+
+    def runtime_id(self):
+        capabilities = self.store._read(self.store.root / "capabilities.json") or {}
+        return capabilities.get("image_id", settings.execution_image) if capabilities.get("image", settings.execution_image) == settings.execution_image else settings.execution_image
+
+    def validate_check(self, workspace_id, check):
+        argv = check["argv"]
+        if Path(argv[0]).name in {"true", "echo"}:
+            raise HTTPException(400, "A no-op command is not an acceptance check")
+        if "-c" in argv and Path(argv[0]).name.startswith("python"):
+            code = argv[argv.index("-c") + 1] if argv.index("-c") + 1 < len(argv) else ""
+            try:
+                nodes = ast.parse(code).body
+                if nodes and all(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                                 and isinstance(n.value.func, ast.Name) and n.value.func.id == "print" for n in nodes):
+                    raise HTTPException(400, "Printing output alone is not verification")
+            except SyntaxError:
+                pass  # A failing command is still useful evidence; the worker records it.
+        capabilities = self.store._read(self.store.root / "capabilities.json") or {}
+        if capabilities.get("image") != settings.execution_image:
+            capabilities = {}
+        if check["layer"] == "orm" and not capabilities.get("odoo"):
+            raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "odoo", "message": "Configure an Odoo test runtime/image before selecting ORM checks; no functional verification was performed."})
+        if Path(argv[0]).name == "npm" and not capabilities.get("npm"):
+            raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "npm"})
+        for directory in check["output_dirs"]:
+            target = self.target(workspace_id, directory)
+            if (not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", directory) or directory == "."
+                    or (target.exists() and not target.is_dir())
+                    or git(["ls-files", "--cached", "--others", "--exclude-standard", "--", directory], self.root(workspace_id)).strip()):
+                raise HTTPException(400, "Writable outputs must be untracked directories outside source files")
 
     @staticmethod
     def validate_argv(argv):
@@ -256,12 +389,20 @@ class ExecutionService:
                     status = "verification_invalidated"
                     details["error"] = "Source changed during verification; rerun against unchanged source"
                 results = workspace.get("check_results", {})
-                results[check] = {"process_id": record["id"], "status": status, "tree": tree}
+                results[check] = {"process_id": record["id"], "status": status, "tree": tree,
+                                  "runtime_id": record.get("runtime_id")}
                 attempts = workspace.get("repair_attempts", 0) + (status != "succeeded")
+                streaks = workspace.get("failure_streaks", {})
+                previous = streaks.get(check, {})
+                count = 0 if status in {"succeeded", "runtime_unavailable"} else (previous.get("count", 0) + 1 if previous.get("tree") == tree else 1)
+                streaks[check] = {"tree": tree, "count": count}
                 phase = "verify" if status == "succeeded" else "repair"
-                if attempts >= workspace.get("max_repair_attempts", 3):
+                if count >= workspace.get("max_repair_attempts", 3):
                     phase = "needs_input"
-                self.store.update(ws, "workspace", check_results=results, repair_attempts=attempts, phase=phase)
+                if status == "runtime_unavailable":
+                    phase = "configuration_required"
+                self.store.update(ws, "workspace", check_results=results, repair_attempts=attempts, failure_streaks=streaks, phase=phase,
+                                  runtime_error=details.get("error") if status == "runtime_unavailable" else None)
             else:
                 self.store.update(ws, "workspace", phase=phase)
             return self.store.update(record["id"], "process", status=status, **details)
@@ -269,11 +410,15 @@ class ExecutionService:
     def files(self, request: WorkspaceFiles):
         # File reads also wait for commands: a running container could otherwise
         # swap a path into a symlink between containment checking and opening.
+        if self.workspace(request.workspace_id).get("publishing"):
+            raise HTTPException(409, "Publishing is active; poll its operation before file access")
         with self.store.workspace_lock(request.workspace_id):
             self.assert_idle(request.workspace_id)
             return self._files(request)
 
     def assert_idle(self, workspace_id):
+        if self.workspace(workspace_id).get("publishing"):
+            raise HTTPException(409, "Publishing is active; poll its operation before editing or executing commands")
         if any(record["request"]["workspace_id"] == workspace_id for record in self.store.pending("process")):
             raise HTTPException(409, "Workspace has a queued/running command; poll or cancel it before editing or publishing")
 
@@ -352,6 +497,8 @@ class ExecutionService:
                 yield Path(parent, name)
 
     def start_process(self, request):
+        if self.workspace(request.workspace_id).get("publishing"):
+            raise HTTPException(409, "Publishing is active; poll its operation before submitting commands")
         self.target(request.workspace_id, request.cwd, directory=True)
         self.validate_argv(request.argv)
         with self.store.workspace_lock(request.workspace_id):
@@ -360,12 +507,13 @@ class ExecutionService:
                 return self.poll(existing["id"])
             self.assert_idle(request.workspace_id)
             workspace = self.workspace(request.workspace_id)
-            data = {}
+            data = {"runtime_id": self.runtime_id()}
             if request.check_name:
                 check = next((c for c in workspace.get("checks", []) if c["name"] == request.check_name), None)
                 if not check or any(check[k] != getattr(request, k) for k in ("argv", "cwd", "timeout_seconds")):
                     raise HTTPException(409, "Verification command must exactly match a named task-plan check")
-                if workspace.get("repair_attempts", 0) >= workspace.get("max_repair_attempts", 3):
+                self.validate_check(request.workspace_id, TaskCheck.model_validate(check).model_dump())
+                if self.verification(request.workspace_id)["needs_input"]:
                     raise HTTPException(409, "Repair budget exhausted; inspect failures and start a new scoped task")
                 data["input_tree"] = self.tree(request.workspace_id)
             record, _ = self.store.create("process", request.request_id, request.model_dump(), data=data)
@@ -384,6 +532,59 @@ class ExecutionService:
                 return self.public(existing)
             self.assert_idle(request.workspace_id)
             return self._publish(request)
+
+    def publish_background(self, request):
+        self.workspace(request.workspace_id)
+        key = f"publish:{request.request_id}:{request.approval_id or 'pending'}"
+        record, created = self.store.create("operation", key, request.model_dump(), data={"owner_instance": _INSTANCE})
+        if created:
+            def run():
+                self.store.update(record["id"], "operation", status="running")
+                try:
+                    result = self.publish(request)
+                    self.store.update(record["id"], "operation", status="succeeded" if result.get("status") == "succeeded" else "needs_review", result=result)
+                except HTTPException as exc:
+                    if isinstance(exc.detail, dict) and exc.detail.get("approval_required"):
+                        self.store.update(record["id"], "operation", status="approval_required", approval=exc.detail)
+                    elif isinstance(exc.detail, dict) and exc.detail.get("verification"):
+                        self.store.update(record["id"], "operation", status="verification_required", verification=exc.detail["verification"])
+                    else:
+                        self.store.update(record["id"], "operation", status="needs_review", error=mask_repo_url(str(exc.detail))[:1500])
+                except Exception as exc:
+                    self.store.update(record["id"], "operation", status="needs_review", error=f"Publish interrupted ({type(exc).__name__}); inspect SHA before retry")
+            try:
+                _submit_io(run)
+            except Exception:
+                self.store.update(record["id"], "operation", status="needs_review", error="Git operation queue full; retry later with a fresh request_id")
+                raise
+        return self.operation_status(record["id"])
+
+    def operation_status(self, operation_id):
+        record = self.store.get(operation_id, "operation")
+        request = record["request"]
+        if record["status"] in {"queued", "running"} and record.get("owner_instance") != _INSTANCE:
+            record = self.store.update(operation_id, "operation", status="needs_review", error="API restarted; inspect task/local/remote SHA before creating a new request")
+        active = record["status"] in {"queued", "running"}
+        if record["status"] == "verification_required":
+            return {"status": "verification_required", "operation_id": operation_id, "verification": record["verification"],
+                    "success_allowed": False, "completion_required": True,
+                    "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": request["workspace_id"]}}}
+        if record["status"] == "approval_required":
+            approval = record["approval"]
+            return {**approval, "status": "approval_required", "operation_id": operation_id,
+                    "success_allowed": False, "completion_required": True, "input_required": True,
+                    "input_request": {"kind": "approval", "approval_id": approval["approval_id"],
+                                      "requires_explicit_user_consent": True, "prompt": approval.get("message"),
+                                      "resume_call": {"tool": "execution_publish", "arguments": {**request, "approval_id": approval["approval_id"]}}},
+                    "next_call": None}
+        result = record.get("result") or {}
+        succeeded = bool(record["status"] == "succeeded" and result.get("commit")
+                         and (not request.get("push", True) or result.get("pushed")))
+        return {**result, "status": record["status"], "operation_id": operation_id,
+                "workspace_id": request["workspace_id"], "error": record.get("error"),
+                "success_allowed": succeeded,
+                "completion_required": active, "state_class": "running" if active else "succeeded" if succeeded else "blocked",
+                "next_call": {"tool": "execution_status", "arguments": {"operation_id": operation_id}} if active else None}
 
     def _publish(self, request):
         workspace = self.workspace(request.workspace_id)
@@ -405,6 +606,7 @@ class ExecutionService:
         if not created:
             return self.public(record)
         root = self.root(request.workspace_id)
+        self.store.update(request.workspace_id, "workspace", publishing=True, publishing_owner=_INSTANCE, phase="preparing_publish")
         try:
             if request.push:
                 target = client.authenticated_repo if client else git(["remote", "get-url", "origin"], root).strip()
@@ -438,10 +640,10 @@ class ExecutionService:
             self.store.update(request.workspace_id, "workspace", phase="done" if request.push else "commit",
                               published_tree=verification["tree"], published_commit=sha, published_branch=branch,
                               remote_base_sha=sha if request.push and branch == workspace.get("source_branch") else workspace.get("remote_base_sha"),
-                              pushed=request.push)
+                              pushed=request.push, publishing=False)
             return self.public(result)
         except Exception:
-            self.store.update(request.workspace_id, "workspace", phase="needs_review")
+            self.store.update(request.workspace_id, "workspace", phase="needs_review", publishing=False)
             approvals.mark_failed(request.approval_id)
             self.store.update(record["id"], "publish", status="needs_review", error="Publish interrupted or rejected; inspect local and remote SHA before submitting a new request_id")
             raise

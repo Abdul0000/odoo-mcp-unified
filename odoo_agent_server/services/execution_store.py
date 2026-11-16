@@ -21,7 +21,7 @@ from ..config import settings
 
 
 class ExecutionStore:
-    KINDS = {"workspace", "process", "agent", "publish"}
+    KINDS = {"workspace", "process", "agent", "publish", "operation"}
 
     def __init__(self):
         if fcntl is None:
@@ -29,6 +29,8 @@ class ExecutionStore:
         self.root = Path(settings.execution_root).expanduser().resolve()
         self._directory(self.root)
         self._directory(self.root / "records")
+        with self._lock(self.root / "queue.lock"):
+            self._index()
 
     @staticmethod
     def _directory(path):
@@ -118,13 +120,57 @@ class ExecutionStore:
             if row is not None:
                 yield row
 
+    def _apply_index(self, index, row):
+        kind, record_id = row["kind"], row["id"]
+        live = index["live"].setdefault(kind, {})
+        live.pop(record_id, None)
+        if row["status"] in {"queued", "running", "initializing"}:
+            live[record_id] = {"status": row["status"], "created": row["created"]}
+        recent = index["recent"].setdefault(kind, [])
+        index["recent"][kind] = [record_id, *[key for key in recent if key != record_id]][:64]
+
+    def _index(self):
+        """Caller holds queue.lock. Journal replay repairs a crash between the
+        authoritative record write and its small active/recent index update."""
+        path = self.root / "indexes.json"
+        index = self._read(path)
+        if index is None:
+            index = {"version": 1, "live": {}, "recent": {}}
+            for kind in sorted(self.KINDS):
+                for row in sorted(self._rows(kind), key=lambda row: row["updated"]):
+                    self._apply_index(index, row)
+            self._write(path, index)
+        dirty = self.root / "index-journal.json"
+        journal = self._read(dirty)
+        if journal:
+            row = self._read(self._path(journal["id"], journal["kind"]))
+            if row:
+                self._apply_index(index, row)
+                self._write(path, index)
+            dirty.unlink(missing_ok=True)
+        return index
+
+    def _save_row(self, row):
+        index = self._index()
+        journal = self.root / "index-journal.json"
+        self._write(journal, {"id": row["id"], "kind": row["kind"]})
+        self._write(self._path(row["id"], row["kind"]), row)
+        self._apply_index(index, row)
+        self._write(self.root / "indexes.json", index)
+        journal.unlink(missing_ok=True)
+
     def existing(self, kind, key, request):
         record_id, request_key, fingerprint = self._identity(kind, key, request)
         row = self._read(self._path(record_id, kind))
         if row is None:
             return None
         if row["fingerprint"] != fingerprint or row["request_key"] != request_key:
-            raise HTTPException(409, "request_id already belongs to a different request")
+            from .. import execution_schemas as schemas
+            model = {"workspace": schemas.WorkspaceOpen, "process": schemas.ProcessStart,
+                     "agent": schemas.AgentStart, "publish": schemas.WorkspacePublish}.get(kind)
+            old = row.get("data", {}).get("request", {})
+            if row["request_key"] != request_key or model is None or model.model_validate(old).model_dump() != request:
+                raise HTTPException(409, "request_id already belongs to a different request")
         return self.decode(row)
 
     def create(self, kind, key, request, *, status="queued", data=None):
@@ -133,14 +179,14 @@ class ExecutionStore:
             if existing:
                 return existing, False
             if kind in {"process", "agent"}:
-                pending = sum(row["status"] in {"queued", "running"} for row in self._rows(kind))
+                pending = len(self._index()["live"].get(kind, {}))
                 if pending >= settings.execution_max_pending:
                     raise HTTPException(429, "Execution queue is full; poll existing work before submitting more")
             record_id, request_key, fingerprint = self._identity(kind, key, request)
             now = time.time()
             row = {"id": record_id, "kind": kind, "request_key": request_key, "fingerprint": fingerprint,
                    "status": status, "data": {"request": request, **(data or {})}, "created": now, "updated": now}
-            self._write(self._path(record_id, kind), row)
+            self._save_row(row)
             return self.decode(row), True
 
     def get(self, record_id, kind):
@@ -157,27 +203,33 @@ class ExecutionStore:
                 raise HTTPException(404, f"Unknown execution {kind}")
             row["data"].update(changes)
             row.update(status=status or row["status"], updated=time.time())
-            self._write(path, row)
+            self._save_row(row)
             return self.decode(row)
 
     def claim(self, kind):
         with self._lock(self.root / "queue.lock"):
-            queued = [row for row in self._rows(kind) if row["status"] == "queued"]
+            live = self._index()["live"].get(kind, {})
+            queued = [(key, value) for key, value in live.items() if value["status"] == "queued"]
             if not queued:
                 return None
-            row = min(queued, key=lambda item: item["created"])
+            record_id, _ = min(queued, key=lambda item: item[1]["created"])
+            row = self._read(self._path(record_id, kind))
             row.update(status="running", updated=time.time())
-            self._write(self._path(row["id"], kind), row)
+            self._save_row(row)
             return self.decode(row)
 
     def active(self, kind):
-        return [self.decode(row) for row in self._rows(kind) if row["status"] == "running"]
+        return [row for row in self.pending(kind) if row["status"] == "running"]
 
     def pending(self, kind):
-        return [self.decode(row) for row in self._rows(kind) if row["status"] in {"queued", "running"}]
+        with self._lock(self.root / "queue.lock"):
+            ids = self._index()["live"].get(kind, {})
+            return [self.get(key, kind) for key, value in ids.items() if value["status"] in {"queued", "running"}]
 
     def recent(self, kind, limit=8):
-        return [self.decode(row) for row in sorted(self._rows(kind), key=lambda row: row["updated"], reverse=True)[:limit]]
+        with self._lock(self.root / "queue.lock"):
+            ids = self._index()["recent"].get(kind, [])[:min(limit, 64)]
+            return [self.get(key, kind) for key in ids if self._path(key, kind).exists()]
 
     def send_input(self, process_id, data, eof):
         with self._lock(self.root / "queue.lock"):
