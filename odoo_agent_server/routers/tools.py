@@ -1184,6 +1184,8 @@ def list_tools(include_deprecated: bool = False, strict_names: bool = True) -> l
     visible = _TOOL_DESCRIPTORS if include_deprecated else [t for t in _TOOL_DESCRIPTORS if not t.deprecated]
     if not settings.execution_enabled:
         visible = [t for t in visible if t.name not in EXECUTION_TOOLS]
+    elif not (settings.agent_api_key and settings.agent_model):
+        visible = [t for t in visible if not t.name.startswith("execution.agent_")]
     ordered = sorted(visible, key=lambda item: _agent_priority(item.name))
     result = [item.model_copy(update={"requires_approval": approval_required(item.name)}) for item in ordered]
     if strict_names:

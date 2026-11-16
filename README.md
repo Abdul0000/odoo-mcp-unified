@@ -1,11 +1,10 @@
 # Odoo MCP Agent Connector — Full Backend Plan
 
-Optional Oracle task execution and background coding: see
-[Execution worker setup](docs/EXECUTION_WORKER.md). The execution lane adds
-isolated task clones, file tools, Docker commands with polling/stdin/cancellation,
-verified Git publishing, and bounded persistent OpenAI coding tasks. It is disabled
-by default and requires a separate worker; autonomous tasks additionally need model
-configuration. Existing Odoo deployment verification remains authoritative.
+Oracle task execution: see [Execution worker setup](docs/EXECUTION_WORKER.md).
+The optional execution lane adds isolated task clones, file tools, Docker commands
+with polling/stdin/cancellation, and verified Git publishing. ChatGPT supplies
+reasoning over MCP: no backend model key or database is required. Enable the
+separate worker once; existing Odoo deployment verification remains authoritative.
 
 This package implements the backend-only connector from the final plan:
 

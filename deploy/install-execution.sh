@@ -23,4 +23,4 @@ PY
 systemctl daemon-reload
 systemctl restart odoo-mcp.service
 systemctl enable --now odoo-mcp-execution.service
-echo 'Execution worker enabled. OPENAI_API_KEY and OPENAI_MODEL are required only for autonomous tasks.'
+echo 'ChatGPT-controlled MCP execution enabled; no backend model key is required.'

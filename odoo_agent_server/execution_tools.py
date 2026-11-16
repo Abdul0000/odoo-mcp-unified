@@ -33,6 +33,7 @@ def dispatch_execution(name, args, *, service=None):
         from .config import settings
         return {"status": "ready" if age is not None and age < 120 else "worker_unavailable",
                 "heartbeat_age_seconds": round(age, 1) if age is not None else None,
+                "mode": "chatgpt_mcp", "requires_model_key": False,
                 "agent_configured": bool(settings.agent_api_key and settings.agent_model),
                 "execution": "Docker; no network; task-only mount; bounded memory, runtime and logs"}
     if name == "execution.workspace_open":

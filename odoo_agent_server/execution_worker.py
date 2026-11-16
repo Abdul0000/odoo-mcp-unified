@@ -1,6 +1,6 @@
 """Single-consumer worker: python -m odoo_agent_server.execution_worker.
 
-Only this service needs Docker access. The HTTP API enqueues work in SQLite.
+Only this service needs Docker access. The HTTP API enqueues work in JSON files.
 Commands run without network or credentials in resource-limited containers.
 """
 from __future__ import annotations

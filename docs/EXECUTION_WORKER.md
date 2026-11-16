@@ -1,5 +1,9 @@
 # Oracle task execution and persistent coding tasks
 
+Normal ChatGPT-to-MCP coding needs no OpenAI API key on Oracle: ChatGPT supplies
+reasoning, and the Oracle worker executes tools. Optional standalone agent tools
+are hidden unless their separate model configuration exists.
+
 This optional lane adds isolated task clones, file operations, asynchronous commands,
 commit/push, and a persistent OpenAI Responses API coding loop. It is disabled by
 default. Existing Odoo authentication and deployment policies are unchanged.
@@ -7,8 +11,9 @@ default. Existing Odoo authentication and deployment policies are unchanged.
 ## Runtime boundary
 
 The HTTP API creates work in `ODOO_AGENT_EXECUTION_ROOT` (default
-`/var/lib/odoo-mcp/execution`). SQLite WAL transactions handle idempotent submission,
-bounded queues and atomic claims. One separate `odoo-executor` systemd service owns
+`/var/lib/odoo-mcp/execution`). Atomic JSON files and cross-process file locks handle
+idempotent submission, bounded queues and atomic claims. No database is required.
+One separate `odoo-executor` systemd service owns
 the worker lock. Only this account joins the Docker group; the API does not need it.
 Docker access is privileged: do not expose that socket to the task container.
 
@@ -105,7 +110,7 @@ sudo journalctl -u odoo-mcp-execution.service -n 50 --no-pager
 Logs cap at 2 MB per command; hitting the cap stops the container. Queue capacity
 defaults to ten outstanding commands and ten agent tasks. There is no automatic
 deletion of task workspaces: archive important work and remove old execution data
-under an operator-managed retention policy. Do not delete the live SQLite files.
+under an operator-managed retention policy. Do not delete active task records.
 
 Once installed, deployment rebuilds the cached image and runs the full regression
 suite inside it before activating a release. Deployment restarts an active worker

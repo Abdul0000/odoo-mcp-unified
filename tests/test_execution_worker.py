@@ -237,11 +237,14 @@ def test_execution_mcp_lane_is_independent_of_odoo_guard(execution, monkeypatch)
 
 def test_mcp_exposes_execution_tools_and_disabled_mode(monkeypatch):
     monkeypatch.setattr(settings, "execution_enabled", True)
+    monkeypatch.setattr(settings, "agent_api_key", None)
+    monkeypatch.setattr(settings, "agent_model", None)
     client = TestClient(app)
     headers = {"Authorization": "Bearer " + settings.api_token}
     result = client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()
     names = {tool["name"] for tool in result["result"]["tools"]}
-    assert {name.replace(".", "_") for name in EXECUTION_TOOLS} <= names
+    assert {name.replace(".", "_") for name in EXECUTION_TOOLS if not name.startswith("execution.agent_")} <= names
+    assert not any(name.startswith("execution_agent_") for name in names)
     monkeypatch.setattr(settings, "execution_enabled", False)
     with pytest.raises(HTTPException):
         dispatch_execution("execution.status", {})
@@ -254,3 +257,26 @@ def test_mcp_exposes_execution_tools_and_disabled_mode(monkeypatch):
 ])
 def test_repository_identity(left, right, match):
     assert same_repository(left, right) is match
+
+
+def test_json_state_allows_the_separate_worker_and_api_to_write(execution):
+    service, workspace, _, _ = execution
+    path = service.store.root / "records" / "workspace" / f"{workspace}.json"
+    assert path.stat().st_mode & 0o660 == 0o660
+    assert not list(service.store.root.rglob("*.sqlite*"))
+    assert json.loads(path.read_text())["status"] == "ready"
+
+
+def test_failed_checkpoint_keeps_the_previous_json_record(execution, monkeypatch):
+    service, workspace, _, _ = execution
+    path = service.store.root / "records" / "workspace" / f"{workspace}.json"
+    before = path.read_bytes()
+    def failed_replace(*_args):
+        raise OSError("simulated storage interruption")
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", failed_replace)
+        with pytest.raises(OSError):
+            service.store.update(workspace, "workspace", status="failed")
+    assert path.read_bytes() == before
+    assert list(path.parent.iterdir()) == [path]
+    assert service.store.update(workspace, "workspace", checkpoint="recovered")["checkpoint"] == "recovered"

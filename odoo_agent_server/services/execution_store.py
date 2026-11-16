@@ -1,151 +1,197 @@
-"""Transactional, restart-safe queue shared by the API and one execution worker."""
+"""Database-free execution state: atomic JSON checkpoints and process locks."""
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+import time
+
 try:
     import fcntl
-except ImportError:  # The optional Oracle worker requires a POSIX host.
+except ImportError:
     fcntl = None
-import json
-from pathlib import Path
-import sqlite3
-import time
-from uuid import uuid4
 
 from fastapi import HTTPException
-
 from ..config import settings
 
 
 class ExecutionStore:
+    KINDS = {"workspace", "process", "agent", "publish"}
+
     def __init__(self):
         if fcntl is None:
             raise HTTPException(503, "Task execution requires a POSIX host")
         self.root = Path(settings.execution_root).expanduser().resolve()
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o770)
-        self.db_path = self.root / "execution.sqlite3"
-        with self.connect() as db:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("""CREATE TABLE IF NOT EXISTS records (
-                id TEXT PRIMARY KEY, kind TEXT NOT NULL, request_key TEXT UNIQUE NOT NULL,
-                fingerprint TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL,
-                created REAL NOT NULL, updated REAL NOT NULL)""")
-            db.execute("CREATE INDEX IF NOT EXISTS queue ON records(kind,status,created)")
-            db.execute("""CREATE TABLE IF NOT EXISTS input (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT, process_id TEXT NOT NULL,
-                data TEXT NOT NULL, eof INTEGER NOT NULL)""")
-
-    @contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.db_path, timeout=10)
-        db.row_factory = sqlite3.Row
-        try:
-            yield db
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
+        self._directory(self.root)
+        self._directory(self.root / "records")
 
     @staticmethod
-    def decode(row):
-        return {**json.loads(row["data"]), "id": row["id"], "status": row["status"],
-                "created_at": row["created"], "updated_at": row["updated"]}
+    def _directory(path):
+        path.mkdir(parents=True, exist_ok=True, mode=0o2770)
+        if path.stat().st_uid == os.geteuid():
+            path.chmod(0o2770)
+        return path
 
-    def create(self, kind, key, request, *, status="queued", data=None):
-        fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM records WHERE request_key=?", (f"{kind}:{key}",)).fetchone()
-            if row:
-                if row["fingerprint"] != fingerprint:
-                    raise HTTPException(409, "request_id already belongs to a different request")
-                return self.decode(row), False
-            if kind in {"process", "agent"}:
-                count = db.execute("SELECT count(*) FROM records WHERE kind=? AND status IN ('queued','running')", (kind,)).fetchone()[0]
-                if count >= settings.execution_max_pending:
-                    raise HTTPException(429, "Execution queue is full; poll existing work before submitting more")
-            record_id, now = uuid4().hex, time.time()
-            payload = {"request": request, **(data or {})}
-            db.execute("INSERT INTO records VALUES (?,?,?,?,?,?,?,?)",
-                       (record_id, kind, f"{kind}:{key}", fingerprint, status, json.dumps(payload), now, now))
-            return {**payload, "id": record_id, "status": status, "created_at": now, "updated_at": now}, True
+    def _kind_dir(self, kind):
+        if kind not in self.KINDS:
+            raise HTTPException(400, "Invalid execution record type")
+        return self._directory(self.root / "records" / kind)
 
-    def get(self, record_id, kind):
-        with self.connect() as db:
-            row = db.execute("SELECT * FROM records WHERE id=? AND kind=?", (record_id, kind)).fetchone()
-        if not row:
-            raise HTTPException(404, f"Unknown execution {kind}")
-        return self.decode(row)
+    def _path(self, record_id, kind):
+        if not re.fullmatch(r"[a-f0-9]{32}", record_id):
+            raise HTTPException(404, "Unknown execution record")
+        return self._kind_dir(kind) / f"{record_id}.json"
 
-    def existing(self, kind, key, request):
-        with self.connect() as db:
-            row = db.execute("SELECT * FROM records WHERE request_key=?", (f"{kind}:{key}",)).fetchone()
-        if not row:
+    @staticmethod
+    def _read(path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
             return None
-        fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
-        if row["fingerprint"] != fingerprint:
-            raise HTTPException(409, "request_id already belongs to a different request")
-        return self.decode(row)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(500, "Execution state is unreadable; inspect worker storage") from exc
+
+    @staticmethod
+    def _write(path, value):
+        temp = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+                temp = Path(stream.name)
+                os.fchmod(stream.fileno(), 0o660)
+                stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            temp.replace(path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                try:
+                    os.fsync(directory)
+                except OSError as exc:
+                    if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                        raise
+            finally:
+                os.close(directory)
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+    @contextmanager
+    def _lock(self, path):
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
+        try:
+            if os.fstat(descriptor).st_uid == os.geteuid():
+                os.fchmod(descriptor, 0o660)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     @contextmanager
     def workspace_lock(self, workspace_id):
-        locks = self.root / "locks"
-        locks.mkdir(exist_ok=True, mode=0o770)
-        with (locks / f"{workspace_id}.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock, fcntl.LOCK_UN)
+        if not re.fullmatch(r"[a-f0-9]{32}", workspace_id):
+            raise HTTPException(404, "Unknown execution workspace")
+        locks = self._directory(self.root / "locks")
+        with self._lock(locks / f"{workspace_id}.lock"):
+            yield
 
-    def pending(self, kind):
-        with self.connect() as db:
-            rows = db.execute("SELECT * FROM records WHERE kind=? AND status IN ('queued','running')", (kind,)).fetchall()
-        return [self.decode(row) for row in rows]
+    @staticmethod
+    def decode(row):
+        return {**row["data"], "id": row["id"], "status": row["status"],
+                "created_at": row["created"], "updated_at": row["updated"]}
+
+    @staticmethod
+    def _identity(kind, key, request):
+        request_key = f"{kind}:{key}"
+        record_id = hashlib.sha256(request_key.encode()).hexdigest()[:32]
+        fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+        return record_id, request_key, fingerprint
+
+    def _rows(self, kind):
+        for path in self._kind_dir(kind).glob("*.json"):
+            row = self._read(path)
+            if row is not None:
+                yield row
+
+    def existing(self, kind, key, request):
+        record_id, request_key, fingerprint = self._identity(kind, key, request)
+        row = self._read(self._path(record_id, kind))
+        if row is None:
+            return None
+        if row["fingerprint"] != fingerprint or row["request_key"] != request_key:
+            raise HTTPException(409, "request_id already belongs to a different request")
+        return self.decode(row)
+
+    def create(self, kind, key, request, *, status="queued", data=None):
+        with self._lock(self.root / "queue.lock"):
+            existing = self.existing(kind, key, request)
+            if existing:
+                return existing, False
+            if kind in {"process", "agent"}:
+                pending = sum(row["status"] in {"queued", "running"} for row in self._rows(kind))
+                if pending >= settings.execution_max_pending:
+                    raise HTTPException(429, "Execution queue is full; poll existing work before submitting more")
+            record_id, request_key, fingerprint = self._identity(kind, key, request)
+            now = time.time()
+            row = {"id": record_id, "kind": kind, "request_key": request_key, "fingerprint": fingerprint,
+                   "status": status, "data": {"request": request, **(data or {})}, "created": now, "updated": now}
+            self._write(self._path(record_id, kind), row)
+            return self.decode(row), True
+
+    def get(self, record_id, kind):
+        row = self._read(self._path(record_id, kind))
+        if row is None:
+            raise HTTPException(404, f"Unknown execution {kind}")
+        return self.decode(row)
 
     def update(self, record_id, kind, *, status=None, **changes):
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM records WHERE id=? AND kind=?", (record_id, kind)).fetchone()
-            if not row:
+        with self._lock(self.root / "queue.lock"):
+            path = self._path(record_id, kind)
+            row = self._read(path)
+            if row is None:
                 raise HTTPException(404, f"Unknown execution {kind}")
-            data = json.loads(row["data"])
-            data.update(changes)
-            db.execute("UPDATE records SET status=?,data=?,updated=? WHERE id=?",
-                       (status or row["status"], json.dumps(data), time.time(), record_id))
-        return self.get(record_id, kind)
+            row["data"].update(changes)
+            row.update(status=status or row["status"], updated=time.time())
+            self._write(path, row)
+            return self.decode(row)
 
     def claim(self, kind):
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM records WHERE kind=? AND status='queued' ORDER BY created LIMIT 1", (kind,)).fetchone()
-            if not row:
+        with self._lock(self.root / "queue.lock"):
+            queued = [row for row in self._rows(kind) if row["status"] == "queued"]
+            if not queued:
                 return None
-            db.execute("UPDATE records SET status='running',updated=? WHERE id=?", (time.time(), row["id"]))
-        return self.get(row["id"], kind)
+            row = min(queued, key=lambda item: item["created"])
+            row.update(status="running", updated=time.time())
+            self._write(self._path(row["id"], kind), row)
+            return self.decode(row)
 
     def active(self, kind):
-        with self.connect() as db:
-            rows = db.execute("SELECT * FROM records WHERE kind=? AND status='running'", (kind,)).fetchall()
-        return [self.decode(row) for row in rows]
+        return [self.decode(row) for row in self._rows(kind) if row["status"] == "running"]
+
+    def pending(self, kind):
+        return [self.decode(row) for row in self._rows(kind) if row["status"] in {"queued", "running"}]
 
     def send_input(self, process_id, data, eof):
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT status FROM records WHERE id=? AND kind='process'", (process_id,)).fetchone()
-            if not row or row[0] not in {"running", "queued"}:
+        with self._lock(self.root / "queue.lock"):
+            record = self.get(process_id, "process")
+            if record["status"] not in {"running", "queued"}:
                 raise HTTPException(409, "Process is not accepting input")
-            pending = db.execute("SELECT coalesce(sum(length(data)),0) FROM input WHERE process_id=?", (process_id,)).fetchone()[0]
-            if pending + len(data) > 64000:
+            path = self._directory(self.root / "input") / f"{process_id}.json"
+            rows = self._read(path) or []
+            if sum(len(row[0]) for row in rows) + len(data) > 64000:
                 raise HTTPException(429, "Pending stdin exceeds 64 KB")
-            db.execute("INSERT INTO input(process_id,data,eof) VALUES (?,?,?)", (process_id, data, eof))
+            rows.append([data, eof])
+            self._write(path, rows)
 
     def take_input(self, process_id):
-        with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            rows = db.execute("SELECT data,eof FROM input WHERE process_id=? ORDER BY seq", (process_id,)).fetchall()
-            db.execute("DELETE FROM input WHERE process_id=?", (process_id,))
-        return [(r[0], bool(r[1])) for r in rows]
+        self._path(process_id, "process")
+        with self._lock(self.root / "queue.lock"):
+            path = self._directory(self.root / "input") / f"{process_id}.json"
+            rows = self._read(path) or []
+            path.unlink(missing_ok=True)
+            return [(row[0], bool(row[1])) for row in rows]

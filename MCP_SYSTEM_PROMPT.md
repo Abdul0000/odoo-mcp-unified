@@ -46,7 +46,7 @@ For static REA pass the ws_id and module_name to `rea_xray_module`, `rea_upstrea
 
 ## ORACLE EXECUTION LANE
 
-For checkout commands use `execution_workspace_open` then `execution_files` to inspect/edit the isolated clone; existing writes need the read SHA. `execution_process_start` queues commands; poll with `execution_process_poll` and next_offset. Stdin/cancel tools control execution. Containers have no network or host credentials. `execution_publish` commits/pushes and verifies remote SHA; existing Odoo workflows prove deployment. Only requested independent background work uses `execution_agent_start`; it needs worker model configuration. Poll agent_status and verify its evidence.
+For checkout commands use `execution_workspace_open` then `execution_files` to inspect/edit the isolated clone; existing writes need the read SHA. `execution_process_start` queues commands; poll with `execution_process_poll` and next_offset. Stdin/cancel tools control execution. Containers have no network or host credentials. `execution_publish` commits/pushes and verifies remote SHA; existing Odoo workflows prove deployment. ChatGPT supplies reasoning; no backend model key is needed. Optional agent tools appear only when separately configured.
 
 ## COMPOSITE WORKFLOW
 
