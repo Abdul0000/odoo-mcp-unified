@@ -375,6 +375,33 @@ def test_agent_missing_config_is_explicit(execution, monkeypatch):
     assert result["missing"] == ["OPENAI_API_KEY", "OPENAI_MODEL"]
 
 
+def test_mcp_publish_approval_is_structured_and_resumes_exact_request(execution, monkeypatch):
+    service, ws, _, bare = execution
+    service.files(WorkspaceFiles(workspace_id=ws, operation="write", path="feature.py", content="VALUE = 42\n"))
+    verify(service, ws, monkeypatch)
+    monkeypatch.setattr(settings, "require_approval", True)
+    monkeypatch.setattr(settings, "approval_required_actions_raw", "git.push")
+    client = TestClient(app)
+    def call(name, arguments):
+        return client.post('/mcp', headers={"Authorization": "Bearer " + settings.api_token}, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}).json()['result']
+    args = {"workspace_id": ws, "message": "Verified feature", "request_id": "approved-publish"}
+    pending = call("execution_publish", args)
+    assert pending["isError"]
+    control = pending["structuredContent"]
+    assert control["status"] == "approval_required" and control["state_class"] == "input_required"
+    assert control["approval_id"] and control["input_request"]["requires_explicit_user_consent"]
+    assert control["next_call"] is None and not control["success_allowed"]
+    assert subprocess.check_output(["git", "--git-dir", str(bare), "show", "staging:hello.py"], text=True) == "print('hello')\n"
+    assert "feature.py" not in subprocess.check_output(["git", "--git-dir", str(bare), "ls-tree", "--name-only", "staging"], text=True)
+    approved = call("approvals_approve", {"approval_id": control["approval_id"], "reason": "Explicit disposable test consent"})
+    assert not approved["isError"]
+    resume = control["input_request"]["resume_call"]
+    pushed = call(resume["tool"], resume["arguments"])
+    assert not pushed["isError"] and pushed["structuredContent"]["pushed"]
+    assert subprocess.check_output(["git", "--git-dir", str(bare), "show", "staging:feature.py"], text=True) == "VALUE = 42\n"
+
+
 def test_agent_checkpoint_continuation_and_budget(execution, monkeypatch):
     service, ws, _, _ = execution
     monkeypatch.setattr(settings, "agent_api_key", "test-key")

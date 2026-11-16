@@ -334,13 +334,14 @@ def _ensure_provider_control_envelope(value: Any, *, is_error: bool = False) -> 
         }
 
     # Enforce the lifecycle invariant after every branch above: terminal means
-    # no next call, and non-terminal means a callable continuation exists.
+    # no next call. Agent continuations need a callable next step; human input
+    # instead carries its gated resume call inside input_request.
     if out["terminal"]:
         out["completion_required"] = False
         if isinstance(out.get("next_call"), dict):
             out.setdefault("recovery_call", out["next_call"])
             out["next_call"] = None
-    elif not isinstance(out.get("next_call"), dict):
+    elif not isinstance(out.get("next_call"), dict) and out["state_class"] != "input_required":
         out["next_call"] = None
         out["completion_required"] = False
         out["terminal"] = True
@@ -1223,14 +1224,27 @@ async def _handle_shell(
             )
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
+            error_payload = {"status": "failed", "error": message,
+                             "error_code": type(exc).__name__, "retryable": None}
+            if (isinstance(exc, HTTPException) and isinstance(exc.detail, dict)
+                    and exc.detail.get("approval_required") and exc.detail.get("approval_id")):
+                # Keep the gate machine-readable. A stringified HTTPException hides
+                # the approval ID and makes clients treat authorization as a failure.
+                detail = exc.detail
+                resume_args = {**arguments, "approval_id": detail["approval_id"]}
+                error_payload.update(
+                    status="approval_required", approval_required=True,
+                    approval_id=detail["approval_id"], action=detail.get("action"),
+                    message=detail.get("message"), error_code="approval_required",
+                    completion_required=True, success_allowed=False, retryable=False,
+                    input_request={"kind": "approval", "approval_id": detail["approval_id"],
+                                   "action": detail.get("action"), "prompt": detail.get("message"),
+                                   "requires_explicit_user_consent": True,
+                                   "resume_call": {"tool": name, "arguments": resume_args}},
+                )
             structured_error = _provider_safe_next_calls(
                 _ensure_provider_control_envelope(
-                    {
-                        "status": "failed",
-                        "error": message,
-                        "error_code": type(exc).__name__,
-                        "retryable": None,
-                    },
+                    error_payload,
                     is_error=True,
                 )
             )
