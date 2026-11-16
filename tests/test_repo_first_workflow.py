@@ -51,3 +51,54 @@ def test_repo_write_single_pass_threshold_is_1000_lines(tmp_path: Path, monkeypa
     assert "1000 lines" in over_1000.extra["large_file_warning"]
     assert "large_file_warning" not in chunk_start.extra
     assert "large_file_warning" not in chunk_next.extra
+
+
+def test_failed_clone_does_not_leave_an_incomplete_target(tmp_path, monkeypatch):
+    from odoo_agent_server.schemas import CommandResult
+    monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
+    target = tmp_path / "client"
+    def failed_download(self, command, cwd, timeout_seconds, env=None):
+        staging = Path(command[-1])
+        (staging / ".git").mkdir()
+        (staging / ".git" / "index.lock").write_text("interrupted")
+        return CommandResult(command=command, cwd=str(cwd), exit_code=124, timed_out=True, stderr="clone timed out")
+    monkeypatch.setattr(RepoService, "_run", failed_download)
+    result = RepoService()._clone_checkout(target, "https://gitlab.internal/acme/a.git", "dev", 1, {})
+    assert result.timed_out
+    assert not target.exists()
+    assert not list(tmp_path.glob(".client.clone-*"))
+
+
+def test_repo_timeout_stops_descendant_processes(tmp_path):
+    import os
+    import signal
+    import sys
+    import time
+    import pytest
+    if os.name == "nt":
+        pytest.skip("Oracle process-group cleanup is POSIX-specific")
+    child = None
+    script = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); print(p.pid,flush=True); time.sleep(60)"
+    try:
+        result = RepoService()._run([sys.executable, "-u", "-c", script], tmp_path, 1)
+        child = int(result.stdout.strip().splitlines()[0])
+        assert result.exit_code == 124 and result.timed_out
+        assert "timed out after 1s" in result.stderr
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            stat = Path(f"/proc/{child}/stat")
+            if stat.exists() and stat.read_text().split()[2] == "Z":
+                break  # Dead child awaiting reaping by the container's PID 1.
+            time.sleep(0.02)
+        else:
+            raise AssertionError("Timed-out command left its child running")
+    finally:
+        if child:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
@@ -30,6 +31,11 @@ class ClientGateService:
     def __init__(self, store: JsonStore | None = None) -> None:
         self.store = store or JsonStore()
         self.resolver = ClientResolverService()
+        self.progress_callback = None
+
+    def _progress(self, phase: str, checks: dict[str, str], log: list[str]) -> None:
+        if self.progress_callback:
+            self.progress_callback(phase, dict(checks), list(log[-30:]))
 
     def check(self, client_name: str | None = None, validate: bool = False, force_refresh: bool = False) -> dict[str, Any]:
         clients = [normalise_client(item) for item in get_odoo_clients()]
@@ -399,6 +405,7 @@ class ClientGateService:
             checks[check] = "ok"
             log.append(message)
 
+        self._progress("config", checks, log)
         config_errors = self._config_errors(resolved)
         if config_errors:
             checks["config"] = "failed"
@@ -409,9 +416,13 @@ class ClientGateService:
             pass_check("config", "Required client coding settings are present and do not look like placeholders.")
 
         if base_ok:
+            self._progress("checkout", checks, log)
             checkout_result = self._check_checkout(resolved)
             checks["checkout"] = checkout_result["status"]
-            checks["github"] = checkout_result["status"] if checkout_result.get("network_verified") else "deferred"
+            host = (urlsplit(resolved.repo).hostname or resolved.repo).lower()
+            provider = "gitlab" if "gitlab" in host else "github" if "github.com" in host else "git"
+            checks["repository"] = checkout_result["status"] if checkout_result.get("network_verified") else "deferred"
+            checks[provider] = checks["repository"]
             checks["branch"] = checkout_result["status"]
             log.extend(checkout_result["log"])
             if checkout_result["status"] != "ok":
@@ -425,6 +436,7 @@ class ClientGateService:
         # prevents the contradictory state where client.check succeeds but the
         # next workflow call returns "Resource not found".
         if coding_ready:
+            self._progress("coding_workflows", checks, log)
             try:
                 from ..main import tool_registry_status
 
@@ -450,7 +462,8 @@ class ClientGateService:
         # Odoo shell is useful for data/model operations, but it is not required
         # for coding work. It runs through the selected client's Odoo.sh SSH
         # settings; no process-wide environment is mutated.
-        if coding_ready:
+        if not config_errors:
+            self._progress("odoo_shell", checks, log)
             if self._has_shell_config(resolved):
                 odoo_result = self._check_odoo_shell(resolved)
                 checks["odoo_shell"] = odoo_result["status"]
@@ -460,7 +473,8 @@ class ClientGateService:
                 checks["odoo_shell"] = "skipped"
                 log.append("Odoo shell skipped: Odoo.sh SSH/db/path settings are missing or placeholders.")
 
-        if coding_ready:
+        if not config_errors:
+            self._progress("odoosh_ssh", checks, log)
             if self._has_odoosh_config(resolved):
                 ssh_result = self._check_odoosh(resolved)
                 checks["odoosh_ssh"] = ssh_result["status"]
@@ -472,6 +486,7 @@ class ClientGateService:
                 checks["addons_path"] = "skipped"
                 log.append("Odoo.sh SSH skipped: SSH host/user/key/db/path settings are missing or placeholders.")
 
+        self._progress("complete", checks, log)
         # Safe deploy/module upgrade needs Odoo.sh SSH because the pipeline must
         # verify the pushed SHA, check /home/odoo/src/user file hashes, read
         # Odoo.sh error packs, and run the module upgrade. HTTPS JSON-RPC can
@@ -503,6 +518,9 @@ class ClientGateService:
         elif coding_ready:
             summary = "Client validated for coding only; Odoo shell and Odoo.sh SSH are unavailable."
             final_error_type = "odoo_connection_unavailable"
+        elif shell_ok or ssh_ok:
+            summary = "Coding validation failed; live data access is available. See the separate repository/workflow and transport checks."
+            final_error_type = error_type or "checkout_error"
         else:
             summary = "Client validation failed."
             final_error_type = error_type or "client_validation_error"
@@ -623,7 +641,12 @@ class ClientGateService:
             if existing.is_dir() and (existing / ".git").exists():
                 local_check = GitService().validate_target(str(existing), client.branch, "origin")
                 if local_check.exit_code == 0:
-                    return {"status": "ok", "network_verified": False, "log": [f"Existing checkout validated locally without fetch/pull: {existing} on branch {client.branch}. Remote access will be proven during push."]}
+                    repo = RepoService()
+                    remote_check = repo._run(["git", "ls-remote", "--heads", client.authenticated_repo, f"refs/heads/{client.branch}"], existing, 15, env=repo._git_env())
+                    if remote_check.exit_code != 0 or not remote_check.stdout.strip():
+                        return {"status": "failed", "network_verified": True, "error_type": "git_remote_error",
+                                "log": [self._redact(remote_check.stderr or "Configured branch was not advertised by the remote.")]}
+                    return {"status": "ok", "network_verified": True, "log": [f"Existing checkout target and native Git remote/branch verified without fetch/pull: {existing} on branch {client.branch}."]}
                 return {"status": "failed", "error_type": "checkout_target_error", "log": [self._redact(local_check.stderr or local_check.stdout or "Existing checkout target validation failed.")]}
 
             # Validation itself runs in a connector-owned background job, so it

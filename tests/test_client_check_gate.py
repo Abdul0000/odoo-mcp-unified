@@ -272,3 +272,42 @@ def test_server_owned_job_lease_survives_interactive_validation_expiry(monkeypat
         project_path=str(checkout),
         lease=lease,
     )
+
+
+def test_gitlab_validation_persists_phase_progress_and_separate_transport_results(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
+    _set_clients(monkeypatch, [_client("Alpha", "https://gitlab.internal/acme/a.git", "dev", str(tmp_path / "repo"))])
+    callbacks = []
+    monkeypatch.setattr(tools, "submit_background", callbacks.append)
+    monkeypatch.setattr(ClientGateService, "_check_checkout", lambda self, client: {"status": "ok", "network_verified": True, "log": ["native Git ready"]})
+    def https_probe(self, client):
+        job = JsonStore().get_job(started["job_id"])
+        assert job.result["phase"] == "odoo_shell"
+        assert job.result["checks"]["gitlab"] == "ok"
+        assert "github" not in job.result["checks"]
+        assert job.steps[-1].name == "odoo_shell" and job.steps[-1].status == "running"
+        return {"status": "ok", "log": ["HTTPS read succeeded"]}
+    monkeypatch.setattr(ClientGateService, "_check_odoo_shell", https_probe)
+    monkeypatch.setattr(ClientGateService, "_check_odoosh", lambda self, client: {"status": "failed", "log": ["SSH timed out"]})
+    started = tools._start_client_validation(ClientCheckRequest(client_name="Alpha", validate=True))
+    callbacks[0]()
+    finished = JsonStore().get_job(started["job_id"])
+    assert finished.result["coding_ready"] is True
+    assert finished.result["data_query_ready"] is True
+    assert finished.result["deploy_ready"] is False
+    assert finished.result["full_validation_passed"] is False
+    assert [step.name for step in finished.steps] == ["config", "checkout", "coding_workflows", "odoo_shell", "odoosh_ssh"]
+    assert finished.steps[-1].status == "failed"
+
+
+def test_failed_checkout_does_not_hide_live_transport_results(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
+    _set_clients(monkeypatch, [_client("Alpha", "https://gitlab.internal/acme/a.git", "dev", str(tmp_path / "repo"))])
+    monkeypatch.setattr(ClientGateService, "_check_checkout", lambda self, client: {"status": "failed", "log": ["clone timed out"]})
+    monkeypatch.setattr(ClientGateService, "_check_odoo_shell", lambda self, client: {"status": "ok", "log": ["HTTPS ready"]})
+    monkeypatch.setattr(ClientGateService, "_check_odoosh", lambda self, client: {"status": "failed", "log": ["SSH unavailable"]})
+    result = ClientGateService().check("Alpha", validate=True)
+    assert result["coding_ready"] is False
+    assert result["data_query_ready"] is True
+    assert result["checks"]["odoo_shell"] == "ok"
+    assert result["checks"]["odoosh_ssh"] == "failed"

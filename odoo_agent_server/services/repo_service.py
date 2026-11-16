@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -110,7 +111,7 @@ class RepoService:
                             "Refusing to clone over existing files."
                         ),
                     )
-                clone = self._run(["git", "clone", "--filter=blob:none", "--branch", resolved_branch, "--single-branch", resolved_repo_url, str(project)], workspace, timeout_seconds, env=env)
+                clone = self._clone_checkout(project, resolved_repo_url, resolved_branch, timeout_seconds, env)
                 steps.append(clone)
                 if clone.exit_code != 0:
                     raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=clone.stderr or clone.stdout or "git clone failed")
@@ -142,7 +143,7 @@ class RepoService:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=merge.stderr or merge.stdout or "git merge --ff-only failed")
         else:
             project.parent.mkdir(parents=True, exist_ok=True)
-            clone = self._run(["git", "clone", "--filter=blob:none", "--branch", resolved_branch, "--single-branch", resolved_repo_url, str(project)], workspace, timeout_seconds, env=env)
+            clone = self._clone_checkout(project, resolved_repo_url, resolved_branch, timeout_seconds, env)
             steps.append(clone)
             if clone.exit_code != 0:
                 raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=clone.stderr or clone.stdout or "git clone failed")
@@ -163,6 +164,22 @@ class RepoService:
             already_cloned=already_cloned,
             steps=steps,
         )
+
+    def _clone_checkout(self, project: Path, repo_url: str, branch: str, timeout_seconds: int, env: dict[str, str]) -> CommandResult:
+        """Publish only a completed clone; a failed download never poisons the target."""
+        staging_parent = resolve_allowed_path(str(project.parent))
+        staging = Path(tempfile.mkdtemp(prefix=f".{project.name}.clone-", dir=staging_parent))
+        try:
+            result = self._run(["git", "clone", "--filter=blob:none", "--branch", branch, "--single-branch", repo_url, str(staging)], project.parent, timeout_seconds, env=env)
+            if result.exit_code != 0:
+                return result
+            if project.exists() and any(project.iterdir()):
+                return result.model_copy(update={"exit_code": 1, "stderr": "Target changed while cloning; existing files were preserved."})
+            staging.replace(project)
+            return result
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
     def list_custom_modules(self, project_path: str, max_depth: int = 5, include_uninstallable: bool = False) -> list[CustomModuleItem]:
         """Discover custom Odoo modules from repo files, not from the Odoo database.
@@ -1211,6 +1228,7 @@ class RepoService:
 
     def _git_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
         if settings.git_ssh_key_path:
             env["GIT_SSH_COMMAND"] = f"ssh -i {settings.git_ssh_key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
         return env
@@ -1300,23 +1318,22 @@ class RepoService:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsafe path in patch header: {line[:180]}")
 
     def _run(self, command: list[str], cwd: Path, timeout_seconds: int, env: dict[str, str] | None = None) -> CommandResult:
+        process = subprocess.Popen(command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=env, start_new_session=os.name != "nt")
+        timed_out = False
         try:
-            completed = subprocess.run(command, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds, check=False, env=env)
-            return CommandResult(
-                command=[mask_repo_url(part) for part in command],
-                cwd=str(cwd),
-                exit_code=completed.returncode,
-                stdout=mask_repo_url(completed.stdout[-20000:]),
-                stderr=mask_repo_url(completed.stderr[-20000:]),
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "")[-20000:] if isinstance(exc.stdout, str) else ""
-            stderr = (exc.stderr or "")[-20000:] if isinstance(exc.stderr, str) else ""
-            return CommandResult(
-                command=[mask_repo_url(part) for part in command],
-                cwd=str(cwd),
-                exit_code=124,
-                stdout=mask_repo_url(stdout),
-                stderr=mask_repo_url(stderr),
-                timed_out=True,
-            )
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                if os.name == "nt":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            stderr += f"\nCommand timed out after {timeout_seconds}s; subprocess tree stopped."
+        return CommandResult(command=[mask_repo_url(part) for part in command], cwd=str(cwd),
+                             exit_code=124 if timed_out else process.returncode,
+                             stdout=mask_repo_url(stdout[-20000:]), stderr=mask_repo_url(stderr[-20000:]), timed_out=timed_out)

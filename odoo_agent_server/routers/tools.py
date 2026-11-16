@@ -8959,7 +8959,27 @@ def _start_client_validation(req: ClientCheckRequest) -> dict[str, Any]:
     def _background() -> None:
         worker_store = JsonStore()
         try:
-            result = ClientGateService().check(
+            phase_started = time.monotonic()
+
+            def report_progress(phase: str, checks: dict, log: list) -> None:
+                nonlocal phase_started
+                active = worker_store.get_job(job.id)
+                now = time.monotonic()
+                if active.steps and active.steps[-1].status == "running":
+                    previous = active.steps[-1]
+                    check = checks.get(previous.name)
+                    previous.status = "passed" if check == "ok" else "skipped" if check == "skipped" else "failed" if check == "failed" else "passed"
+                    previous.duration_ms = int((now - phase_started) * 1000)
+                if phase != "complete":
+                    active.steps.append(JobStep(name=phase, status="running"))
+                active.result = {"phase": phase, "client_name": client_name, "checks": checks,
+                                 "validation_log": log, "completion_required": True, "success_allowed": False}
+                worker_store.update_job(active)
+                phase_started = now
+
+            validator = ClientGateService()
+            validator.progress_callback = report_progress
+            result = validator.check(
                 client_name,
                 validate=True,
                 force_refresh=req.force_refresh,
