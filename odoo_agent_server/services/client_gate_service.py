@@ -528,7 +528,11 @@ class ClientGateService:
             summary = "Client fully validated successfully."
             final_error_type = None
         elif coding_ready and ssh_ok and not shell_ok:
-            summary = "Client validated for coding and deploy/query via Odoo.sh SSH fallback; Odoo shell login failed or is not configured."
+            summary = (
+                "Client validated for coding and deployment via Odoo.sh SSH; configured HTTPS user authentication failed, so ordinary data queries remain unavailable."
+                if https_configured else
+                "Client validated for coding, deployment and queries via configured Odoo.sh SSH fallback."
+            )
             final_error_type = "odoo_login_error" if checks.get("odoo_shell") == "failed" else None
         elif coding_ready and shell_ok and not ssh_ok:
             summary = "Client validated for coding and data queries, but deploy is blocked because Odoo.sh SSH is unavailable."

@@ -215,6 +215,7 @@ def test_client_check_shell_failure_still_allows_coding_when_ssh_ok(monkeypatch,
     assert "SSH" in checked["summary"]
     assert checked["data_query_ready"] is False
     assert checked["full_validation_passed"] is False
+    assert "ordinary data queries remain unavailable" in checked["summary"]
 
     content = repo_read(RepoReadRequest(client_name="Alpha", project_path=str(checkout), relative_path="README.md"))
     assert content.content == "ok\n"
