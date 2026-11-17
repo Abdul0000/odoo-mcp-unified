@@ -41,3 +41,12 @@ or browser flows. Do not create broad placeholder suites.
   configured-user record assertions.
 - Native, API, and functional execution is allowed only on an `ODOO_CLIENTS`
   entry marked `environment=test`. The workflow does not edit or deploy code.
+
+
+## Relevant checks in execution tasks
+
+Use task_test_plan after changes for bounded source-derived syntax/regression/build
+proposals. Native Odoo tests must use an isolated Odoo runtime/database, never plain
+pytest. Missing layers remain explicit. Applying proposals can strengthen existing
+acceptance checks, never remove them. Test failures after source/runtime drift must
+be rerun against the final exact tree.

@@ -703,6 +703,8 @@ def _wait_workflow_job_until_terminal(store: JsonStore, job_id: str, poll_interv
 
 @router.post("/safe-deploy-module", response_model=WorkflowReport)
 async def safe_deploy_module(payload: SafeDeployModuleRequest) -> WorkflowReport:
+    from ..services.published_workspace_service import validate_published_workspace
+    await asyncio.to_thread(validate_published_workspace, payload)
     client_gate = ClientGateService()
     try:
         validation_lease = client_gate.issue_job_validation_lease(
@@ -1871,7 +1873,7 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         changed_files,
         module_root_rel,
     )
-    if no_changes_detected:
+    if no_changes_detected and not payload.execution_workspace_id:
         try:
             verify_result = verify_deployed_module(DeployedModuleVerifyRequest(
                 project_path=str(project_path),
@@ -2013,6 +2015,19 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
 
     idempotent_clean_retry = False
     idempotent_head_path_gate: CommandResult | None = None
+    if payload.execution_workspace_id:
+        from ..services.published_workspace_service import validate_published_workspace
+        try:
+            published = validate_published_workspace(payload)
+            idempotent_head_path_gate = _assert_head_commit_contains_paths(git, project_path, deploy_paths)
+            if idempotent_head_path_gate.exit_code != 0:
+                _fail('published_commit_path_gate', idempotent_head_path_gate)
+                return
+            idempotent_clean_retry = True
+            _step('adopt_verified_execution_commit','passed',published)
+        except HTTPException as exc:
+            _fail('adopt_verified_execution_commit', error=str(exc.detail))
+            return
 
     if payload.run_qa:
         qa_report = self_run(SelfRunRequest(

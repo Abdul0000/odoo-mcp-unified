@@ -403,7 +403,8 @@ def test_public_custom_action_is_allowed_without_static_allowlist(tmp_path, monk
 
     assert result["status"] == "ok"
     assert result["verification_mode"] == "rpc_result_and_read_back"
-    assert result["success_allowed"] is True
+    assert result["success_allowed"] is False
+    assert result["verification_pending"] is True
 
 
 def test_inventory_return_flow_is_supported_in_preview(tmp_path, monkeypatch):

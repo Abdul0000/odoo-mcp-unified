@@ -1,3 +1,4 @@
+from tests.conftest import TASK_TOOLS
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -55,7 +56,7 @@ _PROVIDER_TOOLS = {
     "jobs_list",
     "jobs_get",
     "odoosh_error_pack",
-}
+} | TASK_TOOLS
 
 
 def _mcp_tools_list():

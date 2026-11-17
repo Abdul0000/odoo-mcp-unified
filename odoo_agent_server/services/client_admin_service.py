@@ -113,6 +113,9 @@ class ClientAdminService:
         return {'saved': True, 'created': True, 'client': self.detail(name)}
 
     def _ensure_idle(self, client):
+        from deploy.server_control import active_locks
+        if active_locks(settings.state_path):
+            raise HTTPException(409,'An inline task or functional operation is active. Wait for it to finish before changing client settings.')
         name = str(client['name']).casefold()
         for job in JsonStore().list_jobs(limit=1000):
             if job.status.value in {'queued', 'running'} and str(job.request.get('client_name', '')).casefold() == name:

@@ -218,3 +218,35 @@ def validate_client(name: str):
 @router.get('/admin/validation/{job_id}', dependencies=[Depends(_session)])
 def validation_job(job_id: str):
     return ClientAdminService().validation_job(job_id)
+
+
+@router.get('/admin/activity', dependencies=[Depends(_session)])
+def task_dashboard(client_name: str | None = None):
+    from ..services.task_dashboard_service import TaskDashboardService
+    return TaskDashboardService().snapshot(client_name)
+
+
+@router.post('/admin/tasks/{task_id}/resume', dependencies=[Depends(_session)])
+async def reconcile_task(task_id: str):
+    from ..services.task_service import TaskService
+    from .tools import _dispatch
+    result = await TaskService().resume(task_id, _dispatch)
+    return result['task'] if 'task' in result else result
+
+
+@router.get('/admin/knowledge/{name}', dependencies=[Depends(_session)])
+def client_knowledge(name: str):
+    from ..services.task_service import TaskService
+    return TaskService().knowledge(name)
+
+
+@router.post('/admin/knowledge/{name}/refresh', dependencies=[Depends(_session)])
+def refresh_client_knowledge(name: str):
+    from ..services.task_service import TaskService
+    return TaskService().knowledge(name, True)
+
+
+@router.get('/admin/tasks/{task_id}/evidence', dependencies=[Depends(_session)])
+def task_evidence(task_id: str):
+    from ..services.task_dashboard_service import TaskDashboardService
+    return TaskDashboardService().evidence(task_id)

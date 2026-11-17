@@ -651,6 +651,8 @@ _PROVIDER_TOOL_NAMES = {
 # only useful for manual REST/debug flows.
 from ..execution_tools import EXECUTION_TOOLS
 _PROVIDER_TOOL_NAMES.update(EXECUTION_TOOLS)
+from .tools import _TASK_TOOLS
+_PROVIDER_TOOL_NAMES.update(_TASK_TOOLS)
 
 _PROVIDER_TOOL_NAMES_MINIMAL = {
     "ws.open",
@@ -691,6 +693,7 @@ _PROVIDER_TOOL_NAMES_MINIMAL = {
 # Backward-compatible names retained for tests/imports; all provider routes use
 # the same minimal flow.
 _PROVIDER_TOOL_NAMES_MINIMAL.update(EXECUTION_TOOLS)
+_PROVIDER_TOOL_NAMES_MINIMAL.update(_TASK_TOOLS)
 _CLAUDE_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _CHATGPT_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _GROK_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
@@ -718,6 +721,15 @@ _CHATGPT_QUICK_WAIT_TOOLS = {
 
 
 _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
+    "task.open": "Pin client/target and open a durable task.",
+    "task.run": "Run scoped tool; preserve step_id and follow tool_result.",
+    "task.status": "Reconcile task proof read-only.",
+    "task.resume": "Poll existing work after interruption; no write replay.",
+    "task.list": "List recent durable client tasks.",
+    "task.knowledge": "Read client facts; refresh=true discovers runtime metadata.",
+    "task.deploy": "Deploy verified task commit; no duplicate push.",
+    "task.test_plan": "Suggest relevant checks; missing layers block apply.",
+    "odoo.mutation_preview": "Preview records read-only; execute unchanged with preview_id.",
     "client.check": (
         "Select Odoo client; validate=true checks checkout, Git, SSH, shell and addons. Slow checks return job_id. No writes before validation passes."
     ),

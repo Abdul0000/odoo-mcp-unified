@@ -7138,6 +7138,20 @@ def _debug_infer_diagnosis(session: dict[str, Any]) -> OdooFailureDiagnosis:
     debug_session_id = str(session.get("id") or "") or None
     trusted_ids = _debug_trusted_evidence_ids(session)[-20:]
 
+    infrastructure = (
+        ('authentication', ('login failed','authentication failed','unknown oauth client_id','invalid credentials','permission denied (publickey)'),
+         'Trusted evidence reports authentication failure.', 'Check the selected client/database credentials or SSH key; do not patch addon code.'),
+        ('ssh_network', ('connection timed out','no route to host','connection refused','could not resolve hostname'),
+         'Trusted evidence reports a connection or host-resolution failure.', 'Verify the current build host, SSH port and network path before retrying bounded connectivity.'),
+        ('missing_dependency', ('unmet dependencies','unmet dependency','module not found in addons','missing dependencies'),
+         'Trusted evidence reports a missing module dependency.', 'Inspect the installed module/dependency state and deployed addons paths. Do not remove declared dependencies to bypass the error.'),
+    )
+    for category,markers,crux,hypothesis in infrastructure:
+        if trusted_ids and any(marker in text for marker in markers):
+            return OdooFailureDiagnosis(failure_category=category,origin='connector_pipeline' if category!='missing_dependency' else 'preexisting_baseline',
+                crux=crux,hypothesis=hypothesis,verified_facts=[crux],evidence_ids=trusted_ids,
+                debug_session_id=debug_session_id,next_strategy='resume_connector' if category!='missing_dependency' else 'preserve_baseline')
+
     connector_markers = (
         "project path not found",
         "unterminated quoted string",
@@ -7162,6 +7176,7 @@ def _debug_infer_diagnosis(session: dict[str, Any]) -> OdooFailureDiagnosis:
     if any(marker and marker in text for marker in connector_markers):
         return OdooFailureDiagnosis(
             origin="connector_pipeline",
+            failure_category="connector_pipeline",
             crux="Connector checkout, command, SSH, or orchestration failed independently of module behavior.",
             verified_facts=["The trusted connector evidence contains a connector-pipeline failure marker."],
             hypothesis="Repair or resume the connector checkpoint without changing Odoo module code.",
@@ -7172,6 +7187,7 @@ def _debug_infer_diagnosis(session: dict[str, Any]) -> OdooFailureDiagnosis:
     if any(marker in text for marker in provider_markers):
         return OdooFailureDiagnosis(
             origin="provider_transport",
+            failure_category="provider_transport",
             crux="The external provider transport failed before module behavior could be verified.",
             verified_facts=["The trusted evidence contains a provider transport or rate-limit marker."],
             hypothesis="Retry the provider operation within a bounded policy; do not patch module code.",
@@ -7186,6 +7202,7 @@ def _debug_infer_diagnosis(session: dict[str, Any]) -> OdooFailureDiagnosis:
     ):
         return OdooFailureDiagnosis(
             origin="custom_code",
+            failure_category="custom_traceback",
             crux=f"The trusted traceback enters changed or installed custom addon {module_name}.",
             verified_facts=["A trusted traceback references the selected custom addon."],
             unknowns=["The exact causal statement must be confirmed against the referenced source unit."],
@@ -9044,6 +9061,22 @@ _TOOL_DESCRIPTORS.extend(
 )
 
 
+from ..task_schemas import TaskOpen, TaskId, TaskRun, TaskList, TaskKnowledge, TaskTests, MutationPreview, TaskDeploy
+_TASK_TOOLS = {
+    'task.open': (TaskOpen, 'Open a client-pinned durable task before coding, debugging, deployment or functional work. No model API key needed.', False),
+    'task.run': (TaskRun, 'Execute one existing tool through its normal guards and link its evidence to this task. Use a unique step_id per new call. Lost-response mutations are never blindly replayed.', False),
+    'task.status': (TaskId, 'Read task timeline, linked IDs, evidence claims and configuration freshness. Read task_resume for authoritative job/workspace reconciliation.', True),
+    'task.resume': (TaskId, 'Reconcile existing workspace/jobs with bounded read-only polls after disconnect/restart. Does not repeat commit, push, upgrade or record mutation.', True),
+    'task.list': (TaskList, 'List recent durable tasks for a client.', True),
+    'task.knowledge': (TaskKnowledge, 'Read client-specific current configuration and validated runtime knowledge; configuration/source changes invalidate cached facts.', True),
+    'task.deploy': (TaskDeploy, 'Deploy the task’s exact verified pushed execution commit through normal Odoo.sh source/upgrade/live gates. Requires target=deploy and module_name. Never creates another commit or push.', False),
+    'task.test_plan': (TaskTests, 'Derive bounded relevant syntax/regression/build proposals from changed files. apply=true strengthens the existing execution plan only when required layers are available.', False),
+    'odoo.mutation_preview': (MutationPreview, 'Read-only preview of exact create/write/action payload, current records and concurrency snapshot. Execute unchanged arguments with returned preview_id; normal approvals still apply.', True),
+}
+_TOOL_INPUT_MODELS.update({name:spec[0] for name,spec in _TASK_TOOLS.items()})
+_TOOL_DESCRIPTORS.extend(ToolDescriptor(name=name,description=spec[1],read_only=spec[2]) for name,spec in _TASK_TOOLS.items())
+
+
 async def _dispatch_ws(name: str, args: dict) -> dict:
     """Workspace tools do blocking GitHub I/O: run off the event loop; errors come back as structured results."""
     entry = _WS_HANDLERS.get(name)
@@ -9085,6 +9118,29 @@ async def _dispatch_inner(name: str, args: dict) -> object:
     if not next((tool.read_only for tool in _TOOL_DESCRIPTORS if tool.name == name), False):
         from ..services.server_control_service import assert_no_maintenance
         assert_no_maintenance()
+    if name in _TASK_TOOLS:
+        req=_TASK_TOOLS[name][0].model_validate(args)
+        from ..services.task_service import TaskService
+        svc=TaskService()
+        if name=='task.open':
+            opened=await asyncio.to_thread(svc.open,req)
+            return svc.envelope(svc.read(opened['task_id']))
+        if name=='task.status':
+            snapshot=await svc.resume(req.task_id,_dispatch)
+            return snapshot
+        if name=='task.list': return await asyncio.to_thread(svc.list,req.client_name,req.limit)
+        if name=='task.knowledge': return await asyncio.to_thread(svc.knowledge,req.client_name,req.refresh)
+        if name=='task.resume': return await svc.resume(req.task_id,_dispatch)
+        if name=='task.run': return await svc.run(req,_dispatch)
+        if name=='task.deploy': return await svc.deploy(req,_dispatch)
+        if name=='task.test_plan':
+            from ..services.verification_planner import suggest_checks
+            task=svc.read(req.task_id)
+            if not svc.current(task): raise HTTPException(409,'Client configuration changed')
+            wid=task['refs'].get('workspace_id')
+            if not wid: raise HTTPException(409,'Open a linked execution workspace first')
+            return await asyncio.to_thread(suggest_checks,wid,req.apply)
+        return await asyncio.to_thread(FunctionalOperationService().preview,req.operation,req.arguments)
     if name in EXECUTION_TOOLS:
         return await asyncio.to_thread(dispatch_execution, name, args)
     if name.startswith("ws."):

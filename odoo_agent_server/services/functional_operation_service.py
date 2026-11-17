@@ -20,6 +20,7 @@ from .approval_service import ApprovalService
 from .client_resolver_service import ClientResolverService, ResolvedClient
 from .odoo_jsonrpc_service import OdooJsonRpcService
 from .store_service import JsonStore
+from . import mutation_journal
 
 
 _FORBIDDEN_WRITE_FIELDS = {
@@ -60,6 +61,20 @@ _ACTION_EXPECTED_STATES: dict[tuple[str, str], set[str]] = {
     ("account.move", "button_cancel"): {"cancel"},
 }
 _FLOW_RECIPES = {
+    # Creation-only recipes avoid guessing version-specific stage/action methods.
+    # Every payload is checked against installed model metadata before dispatch.
+    "crm_opportunity": {
+        "model": "crm.lead", "marker": "description", "defaults": {"type": "opportunity"},
+        "actions": {}, "verify": ["id", "name", "partner_id", "stage_id", "expected_revenue"],
+    },
+    "project_task": {
+        "model": "project.task", "marker": "description", "actions": {},
+        "verify": ["id", "name", "project_id", "stage_id", "user_ids"],
+    },
+    "helpdesk_ticket": {
+        "model": "helpdesk.ticket", "marker": "description", "actions": {},
+        "verify": ["id", "name", "partner_id", "stage_id", "team_id"],
+    },
     "sale_order": {
         "model": "sale.order",
         "marker": "client_order_ref",
@@ -113,9 +128,10 @@ class FunctionalOperationService:
         self.store = JsonStore()
         self.approvals = ApprovalService()
 
+    @mutation_journal.guarded
     def create(self, request: OdooRecordCreateRequest) -> dict[str, Any]:
         client, rpc = self._runtime(request.client_name)
-        payload = request.model_dump(mode="json", exclude={"approval_id"})
+        payload = request.model_dump(mode="json", exclude={"approval_id", "preview_id"})
         replay = self._replay(request.request_id, self._client_key(client), "record_create", payload)
         if replay:
             return replay
@@ -126,6 +142,8 @@ class FunctionalOperationService:
         for values in request.records:
             self._validate_values(fields, values, creating=True)
         context = self._safe_context(request.context)
+        self._assert_preview(request, client, rpc, payload)
+        mutation_journal.write(self._client_key(client), request.request_id, 'record_create', self._payload_hash(payload))
         result = rpc.create_records(request.model, request.records, context)
         ids = self._created_ids(result)
         if not ids:
@@ -145,9 +163,10 @@ class FunctionalOperationService:
         }
         return self._save(request, client, "record_create", payload, response)
 
+    @mutation_journal.guarded
     def write(self, request: OdooRecordWriteRequest) -> dict[str, Any]:
         client, rpc = self._runtime(request.client_name)
-        payload = request.model_dump(mode="json", exclude={"approval_id"})
+        payload = request.model_dump(mode="json", exclude={"approval_id", "preview_id"})
         replay = self._replay(request.request_id, self._client_key(client), "record_write", payload)
         if replay:
             return replay
@@ -173,6 +192,8 @@ class FunctionalOperationService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"message": "Record changed since inspection; write was not executed.", "mismatches": mismatches[:20]},
             )
+        self._assert_preview(request, client, rpc, payload)
+        mutation_journal.write(self._client_key(client), request.request_id, 'record_write', self._payload_hash(payload))
         result = rpc.write_records(request.model, request.ids, request.values, context)
         if result.status != "ok" or result.result is not True:
             return self._failed(request, client, "record_write", payload, result.error or "Odoo write failed.")
@@ -201,9 +222,10 @@ class FunctionalOperationService:
         response["success_allowed"] = verified and not unverifiable_fields
         return self._save(request, client, "record_write", payload, response)
 
+    @mutation_journal.guarded
     def action(self, request: OdooRecordActionRequest) -> dict[str, Any]:
         client, rpc = self._runtime(request.client_name)
-        payload = request.model_dump(mode="json", exclude={"approval_id"})
+        payload = request.model_dump(mode="json", exclude={"approval_id", "preview_id"})
         replay = self._replay(request.request_id, self._client_key(client), "record_action", payload)
         if replay:
             return replay
@@ -213,9 +235,10 @@ class FunctionalOperationService:
         fields = self._metadata(rpc, request.model)
         self._ensure_access(rpc, request.model, "write")
         context = self._safe_context(request.context)
+        if set(request.expected_values)-set(fields): raise HTTPException(422,"Expected action fields must exist in live model metadata")
         verify_fields = self._verify_fields(
             fields,
-            request.verify_fields or ["id", "display_name", "name", "state"],
+            list(dict.fromkeys([*(request.verify_fields or ["id", "display_name", "name", "state"]),*request.expected_values])),
             [],
         )
         before = self._read_ok(rpc, request.model, request.ids, verify_fields, context)
@@ -251,6 +274,8 @@ class FunctionalOperationService:
                     "next_action": "Obtain explicit user approval, approve this exact approval_id, then retry the identical action with the same request_id and approval_id.",
                 }
             raise
+        self._assert_preview(request, client, rpc, payload)
+        mutation_journal.write(self._client_key(client), request.request_id, 'record_action', self._payload_hash(payload))
         result = rpc.run_action(
             request.model,
             request.ids,
@@ -266,11 +291,14 @@ class FunctionalOperationService:
         self.approvals.mark_consumed(request.approval_id)
         expected_states = _ACTION_EXPECTED_STATES.get((request.model, request.action))
         states = [str(row.get("state") or "") for row in after]
-        if expected_states:
+        if request.expected_values:
+            verified = len(after)==len(request.ids) and all(self._value_matches(row.get(key),value) for row in after for key,value in request.expected_values.items())
+            verification_mode = "explicit_postconditions"
+        elif expected_states:
             verified = len(after) == len(request.ids) and all(state in expected_states for state in states)
             verification_mode = "expected_state"
         else:
-            verified = len(after) == len(request.ids) and result.result is not False
+            verified = False
             verification_mode = "rpc_result_and_read_back"
         response = {
             "status": "ok",
@@ -285,6 +313,7 @@ class FunctionalOperationService:
             "action_result": self._redact(result.result),
             "expected_states": sorted(expected_states or []),
             "verification_mode": verification_mode,
+            "verification_pending": not bool(expected_states or request.expected_values),
             "verified": verified,
             "success_allowed": verified,
         }
@@ -329,6 +358,8 @@ class FunctionalOperationService:
                 stage for stage in stages if self._action_sensitive(model, recipe["actions"][stage])
             ],
             "notifications_suppressed": True,
+            "compatibility_basis": "installed_model_fields_and_user_access",
+            "supported_stages": sorted(recipe["actions"]),
         }
         if request.mode == "preview":
             return {
@@ -401,7 +432,7 @@ class FunctionalOperationService:
             }
             response["next_action"] = "After explicit user approval, call approvals.approve and retry this exact flow with the same request_id and approval_id. Completed prior steps are idempotently replayed."
             return response
-        payload = request.model_dump(mode="json", exclude={"approval_id"})
+        payload = request.model_dump(mode="json", exclude={"approval_id", "preview_id"})
         return self._save(request, client, "flow_test", payload, response)
 
     def _dynamic_flow_test(self, request: OdooFlowTestRequest) -> dict[str, Any]:
@@ -497,6 +528,7 @@ class FunctionalOperationService:
                         model=step.model,
                         ids=ids,
                         action=str(step.action),
+                        expected_values=expected_values,
                         arguments=arguments,
                         keyword_arguments=keyword_arguments,
                         verify_fields=step.verify_fields,
@@ -543,7 +575,7 @@ class FunctionalOperationService:
             }
             response["next_action"] = "After explicit user approval, call approvals.approve and retry this exact flow with the same request_id and approval_id. Completed prior steps are idempotently replayed."
             return response
-        payload = request.model_dump(mode="json", exclude={"approval_id"})
+        payload = request.model_dump(mode="json", exclude={"approval_id", "preview_id"})
         return self._save(request, client, "flow_test", payload, response)
 
     def _verify_dynamic_step(
@@ -575,6 +607,60 @@ class FunctionalOperationService:
             "verified": verified,
             "success_allowed": verified,
         }
+
+    def preview(self, operation, arguments):
+        from ..schemas import OdooRecordCreateRequest, OdooRecordWriteRequest, OdooRecordActionRequest
+        from .client_settings_store import atomic_json
+        import time
+        model = {'create':OdooRecordCreateRequest,'write':OdooRecordWriteRequest,'action':OdooRecordActionRequest}[operation]
+        request = model.model_validate(arguments)
+        client,rpc = self._runtime(request.client_name)
+        self._ensure_model(request.model)
+        fields = self._metadata(rpc, request.model)
+        self._ensure_access(rpc, request.model, 'create' if operation=='create' else 'write')
+        if operation == 'action': self._action_sensitive(request.model, request.action)
+        if operation == 'create':
+            self._ensure_batch(len(request.records))
+            for values in request.records: self._validate_values(fields, values, creating=True)
+        elif operation == 'write':
+            self._validate_values(fields, request.values, creating=False)
+        ids = getattr(request,'ids',[])
+        self._ensure_batch(len(ids))
+        tracked = self._verify_fields(fields, list(dict.fromkeys(['id','display_name','write_date','state',*getattr(request,'values',{}),*getattr(request,'expected_values',{}),*request.verify_fields])), [])
+        before = self._read_ok(rpc,request.model,ids,tracked,self._safe_context(request.context)) if ids else []
+        if ids and len(before)!=len(set(ids)): raise HTTPException(404,'Some preview records are missing or inaccessible')
+        payload = request.model_dump(mode='json',exclude={'approval_id','preview_id'})
+        record = {'operation':operation,'client_name':self._client_key(client),'payload_hash':self._payload_hash(payload),
+                  'runtime_identity':mutation_journal.identity(self._client_key(client)), 'ids':ids,
+                  'model':request.model,'fields':tracked,'before':self._redact(before),'expires':time.time()+600}
+        preview_id = self._payload_hash(record)
+        root=settings.state_path/'mutation-previews'; root.mkdir(parents=True,exist_ok=True)
+        # Expired previews carry no replay authority. Bound temporary snapshots.
+        for file in list(root.glob('*.json'))[:1000]:
+            if file.stat().st_mtime < time.time()-600: file.unlink(missing_ok=True)
+        if sum(1 for _ in root.glob('*.json'))>=1000: raise HTTPException(429,'Too many pending previews')
+        atomic_json(root/(preview_id+'.json'),record)
+        return {'status':'preview','preview_id':preview_id,'expires_in_seconds':600,
+                'operation':operation,'model':request.model,'client_name':self._client_key(client),
+                'before':self._redact(before),'proposed':self._redact(payload),
+                'write_executed':False,'success_allowed':False,
+                'next_action':'Review the exact records and values. Execute the same operation/request_id with preview_id; sensitive actions still require normal approval.'}
+
+    def _assert_preview(self, request, client, rpc, payload):
+        if not request.preview_id: return
+        import json,time
+        try:
+            record=json.loads((settings.state_path/'mutation-previews'/(request.preview_id+'.json')).read_text())
+        except (OSError,ValueError):
+            raise HTTPException(409,'Preview is unavailable; inspect again.') from None
+        if (record['expires']<time.time() or record['payload_hash']!=self._payload_hash(payload)
+                or record['client_name']!=self._client_key(client)
+                or record['runtime_identity']!=mutation_journal.identity(self._client_key(client))):
+            raise HTTPException(409,'Preview expired or operation/database changed; inspect again.')
+        if record['ids']:
+            before=self._read_ok(rpc,request.model,record['ids'],record['fields'],self._safe_context(request.context))
+            if self._redact(before)!=record['before']:
+                raise HTTPException(409,'Records changed since preview; mutation was not executed. Inspect again.')
 
     def audit(self, request: OdooMutationAuditRequest) -> dict[str, Any]:
         client = ClientResolverService().resolve_client(request.client_name, require_complete=False)
@@ -770,6 +856,8 @@ class FunctionalOperationService:
 
     @staticmethod
     def _payload_hash(payload: dict[str, Any]) -> str:
+        if "action" in payload and not payload.get("expected_values"):
+            payload={k:v for k,v in payload.items() if k!="expected_values"}
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -780,7 +868,10 @@ class FunctionalOperationService:
         operation: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        existing = self.store.get_mutation(request_id, client_name)
+        intent = mutation_journal.read(client_name, request_id)
+        existing = intent or self.store.get_mutation(request_id, client_name)
+        if intent and intent.get('runtime_identity') != mutation_journal.identity(client_name):
+            raise HTTPException(409, 'Odoo database or login changed since this request. Inspect prior evidence before issuing new work.')
         if not existing:
             return None
         if existing.get("operation") != operation or existing.get("payload_hash") != self._payload_hash(payload):
@@ -788,6 +879,10 @@ class FunctionalOperationService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="request_id was already used for a different mutation payload.",
             )
+        if intent and intent.get('state') == 'dispatched':
+            return {'status':'reconciliation_required','request_id':request_id,'client_name':client_name,
+                    'operation':operation,'verified':False,'success_allowed':False,'write_replayed':False,
+                    'next_action':'The previous Odoo call may have committed. Inspect records and audit evidence; do not retry using a new request_id to bypass reconciliation.'}
         response = dict(existing.get("response") or {})
         response["idempotent_replay"] = True
         return response
@@ -808,6 +903,7 @@ class FunctionalOperationService:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "response": self._redact(response),
         }
+        mutation_journal.write(self._client_key(client), request.request_id, operation, record['payload_hash'], record['response'])
         self.store.save_mutation(record)
         self.store.log_audit(
             f"odoo.{operation}",

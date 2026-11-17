@@ -2,7 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   let csrf = '', current = null, dirty = false, busy = false, pollGeneration = 0, creating = false, defaults = {};
-  let view = 'clients', runtime = null, runtimeDirty = false, controllerAvailable = false;
+  let view = 'clients', runtime = null, runtimeDirty = false, controllerAvailable = false, activityGeneration = 0;
   const groups = {
     'repository-fields': [['repo','Repository URL','url','https://gitlab.com/group/project.git',true],['branch','Branch','text','staging'],['environment','Environment','select']],
     'odoo-fields': [['odoo_url','Odoo URL','url','https://your-project.odoo.com'],['odoo_db','Database name','text','Your database'],['odoo_login','Odoo login','text','Your Odoo username',true]],
@@ -97,6 +97,10 @@
   async function loadClients(selected) {
     const result=await api('/admin/clients'); defaults=result.defaults || {}; $('client-select').replaceChildren();
     for (const row of result.clients) { if (!row.name) continue; const option=document.createElement('option'); option.value=row.name; option.textContent=row.name; $('client-select').append(option); }
+    const filter=$('activity-client'), previous=filter.value; filter.replaceChildren();
+    const all=document.createElement('option'); all.value=''; all.textContent='All clients'; filter.append(all);
+    for(const row of result.clients) { if(!row.name) continue; const option=document.createElement('option'); option.value=row.name; option.textContent=row.name; filter.append(option); }
+    filter.value=previous;
     if(selected) $('client-select').value=selected;
   }
   function newClient() {
@@ -229,12 +233,87 @@
   }
   function switchView(next) {
     view=next; message('');
-    const titles={clients:['Client manager','Manage real client connections and validate access.'],runtime:['Runtime & performance','Tune worker capacity, queues and cache lifetimes.'],storage:['Storage & retention','Control how long sessions, jobs and artifacts are kept.'],services:['Oracle services','Apply server settings and manage MCP releases.']};
+    const titles={clients:['Client manager','Manage real client connections and validate access.'],runtime:['Runtime & performance','Tune worker capacity, queues and cache lifetimes.'],storage:['Storage & retention','Control how long sessions, jobs and artifacts are kept.'],services:['Oracle services','Apply server settings and manage MCP releases.'],tasks:['Tasks','Resume from persistent checkpoints and review verification evidence.'],diagnostics:['Diagnostics','Evidence-linked debugging sessions and concrete blockers.'],deployments:['Deployments','Track source, upgrade and live deployment proof separately.'],knowledge:['Client knowledge','Configuration and source-bound facts from this client.']};
     $('page-title').textContent=titles[next][0]; $('page-description').textContent=titles[next][1];
+    $('activity-view').hidden=!['tasks','diagnostics','deployments','knowledge'].includes(next);
+    if(!$('activity-view').hidden) loadActivity();
     $('clients-view').hidden=next!=='clients'; $('settings-view').hidden=!['runtime','storage'].includes(next); $('services-view').hidden=next!=='services';
     for(const button of document.querySelectorAll('[data-view]')) { if(button.dataset.view===next) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
     renderRuntime();
   }
+  function element(tag,text,className) { const node=document.createElement(tag); if(text!=null) node.textContent=String(text); if(className) node.className=className; return node; }
+  function evidenceRows(parent,rows) {
+    const list=element('ul',null,'evidence-list');
+    for(const row of rows) list.append(element('li',row));
+    parent.append(list);
+  }
+  async function loadActivity(refreshKnowledge=false) {
+    const generation=++activityGeneration, mode=view, client=$('activity-client').value;
+    $('activity-title').textContent={tasks:'Tasks & workspaces',diagnostics:'Debugging evidence',deployments:'Deployment history',knowledge:'Client knowledge'}[mode]||'Activity';
+    $('activity-state').textContent='Loading server evidence…'; $('activity-content').replaceChildren();
+    try {
+      if(mode==='knowledge') {
+        if(!client) { $('activity-state').textContent='Select one client to view its knowledge.'; return; }
+        const result=await api('/admin/knowledge/'+encodeURIComponent(client)+(refreshKnowledge?'/refresh':''),refreshKnowledge?{method:'POST',body:'{}'}:{});
+        if(generation!==activityGeneration||view!==mode) return;
+        const card=element('article',null,'activity-item'); card.append(element('h3',result.client_name));
+        evidenceRows(card,['Branch: '+result.branch,'Source SHA: '+(result.source_sha||'unavailable'),'Source: '+(result.source_clean?'clean':'unverified or changed'),'Runtime facts: '+(result.runtime_facts?'authenticated HTTPS snapshot':'not verified'), 'Base module version: '+(result.runtime_facts?.base_module_version||'not verified')]);
+        if(result.runtime_error) card.append(element('p',result.runtime_error));
+        if(result.source_error) card.append(element('p',result.source_error));
+        if(result.source_modules?.length) { const detail=element('details'),summary=element('summary','Source modules ('+result.source_modules.length+')'); detail.append(summary); evidenceRows(detail,result.source_modules.map(m=>m.module+' · depends: '+m.depends.join(', '))); card.append(detail); }
+        const button=element('button','Refresh source & runtime facts','secondary'); button.type='button'; button.addEventListener('click',async()=>{button.disabled=true; await loadActivity(true);}); card.append(button);
+        $('activity-content').append(card); $('activity-state').textContent=result.next_action; return;
+      }
+      const result=await api('/admin/activity'+(client?'?client_name='+encodeURIComponent(client):''));
+      if(generation!==activityGeneration||view!==mode) return;
+      const rows=result[mode]||[];
+      $('activity-state').textContent=rows.length?rows.length+' '+mode+' · persisted evidence':'No '+mode+' recorded for this selection.';
+      for(const row of rows) {
+        const card=element('article',null,'activity-item'),heading=element('div',null,'activity-heading');
+        heading.append(element('h3',mode==='tasks'?(row.description||row.task_id):(row.module_name||row.id||row.job_id)),element('span',row.status||row.phase||'unknown','tag')); card.append(heading);
+        const when=row.updated_at||row.finished_at||row.created_at;
+        card.append(element('p',[row.client_name,row.branch,when?new Date(when).toLocaleString():null].filter(Boolean).join(' · ')));
+        if(mode==='tasks') {
+          evidenceRows(card,['Target: '+row.target,'Phase: '+row.phase,'Coding verified: '+Boolean(row.claims?.coding_verified),'Push verified: '+Boolean(row.claims?.push_verified),'Deployment verified: '+Boolean(row.claims?.deployment_verified),'Functional verified: '+Boolean(row.claims?.functional_verified),'Task ID: '+row.task_id]);
+          if(row.commit_sha) card.append(element('code',row.commit_sha));
+          if(!row.configuration_current) card.append(element('p','Client settings changed; old claims are invalid. Open a new task and inspect preserved work.'));
+          const details=element('details'),summary=element('summary','Timeline ('+(row.events||[]).length+')'); details.append(summary); evidenceRows(details,(row.events||[]).map(e=>new Date(e.at).toLocaleTimeString()+' · '+e.tool+' · '+e.status)); card.append(details);
+          const evidenceButton=element('button','View checks, diff & logs','secondary'); evidenceButton.type='button';
+          evidenceButton.addEventListener('click',async()=>{
+            evidenceButton.disabled=true;
+            try {
+              const data=await api('/admin/tasks/'+row.task_id+'/evidence');
+              const detail=element('details'); detail.open=true; detail.append(element('summary','Workspace evidence'));
+              if(data.message) detail.append(element('p',data.message));
+              evidenceRows(detail,data.checks.map(c=>c.name+' · '+c.layer+' · '+c.status+' · '+c.command));
+              detail.append(element('pre',data.diff_available?(data.diff||'No tracked working-tree diff. Untracked files remain listed in workspace status.'):(data.diff_message||'Diff unavailable while work is running.'),'evidence-code'));
+              if(data.diff_truncated) detail.append(element('p','Diff preview is limited to 2,000 characters.'));
+              for(const command of data.commands) {detail.append(element('p',command.command+' · '+command.status+' · exit '+command.exit_code),element('pre',command.output||'No captured output.','evidence-code'));}
+              card.append(detail); evidenceButton.hidden=true;
+            }catch(error){message(error.message);evidenceButton.disabled=false;}
+          }); card.append(evidenceButton);
+          const button=element('button','Reconcile existing work','secondary'); button.type='button'; button.disabled=!row.configuration_current;
+          button.addEventListener('click',async()=>{button.disabled=true; try{await api('/admin/tasks/'+row.task_id+'/resume',{method:'POST',body:'{}'}); await loadActivity();}catch(error){message(error.message);button.disabled=false;}}); card.append(button);
+        } else if(mode==='deployments') {
+          evidenceRows(card,['Phase: '+row.phase,'Source deployed: '+row.source_deployed,'Module upgraded: '+row.module_upgraded,'Deployment confirmed: '+row.deploy_confirmed,'Job ID: '+row.job_id]);
+          if(row.sha) card.append(element('code',row.sha));
+          if(row.message) card.append(element('p',row.message));
+          const details=element('details'),summary=element('summary','Deployment steps'); details.append(summary); evidenceRows(details,row.steps.map(s=>s.name+' · '+s.status+(s.duration_ms!=null?' · '+s.duration_ms+' ms':'')));card.append(details);
+        } else {
+          evidenceRows(card,['Origin: '+(row.diagnosis.origin||'unknown'),'Category: '+(row.diagnosis.failure_category||'unknown'),'Verified fixed: '+row.truth_gate.verified_fixed]);
+          card.append(element('p',row.diagnosis.crux||'Diagnosis pending'),element('p',row.diagnosis.next_strategy||''));
+          const details=element('details'),summary=element('summary','Evidence ('+row.evidence.length+')'); details.append(summary); evidenceRows(details,row.evidence.map(e=>(e.trusted?'Trusted':'Untrusted')+' · '+e.kind+' · '+e.summary)); card.append(details);
+        }
+        $('activity-content').append(card);
+      }
+      if(mode==='tasks'&&result.workspaces.length) {
+        const details=element('details'),summary=element('summary','Execution workspaces ('+result.workspaces.length+')'); details.append(summary); evidenceRows(details,result.workspaces.map(w=>(w.client_name||'Legacy')+' · '+w.workspace_id+' · '+(w.phase||w.status)+(w.commit?' · '+w.commit:''))); $('activity-content').append(details);
+      }
+    } catch(error) { if(generation===activityGeneration) $('activity-state').textContent=error.message; }
+  }
+  $('activity-client').addEventListener('change',()=>loadActivity());
+  $('activity-refresh').addEventListener('click',()=>loadActivity());
+  $('client-knowledge').addEventListener('click',()=>{if(creating||!current)return; $('activity-client').value=current.name; switchView('knowledge');});
   for(const button of document.querySelectorAll('[data-view]')) button.addEventListener('click',()=>switchView(button.dataset.view));
   $('reload-settings').addEventListener('click',async()=>{if(busy||(runtimeDirty&&!window.confirm('Discard unsaved server settings?'))) return; await loadRuntime();});
   $('runtime-form').addEventListener('submit',async event=>{
@@ -264,7 +343,7 @@
     try { const result=await api('/admin/session',{method:'POST',body:JSON.stringify({token:$('admin-token').value})}); $('admin-token').value=''; csrf=result.csrf_token; await openManager(); }
     catch(error) { message(error.message); } finally { button.disabled=false; }
   });
-  $('signout').addEventListener('click',async()=>{ try { if((dirty||runtimeDirty)&&!window.confirm('Sign out and discard unsaved settings?')) return; await api('/admin/session',{method:'DELETE'}); runtime=null; runtimeDirty=false; $('runtime-fields').replaceChildren(); $('system-overview').replaceChildren(); csrf=''; current=null; pollGeneration++; $('client-form').reset(); markDirty(false); showLogin(); } catch(error) { message(error.message); } });
+  $('signout').addEventListener('click',async()=>{ try { if((dirty||runtimeDirty)&&!window.confirm('Sign out and discard unsaved settings?')) return; await api('/admin/session',{method:'DELETE'}); runtime=null; runtimeDirty=false; activityGeneration++; $('activity-content').replaceChildren(); $('runtime-fields').replaceChildren(); $('system-overview').replaceChildren(); csrf=''; current=null; pollGeneration++; $('client-form').reset(); markDirty(false); showLogin(); } catch(error) { message(error.message); } });
   window.addEventListener('beforeunload',event=>{ if(dirty||runtimeDirty){event.preventDefault();event.returnValue='';} });
   (async()=>{
     const code=new URLSearchParams(location.hash.slice(1)).get('login');

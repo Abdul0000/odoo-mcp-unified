@@ -28,9 +28,12 @@
         <button type="button" data-view="runtime"><span>02</span> Runtime &amp; performance</button>
         <button type="button" data-view="storage"><span>03</span> Storage &amp; retention</button>
         <button type="button" data-view="services"><span>04</span> Oracle services</button>
+        <button type="button" data-view="tasks"><span>05</span> Tasks</button>
+        <button type="button" data-view="diagnostics"><span>06</span> Diagnostics</button>
+        <button type="button" data-view="deployments"><span>07</span> Deployments</button>
       </nav>
       <div id="clients-view" class="workspace">
-        <aside class="card client-picker"><label for="client-select">Select client</label><select id="client-select" aria-label="Select client"></select><p id="client-meta" class="hint"></p><p id="client-source" class="hint"></p><button id="new-client" type="button" class="secondary add-client">+ Add client</button><div class="side-note"><span class="dot"></span><span>Changes apply immediately.<br>No restart needed.</span></div></aside>
+        <aside class="card client-picker"><label for="client-select">Select client</label><select id="client-select" aria-label="Select client"></select><p id="client-meta" class="hint"></p><p id="client-source" class="hint"></p><button id="new-client" type="button" class="secondary add-client">+ Add client</button><button id="client-knowledge" type="button" class="quiet add-client">Client knowledge →</button><div class="side-note"><span class="dot"></span><span>Changes apply immediately.<br>No restart needed.</span></div></aside>
         <div class="editor">
           <form id="client-form" class="card">
             <div class="form-heading"><div><h2 id="client-title">Client settings</h2><p>Existing credentials stay hidden and are kept when left blank.</p></div><span id="dirty" class="tag" hidden>Unsaved changes</span></div>
@@ -59,6 +62,10 @@
           <article class="card settings-card"><span class="eyebrow">MAINTENANCE</span><h2>Oracle services</h2><p>Restart the API and worker to apply server settings, or deploy the latest MCP release from master.</p><div class="service-buttons"><button id="services-restart" class="primary" type="button">Restart services</button><button id="services-update" class="secondary" type="button">Update &amp; restart</button></div><p id="controller-note" class="hint">Checking service controller…</p></article>
           <article class="card settings-card"><span class="eyebrow">CURRENT CONFIGURATION</span><h2>Environment overview</h2><dl id="system-overview" class="system-overview"></dl><p class="hint">Authentication, permissions and infrastructure paths are managed on Oracle.</p></article>
         </div>
+      </section>
+      <section id="activity-view" class="card settings-card" hidden>
+        <div class="activity-toolbar"><div><h2 id="activity-title">Task activity</h2><p id="activity-note">Persistent server evidence. Refresh to reconcile current progress.</p></div><div class="activity-filters"><label for="activity-client">Client</label><select id="activity-client"><option value="">All clients</option></select><button id="activity-refresh" type="button" class="secondary">Refresh</button></div></div>
+        <p id="activity-state" role="status"></p><div id="activity-content"></div>
       </section>
       <div id="global-server-status"></div>
     </section>

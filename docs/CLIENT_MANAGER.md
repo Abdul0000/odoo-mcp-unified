@@ -93,3 +93,22 @@ Malformed files fail startup rather than silently running unexpected settings.
 Authentication, permission flags, execution images, filesystem roots and secrets
 remain operator-managed; the environment overview reports only selected safe
 configuration values and configured/not-configured flags.
+
+## Tasks, diagnostics, deployments and client knowledge
+
+**Tasks** shows durable task contracts, pinned client/branch, verification claims,
+linked workspaces, commits and the bounded event timeline. **Reconcile existing
+work** polls existing workspace/jobs read-only; it cannot push, upgrade or replay
+an uncertain write. Legacy execution workspaces remain visible separately.
+**Diagnostics** projects existing per-client debug sessions, trusted evidence and
+verified-fix gates. **Deployments** displays actual job stages, source deployment,
+module upgrade and computed deployment confirmation separately. These views show
+persisted observations; Refresh does not run business actions or new deployments.
+Use the client filter to narrow the view.
+
+**Clients → Client knowledge** reads current profile/source-bound facts. Refresh
+fetches bounded authenticated installed-module metadata and current Git manifest
+metadata, with provenance. Source manifests are declarations, not proof of runtime
+execution. Cached facts expire after 30 minutes and cannot survive a changed
+client profile or source SHA; dirty/unavailable source is explicitly unverified.
+Runtime connection failures never invent an Odoo version or installed modules.

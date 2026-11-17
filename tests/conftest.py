@@ -55,3 +55,9 @@ WS_TOOLS = frozenset({
 def _disable_global_approval_by_default(monkeypatch):
     """Keep unrelated tests deterministic; approval-specific tests opt in explicitly."""
     monkeypatch.setattr(settings, "require_approval", False)
+
+
+TASK_TOOLS = frozenset({
+    'task_open', 'task_run', 'task_status', 'task_resume', 'task_list',
+    'task_deploy', 'task_test_plan', 'task_knowledge', 'odoo_mutation_preview',
+})

@@ -37,6 +37,8 @@ _SKILLS = {
 }
 
 _ALIASES = {
+    "task-coordination": "odoo-ai-mcp-development",
+    "durable-tasks": "odoo-ai-mcp-development",
     "accounting": "odoo-accounting-development",
     "manufacturing": "odoo-manufacturing-development",
     "mrp": "odoo-manufacturing-development",

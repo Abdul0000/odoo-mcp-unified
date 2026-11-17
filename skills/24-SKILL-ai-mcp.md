@@ -37,3 +37,32 @@ Live business-record mutations and functional scenario execution are routed to
   protocol migration is explicitly requested and independently verified.
 - Claim completion only from stored workflow evidence, never generated
   narrative.
+
+
+## Durable task coordination
+
+For multi-step coding/debugging use task_open with explicit client, stable request_id
+and target=coding|push|deploy|functional. Follow top-level next_call and technical
+argument_request fields through task_run. tool_result retains the underlying
+workflow evidence. Use a unique stable step_id for each mutation; read-only polls
+may reuse one. Never turn a completed push into a deployment or verified-fix claim.
+
+After edits task_test_plan proposes source-derived checks. Missing ORM/business/UI
+layers are blockers, not syntax successes. Existing acceptance checks cannot be
+removed. Execution evidence is bound to the exact tree and runtime.
+
+For a requested deployment after execution_publish, use task_deploy. It adopts the
+verified pushed commit, safely syncs a clean client checkout, checks exact branch,
+local/remote SHA and module scope, classifies upgrade impact and runs the existing
+safe-deploy gates. It cannot create another commit/push. Supply task-specific live
+verification_assertion where applicable; nested addons need module_root_rel.
+
+After disconnect/restart use task_list → task_resume. Resume polls existing records
+read-only. reconciliation_required means inspect remote/database evidence; never
+bypass it with a new request_id. A debug task requires verified_fixed from the
+existing discriminating live replay, even after deployment has completed.
+
+Task configuration changes invalidate old claims. task_knowledge(refresh=true)
+collects bounded source/runtime facts with provenance; manifests are declarations,
+not installed-state proof. Dirty source and failed credentials stay unverified.
+The dashboard displays persisted observations, not invented live success.

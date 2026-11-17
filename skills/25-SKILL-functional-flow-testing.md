@@ -66,3 +66,15 @@ bounded create/write/action/verify steps and stop on the first unverified stage.
 - Stop dependent stages after the first failed or unverified stage.
 - Never switch into the development pipeline because a model/field/action is
   unavailable. Report the exact capability/configuration gap.
+
+
+## Preview, concurrent requests and uncertain outcomes
+
+Use odoo_mutation_preview for create/write/action. Review exact records and payload,
+then execute unchanged arguments and request_id with preview_id. Stale/expired
+snapshots block dispatch; preview never grants approval. This is a read-before-write
+check, not atomic CAS against other Odoo sessions. Write-ahead intents serialize
+concurrent duplicates; an uncertain remote result requires read-back reconciliation,
+not another write with a fresh ID. Custom actions require expected_values for
+functional success; a successful RPC alone is insufficient. Dynamic action steps
+support the same postconditions.

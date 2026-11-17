@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -12,7 +13,23 @@ import time
 import urllib.request
 
 
+def active_locks(state: Path) -> bool:
+    """Live POSIX locks, not stale status strings, identify inline task/writes."""
+    for directory in ('tasks','mutation-intents'):
+        for path in (state / directory).glob('*.lock'):
+            fd = None
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                return True
+            finally:
+                if fd is not None: os.close(fd)
+    return False
+
+
 def active_work(state: Path, execution: Path) -> bool:
+    if active_locks(state): return True
     paths = list((state / 'jobs').glob('*.json'))
     for kind in ('process', 'agent', 'operation', 'workspace'):
         paths.extend((execution / 'records' / kind).glob('*.json'))

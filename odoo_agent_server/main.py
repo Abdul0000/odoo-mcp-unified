@@ -157,6 +157,7 @@ def agent_instructions() -> dict:
                 "Never call hidden repo, Git, verification, or deploy tools, expose credentials, or put Pydantic code inside Odoo addons; terminal success requires the proof defined in system_prompt.",
             ],
             "provider_flow": {
+                "task_coordinator": ["task_open", "task_run", "task_resume", "task_test_plan", "task_knowledge"],
                 "code_change": "execution_workspace_open" if settings.execution_enabled else "workflow_odoo_code_change",
                 "composite_fallback": "workflow_odoo_code_change",
                 "routing": "Prefer native execution when worker and repository are available; use composite workflow only for its supported deployment or fallback capabilities.",

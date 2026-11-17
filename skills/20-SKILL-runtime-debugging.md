@@ -47,3 +47,12 @@ task and must not load this skill.
 - Claim `verified_fixed` only when deployment proof and immutable replay/live
   assertion both pass; otherwise report `implemented_unverified` or the exact
   blocker with evidence.
+
+
+## Infrastructure evidence before addon repair
+
+Trusted authentication failures, SSH/network errors and missing-dependency errors
+have separate failure_category values. Resolve the selected database/login/key,
+current build host or dependency state before editing addon code. Untrusted user
+narrative cannot authorize a repair. Use the durable task's linked debug session;
+source deployment alone cannot satisfy the verified_fixed live replay gate.

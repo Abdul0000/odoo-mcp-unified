@@ -339,6 +339,7 @@ class OdooFailureDiagnosis(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    failure_category: Literal['unknown','authentication','ssh_network','missing_dependency','provider_transport','custom_traceback','connector_pipeline'] = 'unknown'
     origin: Literal[
         "custom_code",
         "preexisting_baseline",
@@ -1576,6 +1577,7 @@ class OdooListModelsRequest(BaseModel):
 
 
 class OdooMutationBaseRequest(BaseModel):
+    preview_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$", description="Optional immutable read-only preview to check immediately before mutation.")
     client_name: str | None = Field(default=None, description="Selected ODOO_CLIENTS entry.")
     request_id: str = Field(..., min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
     context: dict[str, Any] | None = Field(default=None, description="Bounded safe Odoo context.")
@@ -1600,6 +1602,7 @@ class OdooRecordWriteRequest(OdooMutationBaseRequest):
 
 
 class OdooRecordActionRequest(OdooMutationBaseRequest):
+    expected_values: dict[str, Any] = Field(default_factory=dict, max_length=30, description="Expected post-action field values. Custom actions require explicit assertions for functional success.")
     model: str = Field(..., pattern=r"^[a-zA-Z0-9_.]+$")
     ids: list[int] = Field(..., min_length=1, max_length=100)
     action: str = Field(..., pattern=r"^[a-zA-Z0-9_]+$")
@@ -2210,6 +2213,7 @@ class CapabilityCheckResult(BaseModel):
 
 
 class SafeDeployModuleRequest(BaseProjectRequest, ApprovalMixin):
+    execution_workspace_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$", description="Adopt an exact-tree verified already-pushed execution commit; skip duplicate commit/push, retain deploy/upgrade checks.")
     client_name: str | None = Field(default=None, description="Client name from ODOO_CLIENTS. When omitted, resolves from project_path when possible.")
     module_name: str = Field(..., description="Technical module folder/name to deploy and update")
     module_root_rel: str | None = Field(
