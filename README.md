@@ -1,5 +1,7 @@
 # Odoo MCP Agent Connector — Full Backend Plan
 
+Browser client settings: open `/clients`; see [Client manager](docs/CLIENT_MANAGER.md).
+
 Oracle task execution: see [Execution worker setup](docs/EXECUTION_WORKER.md).
 The optional execution lane adds isolated task clones, file tools, Docker commands
 with polling/stdin/cancellation, and verified Git publishing. ChatGPT supplies

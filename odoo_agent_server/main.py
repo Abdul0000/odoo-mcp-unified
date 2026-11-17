@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from .config import settings
 
+from .routers.client_admin import router as client_admin_router
 from .routers.approvals import router as approvals_router
 from .routers.browser import router as browser_router
 from .routers.git import router as git_router
@@ -220,6 +221,7 @@ def root() -> dict[str, object]:
     }
 
 
+app.include_router(client_admin_router)
 app.include_router(oauth_router)
 app.include_router(qa_router)
 app.include_router(repo_router)
@@ -237,6 +239,11 @@ async def request_id_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID", uuid.uuid4().hex[:12])
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    if request.url.path == "/clients" or request.url.path.startswith(("/admin/", "/clients/assets/")):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     return response
 
 app.include_router(mcp_router)

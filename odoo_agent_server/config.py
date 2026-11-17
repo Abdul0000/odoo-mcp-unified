@@ -298,10 +298,14 @@ def get_odoo_clients() -> list[dict]:
             if isinstance(parsed, str):
                 parsed = _json.loads(parsed)
             if isinstance(parsed, list):
-                return [item for item in parsed if isinstance(item, dict)]
+                clients = [item for item in parsed if isinstance(item, dict)]
+                break
         except Exception:
             pass
-    return []
+    else:
+        clients = []
+    from .services.client_settings_store import apply_client_overrides
+    return apply_client_overrides(clients, settings.state_path)
 
 
 def _odoo_client_json_candidates(raw: str) -> list[str]:

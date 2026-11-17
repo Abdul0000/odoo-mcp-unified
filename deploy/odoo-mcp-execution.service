@@ -10,6 +10,7 @@ Group=odoo-mcp
 SupplementaryGroups=docker
 WorkingDirectory=/opt/odoo-mcp/current
 EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
+EnvironmentFile=-/etc/odoo-mcp/clients.env
 Environment=PYTHONUNBUFFERED=1
 Environment=ODOO_AGENT_EXECUTION_ENABLED=true
 ExecStart=/opt/odoo-mcp/current/.venv/bin/python -m odoo_agent_server.execution_worker

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clients · Odoo MCP</title>
+  <link rel="stylesheet" href="/clients/assets/style.css">
+  <script src="/clients/assets/app.js" defer></script>
+</head>
+<body>
+  <header><a class="brand" href="/clients"><span class="mark">o</span> Odoo MCP <span class="divider">/</span> <strong>Clients</strong></a><button id="signout" class="quiet" hidden>Sign out</button></header>
+  <main>
+    <section id="login" class="login-card" hidden>
+      <span class="eyebrow">CLIENT MANAGER</span>
+      <h1>Your clients, one place.</h1>
+      <p>Update connection settings and check that everything is ready.</p>
+      <form id="login-form">
+        <label for="admin-token">Connector admin token</label>
+        <input id="admin-token" type="password" autocomplete="off" required placeholder="Enter your existing connector token">
+        <p class="hint">Have a sign-in link? Open it to sign in directly.</p>
+        <button type="submit" class="primary">Sign in <span aria-hidden="true">→</span></button>
+      </form>
+    </section>
+    <section id="manager" hidden>
+      <div class="page-heading"><div><span class="eyebrow">CONNECTION SETTINGS</span><h1>Client manager</h1><p>Edit a client. Save your changes. Check the connection.</p></div><span class="tag">Oracle connected</span></div>
+      <div class="workspace">
+        <aside class="card client-picker"><label for="client-select">Select client</label><select id="client-select" aria-label="Select client"></select><p id="client-meta" class="hint"></p><div class="side-note"><span class="dot"></span><span>Changes apply immediately.<br>No restart needed.</span></div></aside>
+        <div class="editor">
+          <form id="client-form" class="card">
+            <div class="form-heading"><div><h2 id="client-title">Client settings</h2><p>Existing credentials stay hidden and are kept when left blank.</p></div><span id="dirty" class="tag" hidden>Unsaved changes</span></div>
+            <fieldset id="fields"><legend>Repository</legend><div id="repository-fields" class="grid"></div></fieldset>
+            <fieldset><legend>Odoo connection</legend><div id="odoo-fields" class="grid"></div></fieldset>
+            <fieldset><legend>Odoo.sh SSH</legend><div id="ssh-fields" class="grid"></div><p class="hint">You can paste <code>ssh user@host</code> into SSH host to fill both fields.</p></fieldset>
+            <details id="credentials"><summary>Update credentials <span class="hint">optional</span></summary><div id="credential-fields" class="grid"></div><p class="hint">Leave blank to keep the current value. Secrets are never shown here.</p></details>
+            <details><summary>Advanced settings</summary><div id="advanced-fields" class="grid"></div></details>
+            <div class="actions"><button class="primary" id="save-validate" type="submit">Save &amp; Validate <span aria-hidden="true">→</span></button><button id="save-only" type="button" class="secondary">Save only</button><span id="save-note" class="hint">Changes are saved on Oracle.</span></div>
+          </form>
+          <section id="validation" class="card validation" aria-live="polite" hidden><div class="status-heading"><span id="status-icon" class="status-icon" aria-hidden="true">•</span><h2 id="status-title">Connection check</h2></div><p id="status-message"></p><ul id="checks"></ul></section>
+        </div>
+      </div>
+    </section>
+    <div id="message" role="status" aria-live="polite" hidden></div>
+    <div id="loading" class="loading">Opening client manager…</div>
+  </main>
+  <footer>Odoo MCP · Client settings</footer>
+</body>
+</html>
