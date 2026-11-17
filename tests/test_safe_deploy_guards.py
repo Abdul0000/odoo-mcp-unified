@@ -1268,7 +1268,7 @@ def test_safe_deploy_verifies_inferred_python_field_after_upgrade(tmp_path, monk
         def module_status(self, module_name):
             return OdooResult(status="ok", result=[{"name": module_name, "state": "installed"}])
 
-        def search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None):
+        def search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None, timeout_seconds=120):
             calls["registry_fields"] += 1
             assert model == "ir.model.fields"
             assert ("model", "=", "purchase.order") in domain
@@ -1352,7 +1352,7 @@ def test_safe_deploy_fails_when_inferred_field_missing_after_upgrade(tmp_path, m
     class FakeOdooService:
         def module_status(self, module_name):
             return OdooResult(status="ok", result=[{"name": module_name, "state": "installed"}])
-        def search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None):
+        def search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None, timeout_seconds=120):
             return OdooResult(status="ok", result=[])
         def registry_smoke_test(self, module_name, model_names=None, menu_names=None, strict=True):
             return OdooResult(status="ok", result={"module": module_name})

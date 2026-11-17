@@ -1375,42 +1375,22 @@ def _search_read_via_shell(
     timeout_seconds: int = 120,
 ) -> dict:
     client = _resolve_query_client(client_name, query_text)
-    shell_result = _odoo_service_for_client(client).search_read(model, domain, fields, limit, offset, order, context)
-    shell_dumped = shell_result.model_dump(mode="json") if hasattr(shell_result, "model_dump") else shell_result
-    if isinstance(shell_dumped, dict) and shell_dumped.get("status") == "ok":
-        return {
-            "status": "ok",
-            "source": "odoo_ssh_or_https_jsonrpc",
-            "client_name": client.name if client else None,
-            "odoo": shell_dumped,
-            "attempt": shell_dumped,
-            "ssh_fallback_used": False,
-            "message": "Odoo query completed. SSH is preferred; HTTPS JSON-RPC read-only fallback is used automatically when SSH is unavailable.",
-        }
-
-    # Preserve the original explicit Odoo.sh fallback path for compatibility and
-    # tests. In normal runtime OdooService already attempted SSH + HTTPS JSON-RPC,
-    # but direct tests/legacy monkeypatches may still expect this second path.
-    ssh_result = OdooShService(client).search_read(model, domain, fields, limit, offset, order, context, timeout_seconds)
-    ssh_dumped = ssh_result.model_dump(mode="json") if hasattr(ssh_result, "model_dump") else ssh_result
-    if isinstance(ssh_dumped, dict) and ssh_dumped.get("status") == "ok":
-        return {
-            "status": "ok",
-            "source": "odoosh_ssh_fallback",
-            "client_name": client.name if client else None,
-            "odoo": ssh_dumped,
-            "shell_attempt": shell_dumped,
-            "ssh_fallback_used": True,
-            "message": "Primary Odoo query failed; Odoo.sh SSH fallback was used.",
-        }
+    result = _odoo_service_for_client(client).search_read(
+        model, domain, fields, limit, offset, order, context, timeout_seconds=timeout_seconds,
+    )
+    dumped = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    ok = isinstance(dumped, dict) and dumped.get("status") == "ok"
+    # OdooService owns the client's transport/ACL policy and remaining budget.
+    # Retrying here with a shell can bypass a configured HTTPS identity and
+    # repeat an already exhausted read with a fresh full timeout.
     return {
-        "status": ssh_dumped.get("status") if isinstance(ssh_dumped, dict) else "failed",
-        "source": "odoo_ssh_or_https_jsonrpc_failed",
+        "status": "ok" if ok else "failed",
+        "source": "odoo_ssh_or_https_jsonrpc" if ok else "odoo_ssh_or_https_jsonrpc_failed",
         "client_name": client.name if client else None,
-        "odoo": ssh_dumped,
-        "shell_attempt": shell_dumped,
-        "ssh_fallback_used": True,
-        "message": "Odoo query failed through primary path and Odoo.sh fallback.",
+        "odoo": dumped,
+        "attempt": dumped,
+        "ssh_fallback_used": False,
+        "message": "Client-scoped Odoo query completed." if ok else "Client-scoped Odoo query failed; original transport error preserved.",
     }
 
 
@@ -1430,12 +1410,10 @@ def _read_group_via_shell(req: OdooReadGroupRequest, query_text: str | None = No
 
 
 def _odoo_functional_query(req: OdooFunctionalQueryRequest) -> object:
-    """Map common functional Odoo questions to safe read-only search_read.
+    """Map functional questions to client-scoped, read-only queries.
 
-    It tries Odoo shell first. When shell authentication fails but the selected
-    client has Odoo.sh SSH settings, it automatically falls back to a read-only
-    ``odoo-bin shell`` query over SSH. This lets users read business records
-    without an Odoo email/password, as long as SSH access is working.
+    OdooService owns transport selection; the router never retries an HTTPS
+    authentication/access error with an elevated SSH identity.
     """
     text = (req.query or "").strip().lower()
     limit = req.limit

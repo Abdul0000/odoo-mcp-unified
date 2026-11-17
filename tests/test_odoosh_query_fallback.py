@@ -41,56 +41,44 @@ def _client_env():
     ])
 
 
-def test_odoo_query_falls_back_to_ssh_when_shell_fails(monkeypatch):
+def test_odoo_query_preserves_authentication_failure_without_ssh_retry(monkeypatch):
     monkeypatch.setenv("ODOO_CLIENTS", _client_env())
-
-    def fake_shell_search_read(self, model, domain, fields, limit, offset, order, context):
-        return OdooResult(status="failed", error="Odoo Odoo shell authentication failed")
-
-    def fake_ssh_search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None, timeout_seconds=120):
-        assert model == "account.move"
-        assert ["move_type", "=", "out_invoice"] in [[*item] for item in domain]
-        return OdooResult(
-            status="ok",
-            database="client-a-db",
-            result=[{"name": "INV/2026/00001", "amount_total": 100.0, "state": "posted"}],
-        )
-
-    monkeypatch.setattr(tools.OdooService, "search_read", fake_shell_search_read)
-    monkeypatch.setattr(tools.OdooShService, "search_read", fake_ssh_search_read)
-
+    def primary(self, *args, **kwargs):
+        return OdooResult(status="failed", error="Configured HTTPS authentication failed")
+    def unexpected_ssh(self, *args, **kwargs):
+        raise AssertionError("Router must not escalate the configured identity to SSH")
+    monkeypatch.setattr(tools.OdooService, "search_read", primary)
+    monkeypatch.setattr(tools.OdooShService, "search_read", unexpected_ssh)
     result = tools._odoo_functional_query(
         OdooFunctionalQueryRequest(client_name="ClientA", query="latest customer invoices", limit=5)
     )
-
-    assert result["status"] == "ok"
-    assert result["source"] == "odoosh_ssh_fallback"
-    assert result["ssh_fallback_used"] is True
-    assert result["odoo"]["result"][0]["name"] == "INV/2026/00001"
+    assert result["status"] == "failed"
+    assert result["ssh_fallback_used"] is False
+    assert result["odoo"]["error"] == "Configured HTTPS authentication failed"
 
 
 def test_odoo_query_can_infer_client_name_from_text(monkeypatch):
     monkeypatch.setenv("ODOO_CLIENTS", _client_env())
-
     seen = {}
-
-    def fake_shell_search_read(self, model, domain, fields, limit, offset, order, context):
-        return OdooResult(status="failed", error="bad credentials")
-
-    def fake_ssh_search_read(self, model, domain, fields, limit=20, offset=0, order=None, context=None, timeout_seconds=120):
+    def primary(self, *args, **kwargs):
         seen["client"] = self.client.name
         return OdooResult(status="ok", database="client-a-db", result=[])
-
-    monkeypatch.setattr(tools.OdooService, "search_read", fake_shell_search_read)
-    monkeypatch.setattr(tools.OdooShService, "search_read", fake_ssh_search_read)
-
-    result = tools._odoo_functional_query(
-        OdooFunctionalQueryRequest(query="Use ClientA and read users", limit=3)
-    )
-
-    assert result["status"] == "ok"
-    assert result["client_name"] == "ClientA"
+    monkeypatch.setattr(tools.OdooService, "search_read", primary)
+    result = tools._odoo_functional_query(OdooFunctionalQueryRequest(query="Use ClientA and read users", limit=3))
+    assert result["status"] == "ok" and result["client_name"] == "ClientA"
     assert seen["client"] == "ClientA"
+
+
+def test_query_router_passes_requested_timeout_once(monkeypatch):
+    monkeypatch.setenv("ODOO_CLIENTS", _client_env())
+    budgets = []
+    def primary(self, *args, **kwargs):
+        budgets.append(kwargs["timeout_seconds"])
+        return OdooResult(status="failed", error="Read deadline exhausted")
+    monkeypatch.setattr(tools.OdooService, "search_read", primary)
+    monkeypatch.setattr(tools.OdooShService, "search_read", lambda *a, **k: (_ for _ in ()).throw(AssertionError("second transport attempt")))
+    result = tools._search_read_via_shell(client_name="ClientA", model="res.partner", domain=[], fields=["name"], limit=1, timeout_seconds=3)
+    assert result["status"] == "failed" and budgets == [3]
 
 from odoo_agent_server.services.client_resolver_service import ResolvedClient
 from odoo_agent_server.services.odoosh_service import OdooShService
