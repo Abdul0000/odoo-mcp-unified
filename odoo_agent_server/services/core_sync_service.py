@@ -32,6 +32,7 @@ import functools
 import inspect
 from contextvars import ContextVar
 import subprocess
+import shlex
 import time
 from pathlib import Path
 from threading import Lock
@@ -46,6 +47,7 @@ _negative_cache: dict[str, float] = {}
 _SHA_CACHE_TTL = 30.0  # don't hit odoosh.deployed_sha more than once per 30s
 _NEGATIVE_CACHE_TTL = 120.0
 _deadline = ContextVar("core_inspection_deadline", default=None)
+_source_revisions = ContextVar("core_source_revisions", default=None)
 
 
 def bounded_inspection(fn):
@@ -55,20 +57,24 @@ def bounded_inspection(fn):
             if _deadline.get() is not None:
                 return await fn(*args, **kwargs)
             token = _deadline.set(time.monotonic() + 30)
+            revision_token = _source_revisions.set({})
             try:
                 return await fn(*args, **kwargs)
             finally:
                 _deadline.reset(token)
+                _source_revisions.reset(revision_token)
         return async_wrapped
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
         if _deadline.get() is not None:
             return fn(*args, **kwargs)
         token = _deadline.set(time.monotonic() + 20)
+        revision_token = _source_revisions.set({})
         try:
             return fn(*args, **kwargs)
         finally:
             _deadline.reset(token)
+            _source_revisions.reset(revision_token)
     return wrapped
 
 
@@ -233,13 +239,6 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
     transport_key = f"transport:{target.user}@{target.host}:{target.port}:{key_path}"
     negative_key = f"{transport_key}:{source_root}:{module_name}"
     identity_file = local_dir / ".source_identity.json"
-    if managed and identity_file.exists():
-        try:
-            identity = json.loads(identity_file.read_text())
-            if identity.get("root") == source_root and time.time() - identity.get("synced_at", 0) < settings.core_sync_max_age_seconds:
-                return True
-        except (OSError, ValueError):
-            pass
     now = time.monotonic()
     if _remaining(timeout_seconds) <= 0 or _negative_cache.get(transport_key, 0) > now:
         return False
@@ -248,7 +247,24 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
         return False
     if managed and negative_until > now:
         return False
-    sha = _deployed_sha(selected_client)
+    revisions = _source_revisions.get()
+    revision_key = (transport_key, source_root)
+    if revisions is not None and revision_key in revisions:
+        sha = revisions[revision_key]
+    else:
+        if not managed or source_root.rstrip("/") == str((selected_client.odoosh_user_addons_path if selected_client else None) or "/home/odoo/src/user").rstrip("/"):
+            sha = _deployed_sha(selected_client)
+        else:
+            # Community and Enterprise have their own revisions, unrelated to user HEAD.
+            from .odoosh_service import OdooShService
+            git_root = source_root[:-7] if source_root.endswith("/addons") else source_root
+            result = OdooShService(selected_client).run_shell(
+                f"git -C {shlex.quote(git_root)} rev-parse HEAD", timeout_seconds=max(.001, _remaining(timeout_seconds)))
+            sha = result.stdout.strip() if result.exit_code == 0 else None
+        if revisions is not None:
+            revisions[revision_key] = sha
+    if managed and not sha:
+        return False
     timeout_seconds = max(0, int(_remaining(timeout_seconds)))
     if timeout_seconds <= 0:
         return False
@@ -286,6 +302,8 @@ def ensure_module_synced(remote_root: str, module_name: str, timeout_seconds: in
             # falls through to retry below, rather than being cached as
             # "fresh" — avoids a transient failure looking permanent.
 
+        marker.unlink(missing_ok=True)
+        identity_file.unlink(missing_ok=True)
         try:
             local_dir.mkdir(parents=True, exist_ok=True)
         except OSError:

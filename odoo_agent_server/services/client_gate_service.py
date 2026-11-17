@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,7 +111,23 @@ class ClientGateService:
         validation = state.get("client_validation") if isinstance(state, dict) else None
         if not isinstance(validation, dict):
             return {"validated": False, "summary": "Client has not been validated in this MCP session."}
+        validation = dict(validation)
+        resolved = self.resolver.resolve_client(client_name=client_name, require_complete=False)
+        reason = self._validation_stale_reason(validation, self._validated_project_path(client_name, validation))
+        fingerprint = validation.get("config_fingerprint")
+        if resolved and fingerprint != self._config_fingerprint(resolved):
+            reason = "client configuration changed or has no current identity proof"
+        if reason:
+            validation.update(validated=False, coding_ready=False, deploy_ready=False, ssh_ready=False,
+                              data_query_ready=False, shell_ready=False, full_validation_passed=False,
+                              read_only_ssh_available=False, stale_reason=reason)
         return validation
+
+    @staticmethod
+    def _config_fingerprint(client):
+        # Include credential rotation without persisting secrets in validation state.
+        values = vars(client)
+        return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
     def require_validated_client(self, client_name: str | None, action: str) -> None:
         clients = [normalise_client(item) for item in get_odoo_clients()]
@@ -541,6 +558,7 @@ class ClientGateService:
             "client_name": resolved.name,
             "project_path": str(resolved.path),
             "validated_at": now,
+            "config_fingerprint": self._config_fingerprint(resolved),
             "checks": checks,
             "summary": summary,
             "error_type": final_error_type,

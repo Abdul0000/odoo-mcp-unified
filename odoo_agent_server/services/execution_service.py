@@ -183,8 +183,10 @@ class ExecutionService:
                                        remote_base_sha=remote_base, source_branch=configured_branch, phase="inspect",
                                        deploy_branch=client.branch if client else configured_branch)
             return self.status(record["id"])
-        except Exception:
-            self.store.update(record["id"], "workspace", status="failed", error="Workspace initialization failed; use a new request_id after correcting the source")
+        except Exception as exc:
+            detail = getattr(exc, "detail", "Workspace initialization failed; source preserved")
+            self.store.update(record["id"], "workspace", status="failed", error=detail,
+                              error_type=type(exc).__name__, recovery_action="correct_source_then_retry_new_request_id")
             raise
 
     @staticmethod
@@ -211,8 +213,14 @@ class ExecutionService:
             return {**self.public(record), "workspace_id": workspace_id, "success_allowed": False,
                     "completion_required": True, "state_class": "running",
                     "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id}}}
-        with self.store.workspace_lock(workspace_id):
-            return self._status(workspace_id)
+        try:
+            with self.store.workspace_lock(workspace_id, blocking=False):
+                return self._status(workspace_id)
+        except BlockingIOError:
+            record = self.workspace(workspace_id)
+            return {**self.public(record), "workspace_id": workspace_id, "success_allowed": False,
+                    "completion_required": True, "state_class": "running", "status": "running", "fresh_verification": False,
+                    "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id}}}
 
     def _status(self, workspace_id):
         record = self.workspace(workspace_id)
@@ -226,6 +234,9 @@ class ExecutionService:
                 phase = "edit"
             elif not verification.get("ready"):
                 phase = "verify"
+        if (phase == "commit" and record.get("published_commit") and record.get("pushed") is False
+                and record.get("published_tree") == verification.get("tree") and verification.get("ready")):
+            phase = "done"
         if verification.get("ready") and phase in {"inspect", "edit", "verify", "repair"}:
             phase = "verify"
         next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id}}
@@ -247,8 +258,9 @@ class ExecutionService:
         elif verification.get("ready") and phase != "done":
             next_call = {"tool": "execution_publish", "arguments": {"workspace_id": workspace_id,
                          "message": record["request"]["task_description"][:2000],
+                         "push": record.get("completion_target") != "commit",
                          "request_id": f"publish-{workspace_id[:8]}-{verification['tree'][:16]}"}}
-        if phase == "repair":
+        if phase in {"repair", "sync_required"}:
             next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id, "operation": "diff"}}
         if verification.get("needs_input") or phase in {"needs_review", "needs_input", "configuration_required"}:
             next_call = None
@@ -513,9 +525,10 @@ class ExecutionService:
                 if not check or any(check[k] != getattr(request, k) for k in ("argv", "cwd", "timeout_seconds")):
                     raise HTTPException(409, "Verification command must exactly match a named task-plan check")
                 self.validate_check(request.workspace_id, TaskCheck.model_validate(check).model_dump())
-                if self.verification(request.workspace_id)["needs_input"]:
+                verification = self.verification(request.workspace_id)
+                if verification["needs_input"]:
                     raise HTTPException(409, "Repair budget exhausted; inspect failures and start a new scoped task")
-                data["input_tree"] = self.tree(request.workspace_id)
+                data["input_tree"] = verification["tree"]
             record, _ = self.store.create("process", request.request_id, request.model_dump(), data=data)
             changes = {"phase": "verify" if request.check_name else "edit"}
             if request.check_name:
@@ -546,6 +559,8 @@ class ExecutionService:
                 except HTTPException as exc:
                     if isinstance(exc.detail, dict) and exc.detail.get("approval_required"):
                         self.store.update(record["id"], "operation", status="approval_required", approval=exc.detail)
+                    elif isinstance(exc.detail, dict) and exc.detail.get("error_code") == "remote_advanced":
+                        self.store.update(record["id"], "operation", status="sync_required", error=exc.detail)
                     elif isinstance(exc.detail, dict) and exc.detail.get("verification"):
                         self.store.update(record["id"], "operation", status="verification_required", verification=exc.detail["verification"])
                     else:
@@ -577,6 +592,10 @@ class ExecutionService:
                                       "requires_explicit_user_consent": True, "prompt": approval.get("message"),
                                       "resume_call": {"tool": "execution_publish", "arguments": {**request, "approval_id": approval["approval_id"]}}},
                     "next_call": None}
+        if record["status"] == "sync_required":
+            return {"status": "sync_required", "operation_id": operation_id, "error": record.get("error"),
+                    "success_allowed": False, "completion_required": True, "input_required": False,
+                    "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": request["workspace_id"]}}}
         result = record.get("result") or {}
         succeeded = bool(record["status"] == "succeeded" and result.get("commit")
                          and (not request.get("push", True) or result.get("pushed")))
@@ -614,7 +633,9 @@ class ExecutionService:
                 if branch == workspace.get("source_branch") and (
                     not workspace.get("remote_base_sha") or not advertised or advertised[0] != workspace["remote_base_sha"]
                 ):
-                    raise HTTPException(409, "Remote advanced since task preparation; preserve this task, sync/reapply in a fresh task and rerun checks")
+                    raise HTTPException(409, {"error_code": "remote_advanced",
+                        "message": "Remote advanced since task preparation; preserve this task, sync/reapply in a fresh task and rerun checks",
+                        "expected_head": workspace.get("remote_base_sha"), "actual_head": advertised[0] if advertised else None})
             self.store.update(request.workspace_id, "workspace", phase="commit")
             if git(["status", "--porcelain"], root).strip():
                 git(["add", "-A", "--", "."], root)
@@ -636,16 +657,20 @@ class ExecutionService:
             approvals.mark_consumed(request.approval_id)
             result = self.store.update(record["id"], "publish", status="succeeded", commit=sha, branch=branch,
                                        pushed=request.push, deployment="not_deployed",
-                                       next_action="Use the existing Odoo deployment workflow with this expected SHA; push alone is not deployment.")
-            self.store.update(request.workspace_id, "workspace", phase="done" if request.push else "commit",
+                                       next_action=("Push complete. Use the deployment workflow with this SHA only if deployment was requested." if request.push else "Local commit complete. Stop; no push or deployment was requested."))
+            self.store.update(request.workspace_id, "workspace", phase="done", completion_target="push" if request.push else "commit",
                               published_tree=verification["tree"], published_commit=sha, published_branch=branch,
                               remote_base_sha=sha if request.push and branch == workspace.get("source_branch") else workspace.get("remote_base_sha"),
                               pushed=request.push, publishing=False)
             return self.public(result)
-        except Exception:
-            self.store.update(request.workspace_id, "workspace", phase="needs_review", publishing=False)
+        except Exception as exc:
+            detail = getattr(exc, "detail", type(exc).__name__)
+            sync_required = isinstance(detail, dict) and detail.get("error_code") == "remote_advanced"
+            error = detail if isinstance(detail, dict) else mask_repo_url(str(detail))[:2000]
+            self.store.update(request.workspace_id, "workspace", phase="sync_required" if sync_required else "needs_review", publishing=False,
+                              error=error, error_type=type(exc).__name__, recovery_action="Inspect diff; open a fresh isolated task, reapply the preserved patch against current source, rerun checks, then publish. No user decision is required for ordinary synchronization.")
             approvals.mark_failed(request.approval_id)
-            self.store.update(record["id"], "publish", status="needs_review", error="Publish interrupted or rejected; inspect local and remote SHA before submitting a new request_id")
+            self.store.update(record["id"], "publish", status="sync_required" if sync_required else "needs_review", error=error, error_type=type(exc).__name__)
             raise
 
     def poll(self, process_id, offset=0, max_bytes=16000):

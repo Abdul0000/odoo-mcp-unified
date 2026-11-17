@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import shutil
+import fcntl
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,12 +14,15 @@ from ..schemas import CommandResult
 from .path_service import resolve_allowed_path
 
 
-class RepoLockService:
-    """Small cross-process repository lock using atomic directory creation.
+_HELD = {}
+_HELD_GUARD = threading.Lock()
 
-    Render/Koyeb may run multiple requests in the same process or process group.
-    A mkdir lock is simple, portable, and prevents two agent calls from editing,
-    committing, or pushing the same checkout at the same time.
+
+class RepoLockService:
+    """Cross-process advisory lock with kernel-owned lifetime.
+
+    A persistent lock inode prevents stale-directory races. Process death releases
+    ownership automatically; elapsed time never evicts a live operation.
     """
 
     def __init__(self, stale_after_seconds: int = 1800) -> None:
@@ -34,44 +38,45 @@ class RepoLockService:
     def acquire(self, project_path: str, owner: str | None = None, timeout_seconds: int = 60) -> CommandResult:
         lock_dir = self._lock_dir(project_path)
         owner = owner or uuid4().hex
-        deadline = time.time() + timeout_seconds
+        deadline = time.monotonic() + max(0, timeout_seconds)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        # Never unlink this inode: doing so lets a new waiter lock a different
+        # inode while another process still owns the old one. Kernel ownership
+        # automatically ends on process death, including partial initialization.
+        stream = (lock_dir / 'lease').open('a+')
         while True:
             try:
-                lock_dir.mkdir(parents=True, exist_ok=False)
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with _HELD_GUARD:
+                    _HELD[str(lock_dir)] = (owner, stream)
                 (lock_dir / 'owner').write_text(owner, encoding='utf-8')
-                (lock_dir / 'created_at').write_text(str(time.time()), encoding='utf-8')
-                return CommandResult(command=['repo.lock', 'acquire'], cwd=str(resolve_allowed_path(project_path)), exit_code=0, stdout=f'LOCK_ACQUIRED\nowner={owner}\nlock={lock_dir}\n')
-            except FileExistsError:
-                created_at = 0.0
-                try:
-                    created_at = float((lock_dir / 'created_at').read_text(encoding='utf-8').strip())
-                except Exception:
-                    created_at = 0.0
-                if created_at and time.time() - created_at > self.stale_after_seconds:
-                    shutil.rmtree(lock_dir, ignore_errors=True)
-                    continue
-                if time.time() >= deadline:
-                    current_owner = ''
-                    try:
-                        current_owner = (lock_dir / 'owner').read_text(encoding='utf-8').strip()
-                    except Exception:
-                        pass
-                    return CommandResult(command=['repo.lock', 'acquire'], cwd=str(resolve_allowed_path(project_path)), exit_code=124, stderr=f'Repo lock is busy: {lock_dir} owner={current_owner}')
-                time.sleep(0.25)
+                return CommandResult(command=['repo.lock', 'acquire'], cwd=str(resolve_allowed_path(project_path)), exit_code=0,
+                                     stdout=f'LOCK_ACQUIRED\nowner={owner}\nlock={lock_dir}\n')
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    stream.close()
+                    return CommandResult(command=['repo.lock', 'acquire'], cwd=str(resolve_allowed_path(project_path)),
+                                         exit_code=124, stderr=f'Repo lock is busy: {lock_dir}')
+                time.sleep(min(.1, max(0, deadline - time.monotonic())))
+            except BaseException:
+                with _HELD_GUARD:
+                    _HELD.pop(str(lock_dir), None)
+                stream.close()
+                raise
 
     def release(self, project_path: str, owner: str | None = None) -> CommandResult:
         lock_dir = self._lock_dir(project_path)
-        if not lock_dir.exists():
-            return CommandResult(command=['repo.lock', 'release'], cwd=str(resolve_allowed_path(project_path)), exit_code=0, stdout='LOCK_NOT_PRESENT\n')
-        if owner:
-            try:
-                current_owner = (lock_dir / 'owner').read_text(encoding='utf-8').strip()
-            except Exception:
-                current_owner = ''
-            if current_owner and current_owner != owner:
-                return CommandResult(command=['repo.lock', 'release'], cwd=str(resolve_allowed_path(project_path)), exit_code=2, stderr=f'Lock owner mismatch: current={current_owner} requested={owner}')
-        shutil.rmtree(lock_dir, ignore_errors=True)
-        return CommandResult(command=['repo.lock', 'release'], cwd=str(resolve_allowed_path(project_path)), exit_code=0, stdout='LOCK_RELEASED\n')
+        with _HELD_GUARD:
+            entry = _HELD.get(str(lock_dir))
+            if entry and owner and entry[0] != owner:
+                return CommandResult(command=['repo.lock', 'release'], cwd=str(resolve_allowed_path(project_path)),
+                                     exit_code=2, stderr='Lock owner mismatch')
+            if entry:
+                _HELD.pop(str(lock_dir))
+                fcntl.flock(entry[1], fcntl.LOCK_UN)
+                entry[1].close()
+        return CommandResult(command=['repo.lock', 'release'], cwd=str(resolve_allowed_path(project_path)), exit_code=0,
+                             stdout='LOCK_RELEASED\n' if entry else 'LOCK_NOT_PRESENT\n')
 
     @contextmanager
     def locked(self, project_path: str, owner: str | None = None, timeout_seconds: int = 60):

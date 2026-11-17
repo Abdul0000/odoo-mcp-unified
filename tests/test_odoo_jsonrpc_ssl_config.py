@@ -90,3 +90,71 @@ def test_jsonrpc_prefers_nested_odoo_exception_message(monkeypatch):
     assert "odoo.exceptions.ValueError" in str(exc_info.value)
     assert "Odoo Server Error" not in str(exc_info.value)
 
+
+
+def test_configured_read_transport_never_escalates_https_denial_to_ssh(monkeypatch):
+    from odoo_agent_server.services.odoo_service import OdooService
+    from odoo_agent_server.schemas import OdooResult
+    service = OdooService()
+    monkeypatch.setattr(OdooJsonRpcService, 'configured', lambda self: True)
+    monkeypatch.setattr(OdooJsonRpcService, 'search_read', lambda *a, **k: OdooResult(status='failed', error='AccessError'))
+    monkeypatch.setattr(service, '_ssh', lambda: (_ for _ in ()).throw(AssertionError('ACL escalation')))
+    assert service.search_read('res.partner').error == 'AccessError'
+
+
+def test_login_and_query_share_one_remaining_budget(monkeypatch):
+    import time
+    service = OdooJsonRpcService()
+    monkeypatch.setattr(service, 'configured', lambda: True)
+    monkeypatch.setattr(service, '_api_key', lambda: None)
+    def login(budget):
+        time.sleep(.02)
+        return 1
+    budgets = []
+    monkeypatch.setattr(service, '_login_uid', login)
+    monkeypatch.setattr(service, '_call', lambda *args: budgets.append(args[-1]) or [])
+    assert service.search_read('res.partner', timeout_seconds=.1).status == 'ok'
+    assert 0 < budgets[0] < .09
+
+
+def test_expired_watchdog_deadline_never_starts_https(monkeypatch):
+    import time
+    import pytest
+    from odoo_agent_server.services.deadline_service import read_deadline
+    token = read_deadline.set(time.monotonic() - 1)
+    try:
+        with pytest.raises(TimeoutError):
+            OdooJsonRpcService()._call('common', 'login', [], 60)
+    finally:
+        read_deadline.reset(token)
+
+
+def test_selected_client_never_borrows_global_https_identity(monkeypatch):
+    monkeypatch.setattr(settings, 'odoo_base_url', 'https://other-client.invalid')
+    monkeypatch.setattr(settings, 'odoo_db_name', 'other_db')
+    monkeypatch.setattr(settings, 'odoo_login', 'admin')
+    monkeypatch.setattr(settings, 'odoo_password', 'secret')
+    client = ResolvedClient(name='A', repo='https://example.invalid/a.git', branch='staging', path='/tmp/a')
+    assert not OdooJsonRpcService(client).configured()
+
+
+def test_zero_read_budget_never_starts_transport(monkeypatch):
+    from odoo_agent_server.services.odoo_service import OdooService
+    monkeypatch.setattr(OdooJsonRpcService, 'configured', lambda self: (_ for _ in ()).throw(AssertionError('transport setup after deadline')))
+    assert OdooService().search_read('res.partner', timeout_seconds=0).status == 'failed'
+
+
+def test_protected_method_keeps_configured_network_timeout(monkeypatch):
+    import httpx
+    seen = []
+    class Client:
+        def __init__(self, **kwargs): seen.append(kwargs['timeout'])
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def post(self, *args, **kwargs):
+            return type('Response', (), {'raise_for_status': lambda self: None, 'json': lambda self: {'result': True}})()
+    service = OdooJsonRpcService()
+    monkeypatch.setattr(service, '_base_url', lambda: 'https://fixture.invalid')
+    monkeypatch.setattr(httpx, 'Client', Client)
+    assert service._call('object', 'execute_kw', ['db', 1, 'secret', 'model', 'write', [], {}], 60)
+    assert seen[0].read == 60

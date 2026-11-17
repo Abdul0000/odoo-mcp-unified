@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import subprocess
 import time
@@ -33,7 +34,7 @@ class RepoIndexService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project path not found: {project}")
 
         cache_file = self._cache_file(project)
-        fingerprint = self._fingerprint(project)
+        fingerprint = f"v2:{max_files}:{self._fingerprint(project)}"
         if settings.repo_index_enabled and not force_refresh and cache_file.exists():
             try:
                 data = json.loads(cache_file.read_text(encoding="utf-8") or "{}")
@@ -171,7 +172,8 @@ class RepoIndexService:
 
     def _extract_templates(self, path: Path) -> list[str]:
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")[:500_000]
+            with path.open(encoding="utf-8", errors="ignore") as stream:
+                text = stream.read(500_000)
         except Exception:
             return []
         return [m.group(1) for m in _TEMPLATE_RE.finditer(text)]
@@ -181,41 +183,33 @@ class RepoIndexService:
         return settings.cache_path / "repo_index" / f"{key}.json"
 
     def _fingerprint(self, project: Path) -> str:
+        digest = hashlib.sha256()
         try:
-            head = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(project),
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=str(project),
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
-            if head.returncode == 0 and status.returncode == 0:
-                payload = f"git:{head.stdout.strip()}:{status.stdout.strip()}"
-                return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        except Exception:
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project,
+                                  capture_output=True, timeout=3, check=False)
+            digest.update(head.stdout)
+        except (OSError, subprocess.TimeoutExpired):
             pass
-        try:
-            stat = project.stat()
-            payload = f"fs:{stat.st_mtime_ns}:{stat.st_size}"
-        except OSError:
-            payload = f"fs:{project}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        # Hash the indexed content, including already-dirty and untracked files.
+        # Status letters and directory mtimes cannot identify a second edit.
+        for path in sorted(self._walk(project)):
+            digest.update(str(path.relative_to(project)).encode())
+            try:
+                digest.update(str(path.lstat().st_mode).encode())
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(65536), b""):
+                        digest.update(chunk)
+            except OSError:
+                digest.update(b"unreadable")
+        return digest.hexdigest()
 
     def _walk(self, project: Path):
-        for path in project.rglob("*"):
-            if any(part in _SKIP_DIRS for part in path.parts):
-                continue
-            if path.is_file() and (path.suffix in _INTERESTING_SUFFIXES or path.name == "__manifest__.py"):
-                yield path
+        for directory, dirs, files in os.walk(project, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
+            for name in sorted(files):
+                path = Path(directory) / name
+                if path.suffix in _INTERESTING_SUFFIXES or name == "__manifest__.py":
+                    yield path
 
     def _module_root(self, path: Path) -> Path | None:
         current = path if path.is_dir() else path.parent

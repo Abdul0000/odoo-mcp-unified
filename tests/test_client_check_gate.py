@@ -119,7 +119,7 @@ def test_mcp_client_validation_returns_background_job_before_remote_checks(monke
     assert started["next_call"]["tool"] == "jobs.get"
     assert len(callbacks) == 1
     running = JsonStore().get_job(started["job_id"])
-    assert running.status.value == "running"
+    assert running.status.value == "queued"
 
     callbacks[0]()
 
@@ -181,6 +181,11 @@ def test_agent_instructions_returns_client_gate_until_validation_passes(monkeypa
         client_name="Alpha",
     )
 
+    # Persisted flags without config identity are deliberately not reusable.
+    assert agent_instructions()["requires_client_selection"] is True
+    _make_checkout(tmp_path / "a")
+    _patch_successful_validation(monkeypatch)
+    ClientGateService().check(client_name="Alpha", validate=True)
     after = agent_instructions()
     assert after["prompt_source"] == "MCP_SYSTEM_PROMPT.md"
     assert "MCP_SYSTEM_PROMPT" in after["system_prompt"] or after["system_prompt"]
@@ -311,3 +316,20 @@ def test_failed_checkout_does_not_hide_live_transport_results(monkeypatch, tmp_p
     assert result["data_query_ready"] is True
     assert result["checks"]["odoo_shell"] == "ok"
     assert result["checks"]["odoosh_ssh"] == "failed"
+
+
+def test_validation_readiness_expires_and_configuration_changes_invalidate(monkeypatch, tmp_path):
+    checkout = tmp_path / 'alpha'; _make_checkout(checkout)
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    client = _client('Alpha', 'https://github.com/acme/a.git', 'staging', str(checkout))
+    _set_clients(monkeypatch, [client]); _patch_successful_validation(monkeypatch)
+    gate = ClientGateService()
+    gate.check('Alpha', validate=True)
+    assert gate.check('Alpha')['ok']
+    state = gate.store.load_session_state(client_name='Alpha')
+    state['client_validation']['validated_at'] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    gate.store.save_session_state(state, client_name='Alpha')
+    assert not gate.check('Alpha')['ok'] and gate.check('Alpha')['requires_validation']
+    gate.check('Alpha', validate=True, force_refresh=True)
+    _set_clients(monkeypatch, [{**client, 'branch': 'new-staging'}])
+    assert not gate.check('Alpha')['ok']

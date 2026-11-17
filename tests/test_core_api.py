@@ -69,7 +69,8 @@ def test_agent_instructions_require_complete_safe_deploy_flow():
     assert "workflow_odoo_code_change" in rules
     assert "hidden repo, Git" in rules
     assert "Pydantic code inside Odoo addons" in rules
-    assert provider_flow["code_change"] == "workflow_odoo_code_change"
+    assert provider_flow["code_change"] == "execution_workspace_open"
+    assert provider_flow["composite_fallback"] == "workflow_odoo_code_change"
     assert provider_flow["visual_change"] == "workflow_frontend_visual_implement"
     assert provider_flow["continuation"] == [
         "jobs_get", "workflow_resume_job", "workflow_resume_continuation",
@@ -97,3 +98,20 @@ def test_agent_instructions_require_complete_safe_deploy_flow():
         "new_tools_v14plus",
     }
     assert not (forbidden_sections & instructions.keys())
+
+
+def test_readiness_requires_fresh_worker_and_runtime_proof(tmp_path, monkeypatch):
+    import json, time
+    from fastapi.testclient import TestClient
+    from odoo_agent_server.config import settings
+    from odoo_agent_server.main import app
+    monkeypatch.setattr(settings, 'execution_enabled', True)
+    monkeypatch.setattr(settings, 'execution_root', str(tmp_path))
+    client = TestClient(app)
+    assert client.get('/health').status_code == 200
+    assert client.get('/ready').status_code == 503
+    (tmp_path / 'worker-heartbeat').write_text(json.dumps(time.time()))
+    (tmp_path / 'capabilities.json').write_text(json.dumps({'image': settings.execution_image, 'image_id': 'sha256:proof', 'python': True}))
+    assert client.get('/ready').status_code == 200
+    (tmp_path / 'worker-heartbeat').write_text(json.dumps(time.time() - 60))
+    assert client.get('/ready').status_code == 503

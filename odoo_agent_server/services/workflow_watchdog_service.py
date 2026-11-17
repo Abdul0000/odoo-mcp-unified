@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Awaitable, Callable
 
+from .deadline_service import read_deadline
 from ..config import settings
 from ..schemas import JobRecord, JobRecordWithWatchdog, JobStatus, WatchdogAssessment
 
@@ -105,6 +106,7 @@ class WorkflowWatchdogService:
         if settings.workflow_watchdog_mode == "shadow":
             return await operation()
 
+        token = read_deadline.set(started + budget)
         try:
             return await asyncio.wait_for(operation(), timeout=budget)
         except TimeoutError:
@@ -127,11 +129,16 @@ class WorkflowWatchdogService:
                     ),
                 },
                 "cancellation_requested": True,
+                "blocking_io_may_be_finishing": True,
+                "retry_after_seconds": 5,
                 "force_cancelled": False,
                 "success_allowed": False,
                 "completion_required": False,
                 "terminal_action": "stop_and_summarize",
             }
+
+        finally:
+            read_deadline.reset(token)
 
     def annotate_job(self, job: JobRecord) -> JobRecordWithWatchdog:
         progress = self._workflow_progress(job)

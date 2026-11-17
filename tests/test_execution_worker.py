@@ -271,8 +271,10 @@ def test_fresh_task_fast_forwards_without_moving_source_and_remote_race_blocks_p
     advance("two")
     with pytest.raises(HTTPException, match="409"):
         service.publish(WorkspacePublish(workspace_id=fresh["workspace_id"], message="fix", request_id="racing-push"))
-    assert service.status(fresh["workspace_id"])["input_required"]
-    assert service.status(fresh["workspace_id"])["next_call"] is None
+    recovery = service.status(fresh["workspace_id"])
+    assert not recovery["input_required"] and recovery["phase"] == "sync_required"
+    assert recovery["next_call"]["arguments"]["operation"] == "diff"
+    assert recovery["error"]["error_code"] == "remote_advanced"
     assert (service.root(fresh["workspace_id"]) / "remote.txt").read_text() == "one"
     (source / "hello.py").write_text("UNCOMMITTED = True\n")
     with pytest.raises(HTTPException, match="409"):
@@ -670,3 +672,22 @@ def test_commit_only_operation_reports_commit_success_without_claiming_push(exec
     result = service.operation_status(operation['id'])
     assert result['success_allowed'] and result['state_class'] == 'succeeded'
     assert result['pushed'] is False
+
+
+def test_commit_only_workspace_has_terminal_status_without_push_suggestion(execution, monkeypatch):
+    service, ws, _, _ = execution
+    verify(service, ws, monkeypatch)
+    published = service.publish(WorkspacePublish(workspace_id=ws, message='local verified commit', request_id='terminal-commit-only', push=False))
+    assert published['pushed'] is False
+    result = service.status(ws)
+    assert result['success_allowed'] and result['phase'] == 'done'
+    assert result['next_call'] is None and result['pushed'] is False
+
+
+def test_workspace_status_never_waits_for_mutation_lock(execution):
+    service, ws, _, _ = execution
+    with service.store.workspace_lock(ws):
+        started = time.monotonic()
+        result = service.status(ws)
+        assert time.monotonic() - started < .2
+        assert result['state_class'] == 'running' and not result['success_allowed']

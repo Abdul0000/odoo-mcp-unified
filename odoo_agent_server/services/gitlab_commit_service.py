@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import urllib.parse
@@ -43,12 +44,15 @@ class GitLabRepo:
         self.calls = 0
         self._default_branch = None
         self.known_blobs: set[str] = set()
+        self._trees: dict[str, dict] = {}
 
     def _transport(self, method, url, headers, body):
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as response:
-                raw = response.read()
+                raw = response.read(8_000_001)
+                if len(raw) > 8_000_000:
+                    raise GitHubError(413, "GitLab response exceeded bounded transport size")
                 try:
                     data = json.loads(raw) if raw else None
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -74,7 +78,7 @@ class GitLabRepo:
         if status in ok:
             return data
         message = data.get("message", str(data)) if isinstance(data, dict) else str(data)
-        if status == 409 or (status == 400 and "branch" in str(message).lower()):
+        if status == 409 or (status == 400 and any(word in str(message).lower() for word in ("branch", "changed", "last_commit", "already exists", "does not exist"))):
             raise GitHubError(422, str(message), path=path)
         raise GitHubError(status, str(message), retryable=status >= 500 or status == 599, path=path)
 
@@ -105,33 +109,66 @@ class GitLabRepo:
             raise
 
     def tree(self, tree_sha: str):
+        immutable = bool(re.fullmatch(r"[0-9a-f]{40,64}", tree_sha))
+        if immutable and tree_sha in self._trees:
+            return {p: dict(v) for p, v in self._trees[tree_sha].items()}
         rows, page = {}, 1
         while True:
             data = self.request("GET", f"/repository/tree?ref={urllib.parse.quote(tree_sha, safe='')}&recursive=true&per_page=100&page={page}")
             if not data: break
             for item in data:
                 if item.get("type") == "blob":
-                    rows[item["path"]] = {"sha": item["id"], "mode": "100644", "size": str(item.get("size", 0))}
+                    rows[item["path"]] = {"sha": item["id"], "mode": item.get("mode", "100644"), "size": str(item.get("size", 0))}
                     self.known_blobs.add(item["id"])
             if len(data) < 100: break
             page += 1
-        return rows
+        if immutable:
+            if len(self._trees) >= 8:
+                self._trees.pop(next(iter(self._trees)))
+            self._trees[tree_sha] = rows
+        return {p: dict(v) for p, v in rows.items()}
+
+    def _directory_blobs(self, tree_sha, prefix):
+        rows, page = {}, 1
+        while True:
+            query = urllib.parse.urlencode({"ref": tree_sha, "path": prefix, "recursive": "false", "per_page": 100, "page": page})
+            data = self.request("GET", f"/repository/tree?{query}") or []
+            for item in data:
+                if item.get("type") == "blob":
+                    rows[item["path"]] = {"sha": item["id"], "mode": item.get("mode", "100644"), "size": str(item.get("size", 0))}
+                    self.known_blobs.add(item["id"])
+            if len(data) < 100:
+                return rows
+            page += 1
 
     def tree_at(self, tree_sha: str, path: str):
         prefix = path.strip("/")
-        return {p[len(prefix) + 1:]: {**v, "type": "blob"} for p, v in self.tree(tree_sha).items() if p.startswith(prefix + "/") and "/" not in p[len(prefix) + 1:]}
+        rows = self._trees.get(tree_sha)
+        if rows is None:
+            rows = self._directory_blobs(tree_sha, prefix)
+        offset = len(prefix) + 1 if prefix else 0
+        return {p[offset:]: {**v, "type": "blob"} for p, v in rows.items()
+                if (not prefix or p.startswith(prefix + "/")) and "/" not in p[offset:]}
 
     def root_blob(self, tree_sha: str, name: str):
-        return self.tree(tree_sha).get(name, {}).get("sha")
+        rows = self._trees.get(tree_sha)
+        if rows is None:
+            rows = self._directory_blobs(tree_sha, "")
+        return rows.get(name, {}).get("sha")
 
     def blob_text(self, sha: str):
         path = f"/repository/blobs/{urllib.parse.quote(sha, safe='')}/raw"
         data = self.request("GET", path)
-        if isinstance(data, str): return data
-        return str(data or "")
+        text = data if isinstance(data, str) else str(data or "")
+        if len(text.encode("utf-8")) > 400_000:
+            raise GitHubError(413, "Blob exceeds workspace file size limit; use native execution", path=sha)
+        return text
 
     def blobs_text(self, shas: dict[str, str], workers: int = 8):
-        return {path: self.blob_text(sha) for path, sha in shas.items()}
+        if not shas:
+            return {}
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, 4)), thread_name_prefix="gitlab_blob") as pool:
+            return dict(zip(shas, pool.map(self.blob_text, shas.values())))
 
     def recent_commit_messages(self, branch: str, count: int = 8):
         ref = urllib.parse.quote(branch, safe="")
@@ -152,6 +189,13 @@ class GitLabRepo:
         for change in changes:
             action = "delete" if change.content is None else ("update" if change.path in current_tree else "create")
             row = {"action": action, "file_path": change.path}
+            if action in {"update", "delete"}:
+                encoded = urllib.parse.quote(change.path, safe="")
+                metadata = self.request("GET", f"/repository/files/{encoded}?ref={urllib.parse.quote(current, safe='')}")
+                last_commit = metadata.get("last_commit_id")
+                if not last_commit:
+                    raise GitHubError(409, "Missing file concurrency proof; use native Git execution", path=change.path)
+                row["last_commit_id"] = last_commit
             if change.content is not None: row["content"] = change.content
             actions.append(row)
         if not actions:

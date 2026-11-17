@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from .source_snapshot_service import source_files
 from ..config import settings
 from .path_service import resolve_allowed_path
 from .coding_session_service import CodingSessionService
@@ -517,7 +518,7 @@ class OdooCodeSearchService:
     @staticmethod
     def _fingerprint(project: Path, module: Path) -> str:
         files = [
-            path for path in sorted(module.rglob("*"))
+            path for path in sorted(source_files(module, {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}))
             if path.is_file()
             and not is_ignored_source_path(path.relative_to(module).parts)
             and OdooCodeSearchService._inside_module(path, module)

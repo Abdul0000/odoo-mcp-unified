@@ -14,6 +14,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from .source_snapshot_service import source_files
 from ..schemas import Severity
 from .validator_service import OdooModuleValidator
 from .coding_session_service import CodingSessionService
@@ -170,10 +171,10 @@ class ModuleAnalysisService:
                 if rel in explicit_set:
                     continue
                 try:
-                    content = path.read_text(encoding="utf-8", errors="replace")
+                    with path.open(encoding="utf-8", errors="replace") as stream:
+                        content = stream.read(500_000)
                 except OSError:
                     continue
-                content_cache[path] = content
                 rel_folded = rel.casefold()
                 content_folded = content.casefold()
                 path_hits = [pattern for pattern in patterns if pattern in rel_folded]
@@ -273,7 +274,8 @@ class ModuleAnalysisService:
                 if scanned > 400:
                     break
                 try:
-                    content = path.read_text(encoding="utf-8", errors="replace")[:500_000]
+                    with path.open(encoding="utf-8", errors="replace") as stream:
+                        content = stream.read(500_000)
                 except OSError:
                     continue
                 folded = content.casefold()
@@ -359,7 +361,7 @@ class ModuleAnalysisService:
         module_candidates: list[Any] | None = None,
     ) -> dict[str, Any]:
         all_files = [
-            path for path in module_path.rglob("*")
+            path for path in source_files(module_path, self._skip_parts)
             if path.is_file()
             and path.suffix.lower() in self._extensions
             and not any(part in self._skip_parts for part in path.relative_to(module_path).parts)
@@ -412,7 +414,8 @@ class ModuleAnalysisService:
             rel = path.relative_to(module_path).as_posix()
             content = content_cache.get(path)
             if content is None:
-                content = path.read_text(encoding="utf-8", errors="replace")
+                with path.open(encoding="utf-8", errors="replace") as stream:
+                    content = stream.read(500_000)
             files_left = max(1, len(selected) - index)
             budget = min(4000, max(300, remaining // files_left))
             matched_patterns = selection_metadata.get(rel, {}).get("matched_patterns", [])
@@ -420,7 +423,7 @@ class ModuleAnalysisService:
             evidence.append({
                 "path": rel,
                 "size": len(content),
-                "truncated": truncated,
+                "truncated": truncated or path.stat().st_size > len(content.encode("utf-8")),
                 "content": preview,
                 **selection_metadata.get(rel, {}),
             })

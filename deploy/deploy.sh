@@ -37,9 +37,10 @@ if [[ ! -x "$VENV/bin/python" ]]; then
   rm -rf "$VENV"
   "$PYTHON" -m venv "$VENV"
   "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
+  chown -R odoo-mcp:odoo-mcp "$VENV"
 fi
-# The deployment unit runs as root, but the API reads the release and venv as odoo-mcp.
-chown -R odoo-mcp:odoo-mcp "$RELEASE" "$VENV"
+# Only the new release needs ownership updates; reuse dependency artifacts.
+chown -R odoo-mcp:odoo-mcp "$RELEASE"
 ln -sfn "$VENV" "$RELEASE/.venv"
 UVICORN_SHEBANG="$(head -n 1 "$VENV/bin/uvicorn")"
 if [[ "$UVICORN_SHEBANG" != "#!$VENV/bin/python"* ]]; then
@@ -52,13 +53,19 @@ fi
 # Once the isolated worker is installed, validate each release in its container
 # before switching the running API. No application secrets enter this container.
 if systemctl is-enabled --quiet odoo-mcp-execution.service; then
-  docker build -f "$RELEASE/deploy/Dockerfile.execution" -t odoo-mcp-execution:local "$RELEASE"
+  IMAGE_HASH="$(cat "$RELEASE/deploy/Dockerfile.execution" "$RELEASE/requirements.txt" "$RELEASE/requirements-dev.txt" | sha256sum | awk '{print $1}')"
+  CANDIDATE_IMAGE="odoo-mcp-execution:artifact-$IMAGE_HASH"
+  if ! docker image inspect "$CANDIDATE_IMAGE" >/dev/null 2>&1; then
+    DOCKER_BUILDKIT=0 docker build --memory 512m --memory-swap 512m --cpu-period 100000 --cpu-quota 100000 \
+      -f "$RELEASE/deploy/Dockerfile.execution" -t "$CANDIDATE_IMAGE" "$RELEASE"
+  fi
   docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
     --user "$(stat -c '%u:%g' "$RELEASE")" --env HOME=/tmp \
     --memory 512m --cpus 1 --pids-limit 256 --tmpfs /tmp:rw,nosuid,nodev,size=256m \
     --mount "type=bind,src=$RELEASE,dst=/workspace,readonly" --workdir /workspace \
-    odoo-mcp-execution:local python -m pytest -q -p no:cacheprovider -o addopts=""
+    "$CANDIDATE_IMAGE" python -m pytest -q -p no:cacheprovider -o addopts=""
 fi
+OLD_IMAGE="$(docker image inspect --format '{{.Id}}' odoo-mcp-execution:local 2>/dev/null || true)"
 OLD_TARGET="$(readlink "$ROOT/current" 2>/dev/null || true)"
 OLD_VENV="$(readlink "$ROOT/venv" 2>/dev/null || true)"
 switch_links() {
@@ -71,11 +78,13 @@ rollback() {
   echo "Deployment failed (exit=$code); restoring previous release." >&2
   if [[ -n "$OLD_TARGET" ]]; then ln -sfn "$OLD_TARGET" "$ROOT/current.rollback"; mv -Tf "$ROOT/current.rollback" "$ROOT/current"; fi
   if [[ -n "$OLD_VENV" ]]; then ln -sfn "$OLD_VENV" "$ROOT/venv.rollback"; mv -Tf "$ROOT/venv.rollback" "$ROOT/venv"; fi
+  if [[ -n "$OLD_IMAGE" ]]; then docker tag "$OLD_IMAGE" odoo-mcp-execution:local || true; fi
   systemctl restart "$SERVICE" || true
   systemctl try-restart odoo-mcp-execution.service || true
   exit "$code"
 }
 trap rollback ERR
+if [[ -n "${CANDIDATE_IMAGE:-}" ]]; then docker tag "$CANDIDATE_IMAGE" odoo-mcp-execution:local; fi
 switch_links
 systemctl restart "$SERVICE"
 if systemctl is-active --quiet odoo-mcp-execution.service; then
@@ -83,7 +92,7 @@ if systemctl is-active --quiet odoo-mcp-execution.service; then
 fi
 healthy=0
 for ((i=0; i<HEALTH_TIMEOUT; i++)); do
-  if curl --fail --silent "$HEALTH_URL" | grep -q '"status":"ok"'; then healthy=1; break; fi
+  if curl --fail --silent --max-time 3 "${HEALTH_URL%/health}/ready" | grep -q '"status":"ok"'; then healthy=1; break; fi
   sleep 1
 done
 if [[ "$healthy" != 1 ]]; then echo "Health check failed for $COMMIT" >&2; false; fi

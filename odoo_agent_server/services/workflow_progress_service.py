@@ -97,8 +97,9 @@ class WorkflowProgressService:
             "finished_at": now,
             "terminal": True,
         }
+        changes["total_ms"] = self._elapsed_ms(operation_id, now)
         if metrics:
-            changes["total_ms"] = max(0, int(metrics.get("total_ms") or 0))
+            changes["total_ms"] = max(changes["total_ms"], int(metrics.get("total_ms") or 0))
             changes["queue_wait_ms"] = max(0, int(metrics.get("queue_wait_ms") or 0))
             if isinstance(metrics.get("phases_ms"), dict):
                 changes["phases_ms"] = dict(metrics["phases_ms"])
@@ -109,12 +110,22 @@ class WorkflowProgressService:
         return JsonStore().update_workflow_progress(operation_id, {
             "subphases_ms": self._closed_subphase(operation_id, now),
             "status": "failed",
+            "total_ms": self._elapsed_ms(operation_id, now),
             "current_phase": "failed",
             "error_type": type(exc).__name__,
             "last_progress_at": now,
             "finished_at": now,
             "terminal": True,
         })
+
+    def _elapsed_ms(self, operation_id, now):
+        previous = JsonStore().get_workflow_progress(operation_id) or {}
+        try:
+            start = datetime.fromisoformat(previous["started_at"].replace("Z", "+00:00"))
+            stop = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            return max(0, round((stop - start).total_seconds() * 1000))
+        except (KeyError, TypeError, ValueError):
+            return sum((previous.get("phases_ms") or {}).values())
 
     def _closed_subphase(self, operation_id, now):
         previous = JsonStore().get_workflow_progress(operation_id) or {}

@@ -303,5 +303,12 @@ class ModuleTestService:
                     },
                 )
 
-        submit_background(background)
+        try:
+            submit_background(background)
+        except Exception:
+            self.store.finish_job(self.store.get_job(job.id), JobStatus.failed, {
+                "error_code": "background_capacity_exhausted", "retry_after_seconds": 5,
+                "verified": False, "success_allowed": False,
+            })
+            raise
         return self.store.get_job(job.id).model_dump(mode="json")

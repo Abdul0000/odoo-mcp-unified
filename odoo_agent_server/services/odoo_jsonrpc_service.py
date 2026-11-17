@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from .deadline_service import remaining
 from ..config import settings
 from ..schemas import OdooResult
 from .client_resolver_service import ResolvedClient
@@ -23,19 +24,19 @@ class OdooJsonRpcService:
         self.client = client
 
     def _base_url(self) -> str | None:
-        return ((self.client.odoo_url if self.client else None) or settings.odoo_base_url or "").rstrip("/") or None
+        return ((self.client.odoo_url if self.client else settings.odoo_base_url) or "").rstrip("/") or None
 
     def _db(self) -> str | None:
-        return (self.client.odoo_db if self.client else None) or settings.odoo_db_name
+        return self.client.odoo_db if self.client else settings.odoo_db_name
 
     def _login(self) -> str | None:
-        return (self.client.odoo_login if self.client else None) or settings.odoo_login
+        return self.client.odoo_login if self.client else settings.odoo_login
 
     def _password(self) -> str | None:
-        return (self.client.odoo_password if self.client else None) or settings.odoo_password
+        return self.client.odoo_password if self.client else settings.odoo_password
 
     def _api_key(self) -> str | None:
-        return (self.client.odoo_api_key if self.client else None) or settings.odoo_api_key
+        return self.client.odoo_api_key if self.client else settings.odoo_api_key
 
     def configured(self) -> bool:
         credentials_ready = bool(self._api_key()) or bool(self._login() and self._password())
@@ -47,6 +48,9 @@ class OdooJsonRpcService:
         return bool(settings.odoo_https_verify_ssl)
 
     def _call(self, service: str, method: str, args: list[Any], timeout_seconds: int) -> Any:
+        timeout_seconds = remaining(timeout_seconds)
+        if timeout_seconds <= 0:
+            raise TimeoutError("Odoo read deadline exhausted")
         base_url = self._base_url()
         if not base_url:
             raise RuntimeError("ODOO_BASE_URL/odoo_url is not configured for HTTPS JSON-RPC fallback.")
@@ -56,8 +60,9 @@ class OdooJsonRpcService:
             "params": {"service": service, "method": method, "args": args},
             "id": int(time.time() * 1000),
         }
+        phase_budget = timeout_seconds / 4 if service == "common" or (service == "object" and len(args) > 4 and args[4] in {"search_read", "read_group"}) else timeout_seconds
         with httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds, connect=min(10, timeout_seconds)),
+            timeout=httpx.Timeout(max(.001, phase_budget), connect=max(.001, min(10, phase_budget))),
             verify=self._verify_ssl(),
         ) as client:
             response = client.post(f"{base_url}/jsonrpc", json=payload)
@@ -83,6 +88,9 @@ class OdooJsonRpcService:
 
     def _json2_call(self, model: str, method: str, params: dict[str, Any], timeout_seconds: int) -> Any:
         """Call Odoo 19+ External JSON-2 with a dedicated API key."""
+        timeout_seconds = remaining(timeout_seconds)
+        if timeout_seconds <= 0:
+            raise TimeoutError("Odoo read deadline exhausted")
         base_url = self._base_url()
         api_key = self._api_key()
         if not base_url or not api_key:
@@ -96,8 +104,9 @@ class OdooJsonRpcService:
         }
         if self._db():
             headers["X-Odoo-Database"] = str(self._db())
+        phase_budget = timeout_seconds / 4 if method in {"search_read", "read_group"} else timeout_seconds
         with httpx.Client(
-            timeout=httpx.Timeout(timeout_seconds, connect=min(10, timeout_seconds)),
+            timeout=httpx.Timeout(max(.001, phase_budget), connect=max(.001, min(10, phase_budget))),
             verify=self._verify_ssl(),
         ) as client:
             response = client.post(f"{base_url}/json/2/{model}/{method}", headers=headers, json=params)
@@ -161,7 +170,10 @@ class OdooJsonRpcService:
         if context:
             kwargs["context"] = context
 
+        deadline = time.monotonic() + max(0, timeout_seconds)
         try:
+            if timeout_seconds <= 0:
+                raise TimeoutError("Odoo read deadline exhausted")
             if self._api_key():
                 params: dict[str, Any] = {
                     "domain": domain or [],
@@ -175,14 +187,16 @@ class OdooJsonRpcService:
                     params["context"] = context
                 records = self._json2_call(model, "search_read", params, timeout_seconds)
             else:
-                uid = self._login_uid(timeout_seconds)
+                uid = self._login_uid(max(.001, deadline - time.monotonic()))
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Odoo read deadline exhausted during login")
                 db = self._db()
                 password = self._password()
                 records = self._call(
                     "object",
                     "execute_kw",
                     [db, uid, password, model, "search_read", [domain or []], kwargs],
-                    timeout_seconds,
+                    max(.001, deadline - time.monotonic()),
                 )
             return OdooResult(
                 status="ok",
@@ -221,7 +235,10 @@ class OdooJsonRpcService:
         kwargs: dict[str, Any] = {"lazy": bool(lazy)}
         if context:
             kwargs["context"] = context
+        deadline = time.monotonic() + max(0, timeout_seconds)
         try:
+            if timeout_seconds <= 0:
+                raise TimeoutError("Odoo read deadline exhausted")
             if self._api_key():
                 params: dict[str, Any] = {
                     "domain": domain or [],
@@ -233,12 +250,14 @@ class OdooJsonRpcService:
                     params["context"] = context
                 records = self._json2_call(model, "read_group", params, timeout_seconds)
             else:
-                uid = self._login_uid(timeout_seconds)
+                uid = self._login_uid(max(.001, deadline - time.monotonic()))
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Odoo read deadline exhausted during login")
                 records = self._call(
                     "object",
                     "execute_kw",
                     [self._db(), uid, self._password(), model, "read_group", [domain or [], fields, groupby], kwargs],
-                    timeout_seconds,
+                    max(.001, deadline - time.monotonic()),
                 )
             return OdooResult(status="ok", base_url=self._base_url(), database=self._db(), result=records or [])
         except Exception as exc:

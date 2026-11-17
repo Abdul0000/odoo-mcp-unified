@@ -251,3 +251,88 @@ def test_odoo_background_wait_honors_request_timeout(tmp_path, monkeypatch):
     assert captured == {"job_id": job.id, "timeout": 7, "interval": 0.5}
     assert result.result["status"] == "running"
     assert result.result["next_call"]["tool"] == "jobs.get"
+
+
+def test_ssh_control_socket_is_short_and_setup_is_lazy(monkeypatch):
+    pool = _SshMasterPool()
+    monkeypatch.setattr('subprocess.Popen', lambda *a, **k: (_ for _ in ()).throw(AssertionError('eager SSH')))
+    sock = pool.ensure_master('very-long-build-name-' * 10, 22, '12345678', Path('/var/lib/odoo-mcp/keys/private'))
+    assert len(str(sock).encode()) < 80
+    assert 'ControlMaster=auto' in pool.mux_args(sock)
+    assert 'ControlPersist=60' in pool.mux_args(sock)
+
+
+def test_background_admission_is_bounded_and_releases_capacity(monkeypatch):
+    import threading
+    import pytest
+    from fastapi import HTTPException
+    from odoo_agent_server.services import background_executor as module
+    gate, entered = threading.Event(), threading.Event()
+    monkeypatch.setattr(module, '_CAPACITY', threading.BoundedSemaphore(1))
+    def work():
+        entered.set()
+        gate.wait(2)
+    future = module.submit_background(work)
+    try:
+        assert entered.wait(1)
+        with pytest.raises(HTTPException) as exc:
+            module.submit_background(lambda: None)
+        assert exc.value.status_code == 503
+    finally:
+        gate.set()
+        future.result(timeout=2)
+    assert module.submit_background(lambda: 'ok').result(timeout=2) == 'ok'
+
+
+def test_orphan_repo_lock_recovers_without_stealing_live_lock(tmp_path, monkeypatch):
+    from odoo_agent_server.services.lock_service import RepoLockService
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    monkeypatch.setattr(settings, 'allowed_roots_raw', str(tmp_path))
+    project = tmp_path / 'repo'; project.mkdir()
+    service = RepoLockService(stale_after_seconds=0)
+    directory = service._lock_dir(str(project)); directory.mkdir()
+    assert service.acquire(str(project), 'first', timeout_seconds=0).exit_code == 0
+    try:
+        assert service.acquire(str(project), 'second', timeout_seconds=0).exit_code == 124
+        assert service.release(str(project), 'second').exit_code == 2
+    finally:
+        service.release(str(project), 'first')
+    assert service.acquire(str(project), 'second', timeout_seconds=0).exit_code == 0
+    service.release(str(project), 'second')
+
+
+def test_superseded_deployment_returns_without_polling(monkeypatch):
+    import json
+    service = OdooShService()
+    monkeypatch.setattr(service, 'check_commit_deployed', lambda sha: CommandResult(
+        command=['check'], cwd='ssh', exit_code=1,
+        stdout=json.dumps({'deployed': False, 'superseded': True, 'current_sha': 'b' * 40})))
+    monkeypatch.setattr('time.sleep', lambda _: (_ for _ in ()).throw(AssertionError('polling superseded SHA')))
+    result = service.poll_deployed_commit('a' * 40, timeout_seconds=600)
+    assert result.exit_code == 409 and 'superseded' in result.stderr
+
+
+def test_repo_index_detects_second_edit_and_scope_change(tmp_path, monkeypatch):
+    from odoo_agent_server.services.repo_index_service import RepoIndexService
+    monkeypatch.setattr(settings, 'allowed_roots_raw', str(tmp_path))
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    project = tmp_path / 'repo'; project.mkdir()
+    xml = project / 'template.xml'; xml.write_text('<t t-name="first"/>')
+    service = RepoIndexService()
+    first = service._fingerprint(project)
+    xml.write_text('<t t-name="other"/>')
+    assert first != service._fingerprint(project)
+    a = service.index(str(project), max_files=1)
+    b = service.index(str(project), max_files=2)
+    assert not a.cached and not b.cached
+
+
+def test_workflow_finish_derives_total_without_metrics_total(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from odoo_agent_server.services.workflow_progress_service import WorkflowProgressService
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    progress = WorkflowProgressService()
+    progress.start('timing-proof', client_name=None, module_name='sample')
+    JsonStore().update_workflow_progress('timing-proof', {'started_at': (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()})
+    result = progress.finish('timing-proof', status='failed', metrics={'phases_ms': {'read': 500}})
+    assert result['total_ms'] >= 1900

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import time
+import json
+from pathlib import Path
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .config import settings
 
@@ -91,6 +95,26 @@ def health() -> dict[str, object]:
     }
 
 
+@app.get("/ready")
+def readiness():
+    """Readiness includes worker evidence; /health remains a liveness probe."""
+    live = health()
+    worker = {"required": settings.execution_enabled, "ready": not settings.execution_enabled}
+    if settings.execution_enabled:
+        try:
+            root = Path(settings.execution_root)
+            age = max(0, time.time() - float(json.loads((root / "worker-heartbeat").read_text())))
+            capabilities = json.loads((root / "capabilities.json").read_text())
+            worker.update(heartbeat_age_seconds=round(age, 2), image_id=capabilities.get("image_id"),
+                          ready=age < 15 and capabilities.get("image") == settings.execution_image
+                          and bool(capabilities.get("python") and capabilities.get("image_id")))
+        except (OSError, ValueError, TypeError):
+            worker["reason"] = "Worker heartbeat or runtime proof unavailable"
+    ready = live["status"] == "ok" and worker["ready"]
+    return JSONResponse({"status": "ok" if ready else "not_ready", "worker": worker,
+                         "runtime": live["runtime"]}, status_code=200 if ready else 503)
+
+
 @app.get("/agent-instructions")
 def agent_instructions() -> dict:
     """Full agent system prompt stored in connector.
@@ -132,7 +156,9 @@ def agent_instructions() -> dict:
                 "Never call hidden repo, Git, verification, or deploy tools, expose credentials, or put Pydantic code inside Odoo addons; terminal success requires the proof defined in system_prompt.",
             ],
             "provider_flow": {
-                "code_change": "workflow_odoo_code_change",
+                "code_change": "execution_workspace_open",
+                "composite_fallback": "workflow_odoo_code_change",
+                "routing": "Prefer native execution when worker and repository are available; use composite workflow only for its supported deployment or fallback capabilities.",
                 "debug_and_fix": "workflow_odoo_debug_and_fix",
                 "module_analysis": "workflow_module_analyze",
                 "visual_change": "workflow_frontend_visual_implement",
@@ -140,6 +166,11 @@ def agent_instructions() -> dict:
                 "continuation": ["jobs_get", "workflow_resume_job", "workflow_resume_continuation"],
                 "diagnostics": ["artifacts_read", "odoosh_error_pack"],
                 "terminal_success": ["deploy_confirmed=true", "already_deployed_confirmed=true"],
+                "completion_contract": {
+                    "commit": "Verified local commit; pushed=false is a terminal success when commit-only was requested.",
+                    "push": "Verified commit and confirmed remote SHA; deployment remains not_deployed.",
+                    "deploy": "Expected source SHA, successful module operation, and functional evidence required.",
+                },
                 "debug_terminal_success": "truth_gate.verified_fixed=true",
                 "terminal_action": "stop_and_summarize",
                 "inspect_then_write": "If the composite workflow requests writes, use its focused inspection result and call the same composite tool again with complete writes.",

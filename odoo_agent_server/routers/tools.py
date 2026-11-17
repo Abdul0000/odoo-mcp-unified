@@ -4375,7 +4375,7 @@ def _start_or_reuse_code_change_job(payload: OdooCodeChangeRequest) -> dict[str,
         job = store.create_job(JobRecord(
             id=job_id,
             job_type="workflow.odoo_code_change",
-            status=JobStatus.running,
+            status=JobStatus.queued,
             request={
                 "operation_id": operation_id,
                 "request_fingerprint": fingerprint,
@@ -4389,8 +4389,14 @@ def _start_or_reuse_code_change_job(payload: OdooCodeChangeRequest) -> dict[str,
 
     synchronous_payload = payload.model_copy(update={"wait_for_result": True})
 
+    submitted_at = time.monotonic()
+
     def _background() -> None:
         worker_store = JsonStore()
+        outer_queue_ms = round((time.monotonic() - submitted_at) * 1000)
+        active = worker_store.get_job(job.id)
+        active.status = JobStatus.running
+        worker_store.update_job(active)
         heartbeat_stop = threading.Event()
         worker_progress = WorkflowProgressService()
 
@@ -4407,6 +4413,7 @@ def _start_or_reuse_code_change_job(payload: OdooCodeChangeRequest) -> dict[str,
         heartbeat_thread.start()
         try:
             result = asyncio.run(_workflow_odoo_code_change(synchronous_payload))
+            result.setdefault("metrics", {})["background_queue_wait_ms"] = outer_queue_ms
             worker_store.finish_job(worker_store.get_job(job.id), JobStatus.passed, result)
         except BaseException as exc:  # noqa: BLE001
             failure_metadata = _workflow_failure_metadata(
@@ -8954,13 +8961,16 @@ def _start_client_validation(req: ClientCheckRequest) -> dict[str, Any]:
 
         job = store.create_job(JobRecord(
             job_type="client_validation",
-            status=JobStatus.running,
+            status=JobStatus.queued,
             request={"client_name": client_name, "force_refresh": req.force_refresh},
         ))
 
     def _background() -> None:
         worker_store = JsonStore()
         try:
+            active = worker_store.get_job(job.id)
+            active.status = JobStatus.running
+            worker_store.update_job(active)
             phase_started = time.monotonic()
 
             def report_progress(phase: str, checks: dict, log: list) -> None:
@@ -9003,7 +9013,14 @@ def _start_client_validation(req: ClientCheckRequest) -> dict[str, Any]:
                 },
             )
 
-    submit_background(_background)
+    try:
+        submit_background(_background)
+    except Exception:
+        store.finish_job(store.get_job(job.id), JobStatus.failed, {
+            "error_code": "background_capacity_exhausted", "retry_after_seconds": 5,
+            "validated": False, "success_allowed": False, "completion_required": False,
+        })
+        raise
     return {
         "status": "validation_started",
         "validated": False,

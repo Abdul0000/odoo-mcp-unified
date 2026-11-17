@@ -99,7 +99,7 @@ class ExecutionWorker:
                 value["image_id"] = image.stdout.strip()
         except (OSError, ValueError, subprocess.TimeoutExpired):
             value = {}
-        self.store._write(self.store.root / "capabilities.json", {**value, "image": settings.execution_image})
+        self.store._write(self.store.root / "capabilities.json", {**value, "image": settings.execution_image, "memory_limit": settings.execution_memory, "tmpfs_bytes": 67108864, "observed_at": time.time()})
 
     def execute(self, record):
         process_id = record["id"]
@@ -186,7 +186,12 @@ class ExecutionWorker:
                 with (logs / f"{process_id}.log").open("rb") as stream:
                     stream.seek(max(0, stream.seek(0, 2) - 4000))
                     tail = stream.read().decode("utf-8", errors="replace")
-                if any(token in tail for token in ("No module named 'odoo'", "npm: not found", "Read-only file system")):
+                if code in {137, -9} or any(token in tail for token in (
+                    "No module named", "command not found", "not found: npm", "npm: not found",
+                    "Read-only file system", "No space left on device", "Cannot allocate memory",
+                    "MemoryError", "ENOMEM", "ENOSPC")):
+                    details["failure_class"] = "resource_limit" if code in {137, -9} or any(t in tail for t in ("No space left", "MemoryError", "ENOMEM", "ENOSPC")) else "dependency_or_runtime"
+                    details["recovery_action"] = "configure_runtime_or_resources_then_rerun_same_check"
                     status = "runtime_unavailable"
                     details["error"] = "Check runtime or writable build output configuration is unavailable; source verification did not pass"
             if status == "cleanup_failed":

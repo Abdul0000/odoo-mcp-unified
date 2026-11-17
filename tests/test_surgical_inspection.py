@@ -453,7 +453,7 @@ def test_provider_code_change_recovers_expired_foreign_worker(monkeypatch, tmp_p
         JsonStore(),
     )
 
-    assert recovered.status == JobStatus.running
+    assert recovered.status == JobStatus.queued
     assert recovered.request["owner_instance_id"] == tools_router._CODING_WORKFLOW_INSTANCE_ID
     assert len(submitted) == 1
 

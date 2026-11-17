@@ -83,23 +83,23 @@ class ExecutionStore:
                 temp.unlink(missing_ok=True)
 
     @contextmanager
-    def _lock(self, path):
+    def _lock(self, path, blocking=True):
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
         try:
             if os.fstat(descriptor).st_uid == os.geteuid():
                 os.fchmod(descriptor, 0o660)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
     @contextmanager
-    def workspace_lock(self, workspace_id):
+    def workspace_lock(self, workspace_id, blocking=True):
         if not re.fullmatch(r"[a-f0-9]{32}", workspace_id):
             raise HTTPException(404, "Unknown execution workspace")
         locks = self._directory(self.root / "locks")
-        with self._lock(locks / f"{workspace_id}.lock"):
+        with self._lock(locks / f"{workspace_id}.lock", blocking=blocking):
             yield
 
     @staticmethod

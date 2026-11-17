@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .deadline_service import remaining, read_deadline
 from ..config import get_odoo_clients, settings
 from .client_resolver_service import ClientResolverService, ResolvedClient
 from ..schemas import CommandResult, FileContent, OdooResult, OdooShLogName
@@ -30,7 +31,7 @@ class _SshMasterPool:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._masters: dict[str, tuple[subprocess.Popen, Path]] = {}
-        self._tmpdir = Path(tempfile.mkdtemp(prefix="odoosh_ssh_pool_"))
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="om_", dir="/tmp"))
 
     def _key(self, host: str, port: int, user: str, key_path: Path | None = None) -> str:
         # Different clients may share host/user while using different keys.
@@ -39,58 +40,22 @@ class _SshMasterPool:
         return f"{user}@{host}:{port}:{key_identity}"
 
     def _socket_path(self, key: str) -> Path:
-        safe = key.replace("/", "_").replace(":", "_").replace("@", "_")
-        return self._tmpdir / f"cm_{safe}.sock"
+        # OpenSSH appends a random suffix; keep well below sockaddr_un's limit.
+        return self._tmpdir / hashlib.sha256(key.encode()).hexdigest()[:24]
 
-    def ensure_master(
-        self,
-        host: str,
-        port: int,
-        user: str,
-        key_path: Path | None,
-        timeout: int = 15,
-    ) -> Path | None:
-        """Ensure a ControlMaster is alive; return socket path or None on failure."""
-        key = self._key(host, port, user, key_path)
-        with self._lock:
-            entry = self._masters.get(key)
-            if entry is not None:
-                proc, sock = entry
-                if proc.poll() is None and sock.exists():
-                    return sock  # healthy
-            sock = self._socket_path(key)
-            sock.parent.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                # Do not use -f here: it forks SSH and makes the Popen parent
-                # exit, so the pool incorrectly treats a live master as dead.
-                "ssh", "-N", "-M",
-                "-S", str(sock),
-                "-p", str(port),
-                "-o", "BatchMode=yes",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-o", f"ConnectTimeout={timeout}",
-                "-o", "ServerAliveInterval=30",
-                "-o", "ServerAliveCountMax=3",
-            ]
-            if key_path:
-                cmd.extend(["-i", str(key_path), "-o", "IdentitiesOnly=yes"])
-            cmd.append(f"{user}@{host}")
-            try:
-                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                deadline = time.monotonic() + 6
-                while time.monotonic() < deadline:
-                    if sock.exists():
-                        self._masters[key] = (proc, sock)
-                        return sock
-                    time.sleep(0.2)
-            except Exception:
-                pass
-            return None
+    def ensure_master(self, host, port, user, key_path, timeout=15) -> Path:
+        """Reserve an identity-specific socket; connection happens in the caller.
+
+        ControlMaster=auto performs setup within the actual command's deadline.
+        No network work or polling is allowed under the pool lock.
+        """
+        return self._socket_path(self._key(host, port, user, key_path))
 
     def mux_args(self, sock: Path | None) -> list[str]:
-        """Extra ssh args to route a call through an existing ControlMaster."""
-        if sock and sock.exists():
-            return ["-o", f"ControlPath={sock}", "-o", "ControlMaster=no"]
+        if sock:
+            return ["-o", f"ControlPath={sock}", "-o", "ControlMaster=auto",
+                    "-o", "ControlPersist=60", "-o", "ServerAliveInterval=15",
+                    "-o", "ServerAliveCountMax=2"]
         return []
 
     def close_master(self, host: str, port: int, user: str, key_path: Path | None = None) -> None:
@@ -214,6 +179,10 @@ class OdooShService:
         return command
 
     def run_shell(self, remote_script: str, timeout_seconds: int = 60) -> CommandResult:
+        started = time.monotonic()
+        timeout_seconds = remaining(timeout_seconds)
+        if timeout_seconds <= 0:
+            return CommandResult(command=["ssh"], cwd="odoosh:ssh", exit_code=124, timed_out=True, stderr="Read deadline exhausted before SSH")
         target = self._target()
         # Send the script over stdin instead of embedding it in the remote
         # command argument. OpenSSH joins remote argv into one shell command;
@@ -226,7 +195,7 @@ class OdooShService:
                 input=script_input,
                 capture_output=True,
                 text=True,
-                timeout=timeout_seconds,
+                timeout=max(.001, remaining(timeout_seconds - (time.monotonic() - started))),
                 check=False,
             )
             return CommandResult(
@@ -286,9 +255,18 @@ class OdooShService:
             and bool(current)
             and (current.startswith(expected_sha) or expected_sha.startswith(current))
         )
+        superseded = False
+        if not deployed and result.exit_code == 0 and re.fullmatch(r"[0-9a-f]{7,40}", expected_sha) and re.fullmatch(r"[0-9a-f]{40}", current):
+            ancestry = self.run_shell(
+                f"git -C {shlex.quote(self._user_addons_path())} merge-base --is-ancestor {shlex.quote(expected_sha)} {shlex.quote(current)}",
+                timeout_seconds=10,
+            )
+            superseded = ancestry.exit_code == 0
         payload = json.dumps({
             "deployed": deployed,
             "current_sha": current or "unknown",
+            "superseded": superseded,
+            "recovery_action": "Review the newer source and verify its SHA before requesting an upgrade; no upgrade was performed." if superseded else None,
             "expected_sha": expected_sha,
             "message": "Source checkout has the pushed SHA. Verify Odoo.sh build/test success before module update." if deployed
                        else "Not yet in source checkout. Use adaptive_poll_interval: attempts 0-2→wait 5s, 3-7→wait 10s, 8+→wait 15s, then call again.",
@@ -338,7 +316,12 @@ class OdooShService:
                 if timeout_seconds >= 60
                 else interval_seconds
             )
-            check_result = self.check_commit_deployed(expected)
+            inherited_deadline = read_deadline.get()
+            token = read_deadline.set(min(deadline, inherited_deadline) if inherited_deadline else deadline)
+            try:
+                check_result = self.check_commit_deployed(expected)
+            finally:
+                read_deadline.reset(token)
             deployed = OdooShService._check_result_deployed(check_result)
             elapsed_seconds = round(time.monotonic() - started, 3)
             attempt_payload = {
@@ -358,6 +341,13 @@ class OdooShService:
                 except Exception:
                     pass
 
+            try:
+                state = json.loads(check_result.stdout)
+            except (ValueError, TypeError):
+                state = {}
+            if state.get("superseded"):
+                return check_result.model_copy(update={"exit_code": 409,
+                    "stderr": "Expected commit was superseded by newer source; upgrade blocked pending verification of the current SHA."})
             if deployed:
                 return check_result.model_copy(update={
                     "command": ["odoosh.check_commit_poll", expected],

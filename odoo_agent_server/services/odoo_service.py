@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import shlex
+import time
 from typing import Any
 
 from ..config import settings
@@ -13,12 +14,7 @@ from .odoo_jsonrpc_service import OdooJsonRpcService
 
 
 class OdooService:
-    """Odoo operations over Odoo.sh SSH / ``odoo-bin shell`` only.
-
-    This service intentionally does not use legacy remote transport. All database reads and
-    module operations execute inside the selected Odoo.sh build via SSH so
-    concurrent multi-client requests stay isolated by ``ResolvedClient``.
-    """
+    """Client-isolated reads over authenticated HTTPS; native operations over SSH."""
 
     def __init__(self, client: ResolvedClient | None = None) -> None:
         self.client = client
@@ -55,6 +51,12 @@ class OdooService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 120,
     ) -> OdooResult:
+        if timeout_seconds <= 0:
+            return OdooResult(status="failed", database=self._database(), error="Odoo read deadline exhausted before transport")
+        deadline = time.monotonic() + timeout_seconds
+        https = OdooJsonRpcService(self._active_client())
+        if https.configured():
+            return https.search_read(model, domain or [], fields or [], limit, offset, order, context, timeout_seconds=max(.001, deadline - time.monotonic()))
         try:
             ssh_result = self._ssh().search_read(model, domain or [], fields or [], limit, offset, order, context, timeout_seconds)
         except Exception as exc:  # noqa: BLE001
@@ -66,7 +68,7 @@ class OdooService:
         # HTTPS JSON-RPC endpoint when direct Odoo.sh SSH is refused/unavailable
         # for a specific build. This does not affect deploy/install/upgrade.
         https_result = OdooJsonRpcService(self._active_client()).search_read(
-            model, domain or [], fields or [], limit, offset, order, context, timeout_seconds=min(max(timeout_seconds, 15), 60)
+            model, domain or [], fields or [], limit, offset, order, context, timeout_seconds=max(.001, min(deadline - time.monotonic(), 60))
         )
         if https_result.status == "ok":
             if isinstance(https_result.result, list):
@@ -97,6 +99,12 @@ class OdooService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 120,
     ) -> OdooResult:
+        if timeout_seconds <= 0:
+            return OdooResult(status="failed", database=self._database(), error="Odoo read deadline exhausted before transport")
+        deadline = time.monotonic() + timeout_seconds
+        https = OdooJsonRpcService(self._active_client())
+        if https.configured():
+            return https.read_group(model, domain or [], fields, groupby, lazy, context, timeout_seconds=max(.001, deadline - time.monotonic()))
         try:
             ssh_result = self._ssh().read_group(model, domain or [], fields, groupby, lazy, context, timeout_seconds)
         except Exception as exc:  # noqa: BLE001
@@ -104,7 +112,7 @@ class OdooService:
         if ssh_result.status == "ok":
             return ssh_result
         https_result = OdooJsonRpcService(self._active_client()).read_group(
-            model, domain or [], fields, groupby, lazy, context, timeout_seconds=min(max(timeout_seconds, 15), 60)
+            model, domain or [], fields, groupby, lazy, context, timeout_seconds=max(.001, min(deadline - time.monotonic(), 60))
         )
         if https_result.status == "ok":
             return https_result
@@ -123,7 +131,7 @@ class OdooService:
         """Read-only discovery of one model's fields from the live registry.
 
         Implemented as a bounded ``ir.model.fields`` search_read so it uses the
-        same SSH-first / HTTPS JSON-RPC fallback transport as every other read.
+        same authenticated HTTPS / SSH transport as every other read.
         """
         safe_model = str(model or "").strip()
         if not safe_model or "\x00" in safe_model:

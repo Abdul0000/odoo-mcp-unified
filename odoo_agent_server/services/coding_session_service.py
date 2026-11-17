@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from .source_snapshot_service import content_digest, source_files
 from ..config import settings
 
 
@@ -280,7 +281,7 @@ class CodingSessionService:
             for path in selected:
                 rel = path.relative_to(module).as_posix()
                 try:
-                    data = path.read_bytes()
+                    data = content_digest(path)
                 except OSError:
                     continue
                 digest.update(rel.encode("utf-8")); digest.update(b"\0"); digest.update(data)
@@ -308,7 +309,7 @@ class CodingSessionService:
         for path in files:
             rel = path.relative_to(module).as_posix()
             try:
-                data = path.read_bytes()
+                data = content_digest(path)
             except OSError:
                 continue
             digest.update(rel.encode("utf-8")); digest.update(b"\0"); digest.update(data); digest.update(b"\n")
@@ -318,7 +319,7 @@ class CodingSessionService:
     def _module_files(module: Path) -> list[Path]:
         return sorted(
             (
-                path for path in module.rglob("*")
+                path for path in source_files(module, _SKIP_PARTS)
                 if path.is_file()
                 and not path.is_symlink()
                 and not any(part in _SKIP_PARTS for part in path.relative_to(module).parts)

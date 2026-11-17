@@ -101,6 +101,10 @@ def test_repo_lock_blocks_second_owner(tmp_path, monkeypatch):
         now = 1000.0
 
         @classmethod
+        def monotonic(cls):
+            return cls.now
+
+        @classmethod
         def time(cls):
             return cls.now
 

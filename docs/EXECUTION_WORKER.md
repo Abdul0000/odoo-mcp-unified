@@ -191,6 +191,26 @@ defaults to ten outstanding commands and ten agent tasks. There is no automatic
 deletion of task workspaces: archive important work and remove old execution data
 under an operator-managed retention policy. Do not delete active task records.
 
-Once installed, deployment rebuilds the cached image and runs the full regression
-suite inside it before activating a release. Deployment restarts an active worker
-with each release. Lint and shell syntax checks are run before publishing changes.
+Deployment reuses an image identified by its Dockerfile and requirements inputs,
+and runs the full regression suite against that candidate before promotion. Builds
+and tests have memory/CPU limits. Failed readiness restores both release links and
+the previous runtime image. `/health` reports API liveness; `/ready` additionally
+requires a recent worker heartbeat and a successful runtime capability probe.
+
+Commit-only publishing is a completed task with `pushed=false`; it does not suggest
+a subsequent push. A remote branch advancing returns `sync_required`: preserve the
+diff, open a fresh isolated task, reapply the change and rerun its checks. A newer
+Odoo.sh source containing the expected commit returns a superseded blocker rather
+than upgrading unreviewed newer code or polling until the full deployment timeout.
+
+Configured HTTPS credentials are authoritative for ordinary Odoo reads. Access
+errors do not escalate to an SSH shell. A selected client never borrows another
+client's global HTTPS credentials. Shell/native/deployment operations retain SSH.
+Client validation expires and is bound to the configuration that was checked.
+
+The shared background executor admits at most four callbacks per worker (running
+plus queued); saturation returns retryable backpressure. Resource exhaustion and
+missing runtime dependencies require configuration recovery, rather than consuming
+the source repair budget. Generic Python/Node capability does not imply an Odoo
+ORM/database runtime. ChatGPT-driven MCP execution needs no model API key; the
+independent background agent above remains optional.

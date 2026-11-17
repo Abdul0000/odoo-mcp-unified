@@ -77,6 +77,9 @@ def test_client_source_cache_is_isolated_and_failed_refresh_never_uses_other_cli
     monkeypatch.setattr(sync, '_target_for_sync', lambda c:SimpleNamespace(host=c.name,user='odoo',port=22,key_path=None))
     monkeypatch.setattr(sync, '_deployed_sha', lambda c:None)
     remote='/home/odoo/src/odoo/addons'
+    from odoo_agent_server.services.odoosh_service import OdooShService
+    from odoo_agent_server.schemas import CommandResult
+    monkeypatch.setattr(OdooShService, 'run_shell', lambda self, *a, **k: CommandResult(command=['rev-parse'], cwd='ssh', exit_code=0, stdout='a' * 40))
     def rsync(argv, **kwargs):
         if 'B:' in argv[-2]:
             return SimpleNamespace(returncode=255,stderr='connection refused')
@@ -92,6 +95,7 @@ def test_client_source_cache_is_isolated_and_failed_refresh_never_uses_other_cli
     assert CoreFinderService()._module_dir_with_sync(b,str(b),'sale',client_name='B') is None
     assert (a/'sale/models/sale_order.py').read_text() == 'VERSION="A"\n'
     identity=a/'sale/.source_identity.json';value=json.loads(identity.read_text());value['synced_at']=0;identity.write_text(json.dumps(value))
+    monkeypatch.setattr(OdooShService, 'run_shell', lambda self, *a, **k: CommandResult(command=['rev-parse'], cwd='ssh', exit_code=255, stderr='connection refused'))
     monkeypatch.setattr(sync.subprocess,'run',lambda *a,**k:SimpleNamespace(returncode=255,stderr='connection refused'))
     assert not sync.ensure_module_synced(remote,'sale',client=clients['A'])
 
@@ -110,3 +114,32 @@ def test_exhausted_source_budget_does_not_open_another_ssh_connection(tmp_path, 
         assert not sync.ensure_module_synced(str(tmp_path),'sale')
     finally:
         sync._deadline.reset(token)
+
+
+def test_recent_source_identity_never_bypasses_live_revision_check(tmp_path, monkeypatch):
+    import json, time
+    from types import SimpleNamespace
+    from odoo_agent_server.config import settings
+    from odoo_agent_server.schemas import CommandResult
+    from odoo_agent_server.services.client_resolver_service import ResolvedClient
+    from odoo_agent_server.services import core_sync_service as sync
+    from odoo_agent_server.services.odoosh_service import OdooShService
+    monkeypatch.setattr(settings, 'core_sync_enabled', True)
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    client = ResolvedClient(name='A', repo='https://example.invalid/a.git', branch='stage', path=str(tmp_path), odoosh_ssh_host='fake')
+    monkeypatch.setattr(sync, '_target_for_sync', lambda c: SimpleNamespace(host='fake', user='odoo', port=22, key_path=None))
+    remote = '/home/odoo/src/enterprise'
+    module = sync.cache_root(remote, client) / 'sale'; module.mkdir(parents=True)
+    (module / '.source_identity.json').write_text(json.dumps({'root': remote, 'synced_at': time.time(), 'sha': 'old'}))
+    (module / '.synced_sha').write_text('old')
+    (module / '__init__.py').write_text('old source')
+    reads = []
+    def revision(self, script, **kwargs):
+        reads.append(script)
+        return CommandResult(command=['git'], cwd='ssh', exit_code=0, stdout='b' * 40)
+    monkeypatch.setattr(OdooShService, 'run_shell', revision)
+    monkeypatch.setattr(sync.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=255, stderr='connection refused'))
+    sync._negative_cache.clear()
+    assert not sync.ensure_module_synced(remote, 'sale', client=client)
+    assert len(reads) == 1 and '/enterprise' in reads[0]
+    assert not (module / '.synced_sha').exists()
