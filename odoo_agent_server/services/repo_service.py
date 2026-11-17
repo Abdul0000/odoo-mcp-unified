@@ -165,6 +165,51 @@ class RepoService:
             steps=steps,
         )
 
+    def sync_configured_checkout(self, client, timeout_seconds=60):
+        """Switch a clean checkout to its configured, existing remote branch.
+
+        Never reset a branch or discard local work. Old branch refs remain intact.
+        Authentication stays request-scoped and is never persisted in origin.
+        """
+        project = resolve_allowed_path(client.path)
+        if not self._safe_branch_name(client.branch):
+            raise HTTPException(400, 'Invalid configured branch')
+        deadline = time.monotonic() + timeout_seconds
+        env = self._git_env()
+        def run(args, required=True):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HTTPException(504, 'Checkout synchronization deadline exceeded; local work preserved')
+            result = self._run(['git', '-c', 'core.hooksPath=/dev/null', *args], project, max(1, int(remaining)), env=env)
+            if required and result.exit_code:
+                raise HTTPException(409, mask_repo_url(result.stderr or result.stdout or 'Git synchronization failed'))
+            return result
+        with RepoLockService().locked(str(project), timeout_seconds=5):
+            remote = run(['remote', 'get-url', 'origin']).stdout.strip()
+            if not self._remote_matches(remote, client.repo):
+                raise HTTPException(409, 'Checkout remote differs from configured repository; source preserved')
+            if run(['status', '--porcelain']).stdout.strip():
+                raise HTTPException(409, 'Checkout has local changes; they were preserved. Commit/stash them or choose a separate checkout path before switching branches.')
+            tracking = 'refs/remotes/origin/' + client.branch
+            run(['fetch', '--no-tags', '--no-write-fetch-head', '--', client.authenticated_repo,
+                 '+refs/heads/' + client.branch + ':' + tracking])
+            local = run(['rev-parse', '--verify', 'refs/heads/' + client.branch], required=False)
+            if local.exit_code == 0 and run(['merge-base', '--is-ancestor', local.stdout.strip(), tracking], required=False).exit_code:
+                raise HTTPException(409, 'Target branch contains local/divergent commits; they were preserved. Reconcile them before switching.')
+            if run(['status', '--porcelain']).stdout.strip():
+                raise HTTPException(409, 'Checkout changed during fetch; local changes preserved')
+            refspec = '+refs/heads/' + client.branch + ':' + tracking
+            specs = run(['config', '--get-all', 'remote.origin.fetch'], required=False).stdout.splitlines()
+            if refspec not in specs and '+refs/heads/*:refs/remotes/origin/*' not in specs:
+                run(['config', '--add', 'remote.origin.fetch', refspec])
+            if local.exit_code == 0:
+                run(['checkout', client.branch])
+                run(['merge', '--ff-only', tracking])
+            else:
+                run(['checkout', '--track', '-b', client.branch, 'origin/' + client.branch])
+            sha = run(['rev-parse', 'HEAD']).stdout.strip()
+            return {'branch': client.branch, 'sha': sha, 'project_path': str(project)}
+
     def _clone_checkout(self, project: Path, repo_url: str, branch: str, timeout_seconds: int, env: dict[str, str]) -> CommandResult:
         """Publish only a completed clone; a failed download never poisons the target."""
         staging_parent = resolve_allowed_path(str(project.parent))

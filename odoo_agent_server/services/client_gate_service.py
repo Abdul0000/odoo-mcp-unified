@@ -519,7 +519,8 @@ class ClientGateService:
             and (checks.get("odoosh_ssh") == "skipped" or any(marker in ssh_log_text for marker in fallback_transport_markers))
         )
         deploy_fallback_reason = "odoosh_ssh_unavailable" if deploy_fallback_eligible else None
-        data_query_ready = bool(shell_ok or ssh_ok)
+        https_configured = OdooJsonRpcService(resolved).configured()
+        data_query_ready = bool(shell_ok or (ssh_ok and not https_configured))
         full_validation_passed = bool(coding_ready and shell_ok and ssh_ok)
         now = datetime.now(timezone.utc).isoformat()
 
@@ -535,7 +536,7 @@ class ClientGateService:
         elif coding_ready:
             summary = "Client validated for coding only; Odoo shell and Odoo.sh SSH are unavailable."
             final_error_type = "odoo_connection_unavailable"
-        elif shell_ok or ssh_ok:
+        elif data_query_ready:
             summary = "Coding validation failed; live data access is available. See the separate repository/workflow and transport checks."
             final_error_type = error_type or "checkout_error"
         else:
@@ -625,13 +626,7 @@ class ClientGateService:
         return errors
 
     def _has_shell_config(self, client: ResolvedClient) -> bool:
-        https_values = [
-            client.odoo_url,
-            client.odoo_db,
-            client.odoo_login,
-            client.odoo_password,
-        ]
-        return all(self._usable(value) for value in https_values) or self._has_odoosh_config(client)
+        return OdooJsonRpcService(client).configured() or self._has_odoosh_config(client)
 
     def _has_odoosh_config(self, client: ResolvedClient) -> bool:
         values = [
@@ -639,8 +634,8 @@ class ClientGateService:
             client.odoosh_ssh_host,
             client.odoosh_ssh_user,
             client.odoosh_ssh_private_key_b64 or client.odoosh_ssh_key_path,
-            client.odoosh_odoo_path,
-            client.odoosh_user_addons_path,
+            client.odoosh_odoo_path or settings.odoosh_odoo_path,
+            client.odoosh_user_addons_path or settings.odoosh_user_addons_path,
         ]
         return all(self._usable(value) for value in values)
 
@@ -657,6 +652,11 @@ class ClientGateService:
         try:
             existing = Path(client.path).expanduser().resolve()
             if existing.is_dir() and (existing / ".git").exists():
+                branch = GitService().current_branch(str(existing))
+                if branch.exit_code == 0 and branch.stdout.strip() != client.branch:
+                    synced = RepoService().sync_configured_checkout(client, timeout_seconds=60)
+                    return {"status": "ok", "network_verified": True,
+                            "log": [f"Clean checkout synchronized from {branch.stdout.strip()} to configured branch {synced['branch']}; old branch and local commits preserved."]}
                 local_check = GitService().validate_target(str(existing), client.branch, "origin")
                 if local_check.exit_code == 0:
                     repo = RepoService()
@@ -684,8 +684,7 @@ class ClientGateService:
         # shell first (up to 120s) and then HTTPS (up to 60s), duplicating the
         # dedicated SSH check below. Probe HTTPS directly with a short timeout;
         # SSH readiness itself is validated once by _check_odoosh().
-        https_values = [client.odoo_url, client.odoo_db, client.odoo_login, client.odoo_password]
-        if not all(self._usable(value) for value in https_values):
+        if not OdooJsonRpcService(client).configured():
             return {"status": "skipped", "log": ["Fast Odoo HTTPS health check skipped: HTTPS credentials are not configured; Odoo.sh SSH provides query fallback."]}
         try:
             result = OdooJsonRpcService(client).search_read(

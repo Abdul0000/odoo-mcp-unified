@@ -53,7 +53,7 @@ class ClientAdminService:
                 'configured_secrets': {key: bool(client.get(key)) for key in SECRETS},
                 'validation': {key: validation.get(key) for key in (
                     'validated', 'coding_ready', 'deploy_ready', 'data_query_ready',
-                    'ssh_ready', 'validated_at', 'stale_reason')},
+                    'ssh_ready', 'validated_at', 'stale_reason', 'full_validation_passed', 'summary')},
                 'settings_source': 'saved' if name.casefold() in read_overrides(settings.state_path)['clients'] else 'environment'}
 
     def list(self):
@@ -142,6 +142,7 @@ class ClientAdminService:
             if revision != self.revision(current):
                 raise HTTPException(409, 'Settings changed in another session. Reload this client before saving.')
             changes = self._changes(current, values)
+            changes.update(self._connection_updates(current, changes, values))
             merged = {**current, **changes}
             self._validate(merged, changes)
             if changes:
@@ -153,6 +154,32 @@ class ClientAdminService:
                 JsonStore().log_audit('client.settings.update', 'saved', 'Client settings updated',
                                       {'client_name': current['name'], 'fields': sorted(changes)})
         return {'saved': True, 'changed': bool(changes), 'client': self.detail(name)}
+
+    def _connection_updates(self, current, changes, provided):
+        """Keep a standard Odoo.sh build profile coherent when its URL/db moves."""
+        updates = {}
+        merged = {**current, **changes}
+        try:
+            old_host = urlsplit(str(current.get('odoo_url') or '')).hostname
+            new_host = urlsplit(str(merged.get('odoo_url') or '')).hostname
+        except ValueError:
+            return updates  # _validate reports the invalid URL without guessing targets
+        if ('odoo_url' in changes and new_host and new_host.endswith('.dev.odoo.com')
+                and current.get('odoosh_ssh_host') == old_host and 'odoosh_ssh_host' not in provided):
+            updates['odoosh_ssh_host'] = new_host
+            old_id = re.search(r'-(\d+)\.dev\.odoo\.com$', old_host or '')
+            new_id = re.search(r'-(\d+)\.dev\.odoo\.com$', new_host)
+            if old_id and new_id and str(current.get('odoosh_ssh_user')) == old_id.group(1) and 'odoosh_ssh_user' not in provided:
+                updates['odoosh_ssh_user'] = new_id.group(1)
+        if 'odoo_db' in changes and 'odoosh_db_name' not in provided and (not current.get('odoosh_db_name') or current['odoosh_db_name'] == current.get('odoo_db')):
+            updates['odoosh_db_name'] = merged['odoo_db']
+        if (merged.get('odoosh_ssh_host') or updates.get('odoosh_ssh_host')) and (merged.get('odoosh_ssh_user') or updates.get('odoosh_ssh_user')):
+            defaults = self.defaults()
+            for key in ('odoosh_odoo_path', 'odoosh_user_addons_path', 'odoosh_ssh_key_path'):
+                if key not in provided and not merged.get(key) and defaults.get(key):
+                    if key != 'odoosh_ssh_key_path' or not merged.get('odoosh_ssh_private_key_b64'):
+                        updates[key] = defaults[key]
+        return updates
 
     @staticmethod
     def _changes(current, values):
@@ -229,6 +256,7 @@ class ClientAdminService:
         return {'job_id': job.id, 'status': job.status.value,
                 'terminal': job.status.value not in {'queued', 'running'},
                 'validated': bool(result.get('validated')), 'coding_ready': bool(result.get('coding_ready')),
-                'deploy_ready': bool(result.get('deploy_ready')), 'summary': text,
+                'deploy_ready': bool(result.get('deploy_ready')), 'full_validation_passed': bool(result.get('full_validation_passed')),
+                'data_query_ready': bool(result.get('data_query_ready')), 'summary': text,
                 'checks': result.get('checks') or {},
                 'steps': [{'name': step.name, 'status': step.status} for step in job.steps]}

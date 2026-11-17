@@ -57,7 +57,7 @@
   function status(title, text, state='running') {
     $('validation').hidden=false; $('validation').dataset.state=state;
     $('status-title').textContent=title; $('status-message').textContent=text || '';
-    $('status-icon').textContent=state==='success' ? '✓' : state==='error' ? '!' : '•';
+    $('status-icon').textContent=state==='success' ? '✓' : ['error','warning'].includes(state) ? '!' : '•';
   }
   function renderChecks(checks, steps=[]) {
     $('checks').replaceChildren();
@@ -87,7 +87,8 @@
     pollGeneration++; message(''); $('validation').hidden=true; $('checks').replaceChildren(); setBusy(true);
     try {
       fill(await api('/admin/clients/'+encodeURIComponent(name)));
-      if (current.validation.validated) status('Previously validated','Save & Validate to check the current connection.','success');
+      if (current.validation.full_validation_passed) status('Previously validated','Save & Validate to check the current connection.','success');
+      else if(current.validation.validated) status('Connection partially ready',current.validation.summary || 'Review the separate coding and connection checks.','warning');
     } finally { setBusy(false); }
   }
   async function loadClients(selected) {
@@ -131,7 +132,8 @@
       renderChecks(job.checks,job.steps);
       if (job.terminal) {
         const ok=job.validated || job.coding_ready;
-        status(ok ? (job.deploy_ready?'Client ready':'Coding ready · deployment needs attention') : 'Connection needs attention',job.summary || 'Review the connection settings and try again.',ok&&job.deploy_ready?'success':'error');
+        const title=job.full_validation_passed?'Client ready':ok?(job.deploy_ready?'Coding & deployment ready · HTTPS needs attention':'Coding ready · deployment needs attention'):'Connection needs attention';
+        status(title,job.summary || 'Review the connection settings and try again.',job.full_validation_passed?'success':ok?'warning':'error');
         fill(await api('/admin/clients/'+encodeURIComponent(current.name))); return;
       }
       status('Checking connection…','Settings saved. Checking repository, Odoo and SSH access.');

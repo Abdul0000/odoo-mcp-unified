@@ -312,3 +312,33 @@ def test_root_controller_refuses_active_jobs_and_symlink_requests(tmp_path):
     (control / 'request.json').symlink_to(outside)
     handle(control, state, tmp_path / 'execution', tmp_path / 'deploy', run=forbidden)
     assert outside.exists() and not (control / 'request.json').exists()
+
+
+def test_odoo_build_update_keeps_linked_ssh_profile_consistent(ui, monkeypatch):
+    client, before=ui
+    before[0].update(odoo_url='https://project-old-123.dev.odoo.com', odoo_db='project-old-123',
+                     odoosh_ssh_host='project-old-123.dev.odoo.com',odoosh_ssh_user='123',odoosh_db_name='project-old-123')
+    before[1]['odoosh_ssh_key_path']='/var/lib/odoo-mcp/keys/shared'
+    monkeypatch.setenv('ODOO_CLIENTS',json.dumps(before))
+    headers=login(client); revision=client.get('/admin/clients/Alpha').json()['revision']
+    response=client.patch('/admin/clients/Alpha',headers=headers,json={'revision':revision,'values':{
+        'branch':'new-staging','odoo_url':'https://project-new-456.dev.odoo.com','odoo_db':'project-new-456'}})
+    assert response.status_code==200,response.text
+    c=get_odoo_clients()[0]
+    assert c['odoosh_ssh_host']=='project-new-456.dev.odoo.com' and c['odoosh_ssh_user']=='456'
+    assert c['odoosh_db_name']=='project-new-456'
+    assert c['odoosh_odoo_path']=='/home/odoo/src/odoo' and c['odoosh_user_addons_path']=='/home/odoo/src/user'
+    assert c['odoo_password']==before[0]['odoo_password']
+
+
+def test_existing_ssh_profile_can_use_shared_key_and_standard_paths(ui,monkeypatch):
+    client,before=ui
+    before[0].pop('odoosh_ssh_private_key_b64')
+    before[1]['odoosh_ssh_key_path']='/var/lib/odoo-mcp/keys/shared'
+    monkeypatch.setenv('ODOO_CLIENTS',json.dumps(before))
+    headers=login(client);revision=client.get('/admin/clients/Alpha').json()['revision']
+    response=client.patch('/admin/clients/Alpha',headers=headers,json={'revision':revision,'values':{}})
+    assert response.status_code==200
+    c=get_odoo_clients()[0]
+    assert c['odoosh_ssh_key_path']=='/var/lib/odoo-mcp/keys/shared'
+    assert c['odoosh_odoo_path']=='/home/odoo/src/odoo'

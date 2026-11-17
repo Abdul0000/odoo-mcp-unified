@@ -212,7 +212,9 @@ def test_client_check_shell_failure_still_allows_coding_when_ssh_ok(monkeypatch,
     assert checked["shell_ready"] is False
     assert checked["ssh_ready"] is True
     assert checked["deploy_ready"] is True
-    assert "SSH fallback" in checked["summary"]
+    assert "SSH" in checked["summary"]
+    assert checked["data_query_ready"] is False
+    assert checked["full_validation_passed"] is False
 
     content = repo_read(RepoReadRequest(client_name="Alpha", project_path=str(checkout), relative_path="README.md"))
     assert content.content == "ok\n"
@@ -333,3 +335,53 @@ def test_validation_readiness_expires_and_configuration_changes_invalidate(monke
     gate.check('Alpha', validate=True, force_refresh=True)
     _set_clients(monkeypatch, [{**client, 'branch': 'new-staging'}])
     assert not gate.check('Alpha')['ok']
+
+
+@pytest.fixture
+def branch_change_checkout(tmp_path, monkeypatch):
+    import subprocess
+    from odoo_agent_server.services.client_resolver_service import ResolvedClient
+    monkeypatch.setattr(settings, 'allowed_roots_raw', str(tmp_path))
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path / 'state'))
+    original = tmp_path / 'original'; original.mkdir()
+    def git(*args, cwd=original):
+        return subprocess.check_output(['git', *args], cwd=cwd, stderr=subprocess.DEVNULL, text=True).strip()
+    git('init', '-b', 'old'); git('config','user.name','Test'); git('config','user.email','test@example.invalid')
+    (original/'source.txt').write_text('old'); git('add','.'); git('commit','-m','old')
+    old_sha = git('rev-parse','HEAD'); git('checkout','-b','new')
+    (original/'source.txt').write_text('new'); git('commit','-am','new')
+    remote = tmp_path/'origin.git'; git('clone','--bare',str(original),str(remote))
+    checkout = tmp_path/'checkout'; git('clone','--single-branch','--branch','old',str(remote),str(checkout))
+    client = ResolvedClient(name='Branch change', repo=str(remote), branch='new', path=str(checkout))
+    return client, checkout, old_sha, lambda *args: git(*args,cwd=checkout)
+
+
+def test_validation_safely_syncs_changed_branch_in_single_branch_checkout(branch_change_checkout):
+    client, checkout, old_sha, git = branch_change_checkout
+    result = ClientGateService()._check_checkout(client)
+    assert result['status']=='ok', result
+    assert git('branch','--show-current')=='new'
+    assert (checkout/'source.txt').read_text()=='new'
+    assert git('rev-parse','old')==old_sha
+    assert git('rev-parse','--abbrev-ref','--symbolic-full-name','@{upstream}')=='origin/new'
+
+
+def test_branch_update_never_discards_dirty_work(branch_change_checkout):
+    client, checkout, _, git = branch_change_checkout
+    (checkout/'source.txt').write_text('uncommitted work')
+    result=ClientGateService()._check_checkout(client)
+    assert result['status']=='failed'
+    assert (checkout/'source.txt').read_text()=='uncommitted work'
+    assert git('branch','--show-current')=='old'
+
+
+def test_branch_update_preserves_divergent_target_commits(branch_change_checkout):
+    client, checkout, _, git = branch_change_checkout
+    git('checkout','-b','new')
+    (checkout/'private.txt').write_text('local-only')
+    git('-c','user.name=Test','-c','user.email=test@example.invalid','add','.')
+    git('-c','user.name=Test','-c','user.email=test@example.invalid','commit','-m','unpublished')
+    local=git('rev-parse','new'); git('checkout','old')
+    result=ClientGateService()._check_checkout(client)
+    assert result['status']=='failed' and git('rev-parse','new')==local
+    assert git('branch','--show-current')=='old'
