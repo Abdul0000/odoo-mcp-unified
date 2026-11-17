@@ -158,3 +158,10 @@ def test_protected_method_keeps_configured_network_timeout(monkeypatch):
     monkeypatch.setattr(httpx, 'Client', Client)
     assert service._call('object', 'execute_kw', ['db', 1, 'secret', 'model', 'write', [], {}], 60)
     assert seen[0].read == 60
+
+
+def test_read_timeout_keeps_budget_for_cold_odoo_response():
+    from odoo_agent_server.services.odoo_jsonrpc_service import _request_timeout
+    timeout = _request_timeout(30, read_only=True)
+    assert timeout.read >= 24
+    assert timeout.read + timeout.connect + timeout.write + timeout.pool <= 30

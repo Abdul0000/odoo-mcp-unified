@@ -18,7 +18,7 @@ import time
 
 import httpx
 
-from .config import settings
+from .config import settings, mask_repo_url
 from .execution_schemas import ProcessStart, WorkspaceFiles
 from .services.execution_service import ExecutionService
 
@@ -298,7 +298,8 @@ class ExecutionWorker:
                                 future.result()
                             except Exception as exc:
                                 self.store.update(process["id"], "process", status="needs_review",
-                                                  error=f"Worker checkpoint failed ({type(exc).__name__}); inspect before retry")
+                                                  error=f"Worker checkpoint failed ({type(exc).__name__}): {mask_repo_url(str(getattr(exc, 'detail', exc)))[:1500]}",
+                                                  error_type=type(exc).__name__, recovery_action="inspect_runtime_permissions_and_preserved_process_output_before_retry")
                             del running[future]
                     if len(running) < settings.execution_max_workers:
                         process = self.store.claim("process")

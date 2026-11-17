@@ -12,6 +12,19 @@ from ..schemas import OdooResult
 from .client_resolver_service import ResolvedClient
 
 
+def _request_timeout(seconds: float, *, read_only: bool) -> httpx.Timeout:
+    if not read_only:
+        return httpx.Timeout(seconds, connect=min(10, seconds))
+    # Reserve small connect/write/pool allowances; keep most of the remaining
+    # budget for Odoo registry/query work. Splitting it equally made a requested
+    # 30-second read fail after 7.5 seconds on a cold staging database.
+    connect = min(10.0, seconds * .1)
+    overhead = min(1.0, seconds * .05)
+    return httpx.Timeout(max(.001, seconds - connect - 2 * overhead),
+                         connect=max(.001, connect), write=max(.001, overhead),
+                         pool=max(.001, overhead))
+
+
 class OdooJsonRpcService:
     """Authenticated Odoo HTTPS transport.
 
@@ -60,9 +73,9 @@ class OdooJsonRpcService:
             "params": {"service": service, "method": method, "args": args},
             "id": int(time.time() * 1000),
         }
-        phase_budget = timeout_seconds / 4 if service == "common" or (service == "object" and len(args) > 4 and args[4] in {"search_read", "read_group"}) else timeout_seconds
+        read_only = service == "common" or (service == "object" and len(args) > 4 and args[4] in {"search_read", "read_group"})
         with httpx.Client(
-            timeout=httpx.Timeout(max(.001, phase_budget), connect=max(.001, min(10, phase_budget))),
+            timeout=_request_timeout(timeout_seconds, read_only=read_only),
             verify=self._verify_ssl(),
         ) as client:
             response = client.post(f"{base_url}/jsonrpc", json=payload)
@@ -104,9 +117,9 @@ class OdooJsonRpcService:
         }
         if self._db():
             headers["X-Odoo-Database"] = str(self._db())
-        phase_budget = timeout_seconds / 4 if method in {"search_read", "read_group"} else timeout_seconds
+        read_only = method in {"search_read", "read_group"}
         with httpx.Client(
-            timeout=httpx.Timeout(max(.001, phase_budget), connect=max(.001, min(10, phase_budget))),
+            timeout=_request_timeout(timeout_seconds, read_only=read_only),
             verify=self._verify_ssl(),
         ) as client:
             response = client.post(f"{base_url}/json/2/{model}/{method}", headers=headers, json=params)
