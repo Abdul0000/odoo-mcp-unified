@@ -46,7 +46,7 @@ Static REA accepts ws_id/module_name: `rea_xray_module`, `rea_upstream_compare`,
 
 ## ORACLE EXECUTION LANE
 
-`execution_workspace_open` queues a fresh same-branch clone; poll workspace_status. Use scope_paths for known modules. Declare checks/layers via `execution_task_plan` (required layer defaults to unit). Inspect/edit with read SHA. Run exact checks with check_name; poll to terminal. Source is read-only; use /tmp or output_dirs for builds. Repair permits reread/edit/retest; source/runtime changes invalidate evidence. `execution_publish` queues verified push: poll execution_status(operation_id). Report passed_layers only; orm_verified is separate from unit/syntax proof. Odoo workflows prove deployment. Commands have no network/credentials. ChatGPT supplies reasoning; no backend model key is needed.
+`execution_workspace_open` queues a fresh same-branch clone; poll workspace_status. scope_paths narrows checkout. Declare exact checks/layers with `execution_task_plan`. Edit using read SHA; run named checks and poll to terminal. Verification source is read-only; builds use /tmp or output_dirs. Source/runtime changes invalidate evidence. `execution_publish(push=false)` completes a local commit; push=true requires confirmed remote SHA. Poll execution_status(operation_id); stop on success_allowed=true. Never push a commit-only task. Deploy only when requested through Odoo workflows. Report passed_layers; unit/syntax proof is not ORM proof. Commands have no network/credentials. ChatGPT reasons; no backend model key is needed.
 
 ## COMPOSITE WORKFLOW
 
