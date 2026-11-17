@@ -29,8 +29,15 @@ def read_overrides(root: Path) -> dict:
 
 def apply_client_overrides(clients: list[dict], root: Path) -> list[dict]:
     overrides = read_overrides(root)['clients']
-    return [{**client, **overrides.get(str(client.get('name', '')).casefold(), {}),
+    rows = [{**client, **overrides.get(str(client.get('name', '')).casefold(), {}),
              'name': client.get('name')} for client in clients]
+    known = {str(client.get('name', '')).casefold() for client in clients}
+    # Only explicit full records created by the admin API add new clients.
+    # Orphaned field overrides never resurrect deleted environment entries.
+    rows.extend(dict(value) for key, value in overrides.items()
+                if key not in known and str(value.get('name', '')).casefold() == key
+                and all(value.get(field) for field in ('name', 'repo', 'branch', 'path')))
+    return rows
 
 
 @contextmanager

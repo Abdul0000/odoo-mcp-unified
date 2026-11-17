@@ -1,6 +1,6 @@
 # Client manager
 
-Open `/clients` on the connector's public URL. Select an existing client, edit
+Open `/clients` on the connector's public URL. The selector loads real `ODOO_CLIENTS` entries plus clients saved through the UI. There are no seeded demo clients. Select an existing client, edit
 its repository, branch, Odoo connection or SSH settings, then choose **Save &
 Validate**. **Save only** applies settings without starting a connection check.
 The page shows validation progress and the final coding/deployment readiness.
@@ -40,5 +40,30 @@ Back up this file with the rest of the connector state; it can contain updated
 credentials. Unreadable overrides fail closed instead of silently reverting to
 old environment settings. No SQLite database or frontend build service is used.
 
-The manager updates existing client entries. Adding/removing/renaming clients is
-outside this minimal version.
+Use **+ Add client** to create a client. A separate checkout path is generated
+from its name (editable in Advanced settings). Environment clients are preserved;
+new clients become visible immediately to both the manager and MCP resolver.
+No existing client's repository token or password is copied to a new client.
+A common, already configured Oracle SSH key path may be suggested. Removing and
+renaming clients remain outside this version.
+
+## Oracle update and restart
+
+Install the narrow, root-owned controller once after deploying this release:
+
+```sh
+sudo bash /opt/odoo-mcp/current/deploy/install_server_control.sh
+```
+
+The header's **Oracle services** menu offers **Update & restart** and **Restart
+services**. Update uses the existing master deployment unit, including its full
+test/readiness/rollback gates. Restart targets only the MCP API and execution
+worker. Neither action can run an arbitrary command or reboot the Oracle VM.
+An admin session and CSRF token are required. Active connector work blocks the
+action; new MCP mutations wait while maintenance is pending. The browser polls a
+persisted action record and reconnects through the short API restart.
+
+The API only queues fixed actions under `/var/lib/odoo-mcp/control`. A systemd
+path unit runs `/opt/odoo-mcp/deploy/server_control.py`, installed root-owned.
+The API gains no sudo rights or writable root script. Saving client settings
+still applies immediately and does not require a restart.

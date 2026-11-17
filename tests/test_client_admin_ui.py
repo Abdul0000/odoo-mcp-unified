@@ -203,3 +203,112 @@ def test_editing_https_only_client_does_not_require_ssh_configuration(ui):
     response = client.patch('/admin/clients/Beta', headers=headers, json={
         'revision': detail['revision'], 'values': {'branch': 'new-staging'}})
     assert response.status_code == 200 and get_odoo_clients()[1]['branch'] == 'new-staging'
+
+
+def test_add_client_keeps_environment_clients_and_is_immediately_resolvable(ui):
+    client, before = ui
+    headers = login(client)
+    response = client.post('/admin/clients', headers=headers, json={'name': 'New Client', 'values': {
+        'repo': 'https://gitlab.example/acme/new.git', 'branch': 'staging', 'token': 'new-private-token'}})
+    assert response.status_code == 200, response.text
+    assert response.json()['created'] and response.json()['client']['name'] == 'New Client'
+    clients = get_odoo_clients()
+    assert clients[:2] == before and clients[2]['name'] == 'New Client'
+    assert clients[2]['path'].endswith('/new-client')
+    assert 'new-private-token' not in response.text
+    from odoo_agent_server.services.client_resolver_service import ClientResolverService
+    assert ClientResolverService().resolve_client('New Client', require_complete=False).branch == 'staging'
+    assert client.get('/admin/clients').json()['clients'][-1]['name'] == 'New Client'
+    duplicate = client.post('/admin/clients', headers=headers, json={'name': 'new client', 'values': {'repo': 'https://gitlab.example/another.git'}})
+    assert duplicate.status_code == 409 and len(get_odoo_clients()) == 3
+
+
+def test_new_client_does_not_share_existing_checkout_or_accept_bad_urls(ui):
+    client, before = ui
+    headers = login(client)
+    for values in ({'repo': 'https://example.org/new.git', 'path': before[0]['path']},
+                   {'repo': 'https://[invalid'}, {'repo': 'file:///tmp/repo'}, {}):
+        response = client.post('/admin/clients', headers=headers, json={'name': 'New', 'values': values})
+        assert response.status_code in {409, 422}
+        assert get_odoo_clients() == before
+
+
+def test_empty_environment_can_load_ui_created_client(ui, monkeypatch):
+    client, _ = ui
+    monkeypatch.setenv('ODOO_CLIENTS', '[]')
+    response = client.post('/admin/clients', headers=login(client), json={'name': 'First', 'values': {'repo': 'https://github.com/acme/first.git'}})
+    assert response.status_code == 200, response.text
+    assert [c['name'] for c in get_odoo_clients()] == ['First']
+
+
+def test_orphaned_partial_overrides_do_not_create_dummy_clients(ui):
+    settings.state_path.joinpath(FILE_NAME).write_text(json.dumps({'version': 1, 'clients': {'deleted': {'branch': 'old'}}}))
+    assert [c['name'] for c in get_odoo_clients()] == ['Alpha', 'Beta']
+
+
+def test_server_action_requires_admin_csrf_and_has_no_arbitrary_command(ui, monkeypatch, tmp_path):
+    client, _ = ui
+    monkeypatch.setattr(settings, 'server_control_dir', str(tmp_path / 'control'))
+    root = tmp_path / 'control'; root.mkdir(); (root / 'enabled').touch()
+    headers = login(client)
+    assert client.post('/admin/server', json={'action': 'restart'}).status_code == 403
+    assert client.post('/admin/server', headers=headers, json={'action': 'reboot'}).status_code == 422
+    assert client.post('/admin/server', headers=headers, json={'action': 'restart', 'command': 'anything'}).status_code == 422
+    response = client.post('/admin/server', headers=headers, json={'action': 'restart'})
+    assert response.status_code == 202
+    request = json.loads((root / 'request.json').read_text())
+    assert request['action'] == 'restart' and request['id'] == response.json()['id']
+    assert client.post('/admin/server', headers=headers, json={'action': 'restart'}).status_code == 409
+    assert client.get('/admin/server/' + request['id']).json()['status'] == 'queued'
+    revision = client.get('/admin/clients/Alpha').json()['revision']
+    assert client.patch('/admin/clients/Alpha', headers=headers, json={'revision': revision, 'values': {'branch': 'no'}}).status_code == 503
+
+
+def test_server_restart_is_blocked_by_active_work(ui, monkeypatch, tmp_path):
+    client, _ = ui
+    monkeypatch.setattr(settings, 'server_control_dir', str(tmp_path / 'control'))
+    root = tmp_path / 'control'; root.mkdir(); (root / 'enabled').touch()
+    JsonStore().create_job(JobRecord(job_type='deployment', status=JobStatus.running, request={'client_name': 'Alpha'}))
+    assert client.post('/admin/server', headers=login(client), json={'action': 'restart'}).status_code == 409
+    assert not (root / 'request.json').exists()
+    assert client.post('/admin/clients', headers=login(client), json={'name':'No interruption','values':{'repo':'https://github.com/acme/new.git'}}).status_code == 409
+
+
+@pytest.mark.parametrize('action', ['restart', 'update'])
+def test_root_controller_only_runs_fixed_units_and_waits_for_readiness(tmp_path, action):
+    from deploy.server_control import handle
+    control = tmp_path / 'control'; control.mkdir()
+    state = tmp_path / 'state'; state.mkdir()
+    execution = tmp_path / 'execution'; execution.mkdir()
+    deploy = tmp_path / 'deploy'; deploy.mkdir()
+    release = deploy / ('a' * 40); release.mkdir(); (deploy / 'current').symlink_to(release)
+    request = {'id': 'b' * 32, 'action': action, 'created_at': time.time()}
+    (control / 'request.json').write_text(json.dumps(request)); (control / 'active.json').write_text(json.dumps(request))
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert argv[0] == 'systemctl' and kwargs['timeout'] <= 720
+        return type('Result', (), {'returncode': 0})()
+    handle(control, state, execution, deploy, run=run, wait_ready=lambda: True, pause=lambda _: None)
+    result = json.loads((control / 'jobs' / ('b' * 32 + '.json')).read_text())
+    assert result['status'] == 'succeeded' and not (control / 'active.json').exists()
+    assert calls[-1] == ['systemctl', 'restart', 'odoo-mcp.service', 'odoo-mcp-execution.service']
+    if action == 'update':
+        assert calls[0] == ['systemctl', 'start', 'odoo-mcp-deploy@' + 'a' * 40 + '.service']
+    assert not (control / 'request.json').exists()
+
+
+def test_root_controller_refuses_active_jobs_and_symlink_requests(tmp_path):
+    from deploy.server_control import handle
+    control = tmp_path / 'control'; control.mkdir()
+    state = tmp_path / 'state'; (state / 'jobs').mkdir(parents=True)
+    (state / 'jobs' / 'job.json').write_text(json.dumps({'status': 'running'}))
+    request = {'id': 'c' * 32, 'action': 'restart'}
+    (control / 'request.json').write_text(json.dumps(request))
+    def forbidden(*a, **k): raise AssertionError('root command must not execute')
+    handle(control, state, tmp_path / 'execution', tmp_path / 'deploy', run=forbidden, pause=lambda _: None)
+    assert json.loads((control / 'jobs' / ('c' * 32 + '.json')).read_text())['status'] == 'failed'
+    outside = tmp_path / 'outside.json'; outside.write_text(json.dumps(request))
+    (control / 'request.json').symlink_to(outside)
+    handle(control, state, tmp_path / 'execution', tmp_path / 'deploy', run=forbidden)
+    assert outside.exists() and not (control / 'request.json').exists()

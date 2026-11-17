@@ -8,6 +8,7 @@ import json
 import secrets
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,6 +30,17 @@ class Login(BaseModel):
     model_config = ConfigDict(extra='forbid')
     token: str = Field(default='', max_length=4096)
     login_code: str = Field(default='', max_length=256)
+
+
+class Create(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=80)
+    values: dict[str, str | bool | int | None] = Field(max_length=30)
+
+
+class ServerAction(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    action: Literal['restart', 'update']
 
 
 class Update(BaseModel):
@@ -149,6 +161,29 @@ def list_clients():
     return ClientAdminService().list()
 
 
+@router.post('/admin/clients', dependencies=[Depends(_session)])
+def add_client(payload: Create):
+    return ClientAdminService().create(payload.name, payload.values)
+
+
+@router.get('/admin/server', dependencies=[Depends(_session)])
+def server_status():
+    from ..services.server_control_service import ServerControlService
+    return ServerControlService().status()
+
+
+@router.post('/admin/server', dependencies=[Depends(_session)])
+def server_action(payload: ServerAction):
+    from ..services.server_control_service import ServerControlService
+    return JSONResponse(ServerControlService().request(payload.action), status_code=202)
+
+
+@router.get('/admin/server/{job_id}', dependencies=[Depends(_session)])
+def server_job(job_id: str):
+    from ..services.server_control_service import ServerControlService
+    return ServerControlService().job(job_id)
+
+
 @router.get('/admin/clients/{name}', dependencies=[Depends(_session)])
 def client(name: str):
     return ClientAdminService().detail(name)
@@ -161,6 +196,8 @@ def save_client(name: str, payload: Update):
 
 @router.post('/admin/clients/{name}/validate', dependencies=[Depends(_session)])
 def validate_client(name: str):
+    from ..services.server_control_service import assert_no_maintenance
+    assert_no_maintenance()
     ClientAdminService().detail(name)  # Check the client before queueing work.
     from .tools import _start_client_validation
     return _start_client_validation(ClientCheckRequest(client_name=name, validate=True, force_refresh=True))

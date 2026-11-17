@@ -58,7 +58,59 @@ class ClientAdminService:
 
     def list(self):
         return {'clients': [{'name': c.get('name'), 'branch': c.get('branch'),
-                              'environment': c.get('environment')} for c in get_odoo_clients()]}
+                              'environment': c.get('environment')} for c in get_odoo_clients()], 'defaults': self.defaults()}
+
+    def defaults(self):
+        clients = get_odoo_clients()
+        roots = settings.allowed_roots
+        root = roots[0] if roots else settings.state_path / 'repos'
+        for client in clients:
+            if client.get('path'):
+                candidate = Path(str(client['path'])).parent
+                if any(candidate.is_relative_to(allowed) for allowed in roots):
+                    root = candidate
+                    break
+        keys = {str(c['odoosh_ssh_key_path']) for c in clients if c.get('odoosh_ssh_key_path')}
+        return {'branch': 'staging', 'environment': 'staging', 'repo': '',
+                'odoo_verify_ssl': True, 'odoosh_ssh_port': 22,
+                'odoosh_odoo_path': '/home/odoo/src/odoo',
+                'odoosh_user_addons_path': '/home/odoo/src/user',
+                'odoosh_ssh_key_path': next(iter(keys)) if len(keys) == 1 else '',
+                'path_root': str(root)}
+
+    def create(self, name, values):
+        from .server_control_service import assert_no_maintenance
+        assert_no_maintenance()
+        name = name.strip()
+        if not name or len(name) > 80 or any(ord(c) < 32 or c in '/\\' for c in name):
+            raise HTTPException(422, 'Enter a client name without slashes or control characters')
+        with settings_lock(settings.state_path):
+            from deploy.server_control import active_work
+            if active_work(settings.state_path, Path(settings.execution_root)):
+                raise HTTPException(409, 'Wait for active connector work to finish before adding a client')
+            clients = get_odoo_clients()
+            if any(str(c.get('name', '')).casefold() == name.casefold() for c in clients):
+                raise HTTPException(409, 'A client with this name already exists')
+            defaults = self.defaults()
+            root = defaults.pop('path_root')
+            slug = re.sub(r'[^a-z0-9_-]+', '-', name.lower()).strip('-') or 'client'
+            current = {'name': name, **defaults, 'path': str(Path(root) / slug)}
+            changes = self._changes(current, values)
+            merged = {**current, **changes}
+            if not all(merged.get(key) for key in ('repo', 'branch', 'path')):
+                raise HTTPException(422, 'Repository, branch and checkout path are required')
+            self._validate(merged, merged.keys() - {'name'})
+            target = Path(merged['path']).resolve()
+            for client in clients:
+                if client.get('path'):
+                    existing = Path(str(client['path'])).expanduser().resolve()
+                    if target.is_relative_to(existing) or existing.is_relative_to(target):
+                        raise HTTPException(409, 'Choose a separate checkout path for the new client')
+            data = read_overrides(settings.state_path)
+            data['clients'][name.casefold()] = merged
+            atomic_json(settings.state_path / FILE_NAME, data)
+            JsonStore().log_audit('client.settings.create', 'saved', 'Client added', {'client_name': name})
+        return {'saved': True, 'created': True, 'client': self.detail(name)}
 
     def _ensure_idle(self, client):
         name = str(client['name']).casefold()
@@ -80,6 +132,8 @@ class ClientAdminService:
                     raise HTTPException(409, 'This client is preparing a workspace. Wait for completion.')
 
     def save(self, name, revision, values):
+        from .server_control_service import assert_no_maintenance
+        assert_no_maintenance()
         unknown = set(values) - FIELDS
         if unknown:
             raise HTTPException(422, 'Unsupported client settings: ' + ', '.join(sorted(unknown)))
@@ -87,29 +141,7 @@ class ClientAdminService:
             current = self._client(name)
             if revision != self.revision(current):
                 raise HTTPException(409, 'Settings changed in another session. Reload this client before saving.')
-            changes = {}
-            for key, value in values.items():
-                if key in SECRETS:
-                    if value is None or value == '':
-                        continue
-                    if not isinstance(value, str) or len(value) > 4096:
-                        raise HTTPException(422, 'Invalid credential value')
-                elif key == 'odoo_verify_ssl':
-                    if not isinstance(value, bool):
-                        raise HTTPException(422, 'TLS verification must be true or false')
-                elif key == 'odoosh_ssh_port':
-                    if type(value) is not int or not 1 <= value <= 65535:
-                        raise HTTPException(422, 'SSH port must be between 1 and 65535')
-                else:
-                    if value is None:
-                        value = ''
-                    if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
-                        raise HTTPException(422, 'Invalid setting value')
-                    value = value.strip()
-                if key == 'repo' and value == clean_url(str(current.get('repo') or '')):
-                    continue  # Preserve existing embedded credentials when untouched.
-                if value != current.get(key):
-                    changes[key] = value
+            changes = self._changes(current, values)
             merged = {**current, **changes}
             self._validate(merged, changes)
             if changes:
@@ -123,6 +155,36 @@ class ClientAdminService:
         return {'saved': True, 'changed': bool(changes), 'client': self.detail(name)}
 
     @staticmethod
+    def _changes(current, values):
+        unknown = set(values) - FIELDS
+        if unknown:
+            raise HTTPException(422, 'Unsupported client settings: ' + ', '.join(sorted(unknown)))
+        changes = {}
+        for key, value in values.items():
+            if key in SECRETS:
+                if value is None or value == '':
+                    continue
+                if not isinstance(value, str) or len(value) > 4096:
+                    raise HTTPException(422, 'Invalid credential value')
+            elif key == 'odoo_verify_ssl':
+                if not isinstance(value, bool):
+                    raise HTTPException(422, 'TLS verification must be true or false')
+            elif key == 'odoosh_ssh_port':
+                if type(value) is not int or not 1 <= value <= 65535:
+                    raise HTTPException(422, 'SSH port must be between 1 and 65535')
+            else:
+                if value is None:
+                    value = ''
+                if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 for c in value):
+                    raise HTTPException(422, 'Invalid setting value')
+                value = value.strip()
+            if key == 'repo' and value == clean_url(str(current.get('repo') or '')):
+                continue  # Preserve existing embedded credentials when untouched.
+            if value != current.get(key):
+                changes[key] = value
+        return changes
+
+    @staticmethod
     def _validate(client, changes):
         if 'branch' in changes and not RepoService()._safe_branch_name(client.get('branch', '')):
             raise HTTPException(422, 'Enter a valid Git branch name')
@@ -131,8 +193,12 @@ class ClientAdminService:
                 continue
             if key == 'odoo_url' and not client[key]:
                 continue
-            parsed = urlsplit(client[key])
-            if (parsed.scheme not in {'http', 'https'} or not parsed.hostname
+            try:
+                parsed = urlsplit(client[key])
+                hostname = parsed.hostname
+            except ValueError:
+                raise HTTPException(422, 'Enter a valid HTTP(S) URL') from None
+            if (parsed.scheme not in {'http', 'https'} or not hostname
                     or parsed.username or parsed.password or parsed.query or parsed.fragment):
                 raise HTTPException(422, 'Use an HTTP(S) URL without embedded credentials; enter credentials separately.')
         if 'environment' in changes and client['environment'] not in {'test', 'development', 'staging', 'production'}:

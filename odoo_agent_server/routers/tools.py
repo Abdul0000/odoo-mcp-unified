@@ -9082,6 +9082,9 @@ async def _dispatch(name: str, args: dict) -> object:
 
 
 async def _dispatch_inner(name: str, args: dict) -> object:
+    if not next((tool.read_only for tool in _TOOL_DESCRIPTORS if tool.name == name), False):
+        from ..services.server_control_service import assert_no_maintenance
+        assert_no_maintenance()
     if name in EXECUTION_TOOLS:
         return await asyncio.to_thread(dispatch_execution, name, args)
     if name.startswith("ws."):

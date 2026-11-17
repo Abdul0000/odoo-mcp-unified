@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  let csrf = '', current = null, dirty = false, busy = false, pollGeneration = 0;
+  let csrf = '', current = null, dirty = false, busy = false, pollGeneration = 0, creating = false, defaults = {};
   const groups = {
     'repository-fields': [['repo','Repository URL','url','https://gitlab.com/group/project.git',true],['branch','Branch','text','staging'],['environment','Environment','select']],
     'odoo-fields': [['odoo_url','Odoo URL','url','https://your-project.odoo.com'],['odoo_db','Database name','text','Your database'],['odoo_login','Odoo login','text','Your Odoo username',true]],
@@ -36,8 +36,9 @@
   function markDirty(value) { dirty = value; $('dirty').hidden = !value; }
   function setBusy(value) {
     busy = value;
-    for (const id of ['save-validate','save-only','client-select']) $(id).disabled = value;
+    for (const id of ['save-validate','save-only','client-select','new-client','server-update','server-restart']) $(id).disabled = value;
     for (const field of fields) $(field.name).disabled = value;
+    $('client-name').disabled = value || !creating;
   }
   function showLogin() { $('login').hidden=false; $('manager').hidden=true; $('signout').hidden=true; $('loading').hidden=true; }
   async function api(path, options={}) {
@@ -45,7 +46,7 @@
     if (options.body) headers['Content-Type']='application/json';
     if (csrf) headers['X-CSRF-Token']=csrf;
     const response = await fetch(path,{...options,headers,credentials:'same-origin'});
-    const data = await response.json();
+    const data = await response.json().catch(()=>({detail:'Server is temporarily unavailable. Please retry shortly.'}));
     if (!response.ok) {
       if (response.status === 401) { csrf=''; showLogin(); }
       const detail = typeof data.detail === 'string' ? data.detail : response.status === 422 ? 'Check the fields and try again.' : 'Unable to complete this request. Try again.';
@@ -69,8 +70,11 @@
     }
   }
   function fill(detail) {
-    current=detail; $('client-title').textContent=detail.name;
+    current=detail; $('client-title').textContent=creating?'New client':detail.name;
+    $('new-client-name').hidden=!creating; $('client-name').required=creating; $('client-name').disabled=!creating||busy;
+    $('save-validate').textContent=creating?'Add & Validate →':'Save & Validate →'; $('save-only').textContent=creating?'Add client':'Save only';
     $('client-meta').textContent=[detail.values.branch,detail.values.environment].filter(Boolean).join(' · ');
+    $('client-source').textContent=creating?'New client':detail.settings_source==='saved'?'Source: saved Oracle settings':'Source: Oracle environment';
     for (const {name,type} of fields) {
       const input=$(name), value=detail.values[name];
       if (type==='password') { input.value=''; input.placeholder=detail.configured_secrets[name]?'Configured — leave blank to keep':'Not configured'; }
@@ -86,13 +90,28 @@
       if (current.validation.validated) status('Previously validated','Save & Validate to check the current connection.','success');
     } finally { setBusy(false); }
   }
-  async function openManager() {
-    const result=await api('/admin/clients'); $('client-select').replaceChildren();
+  async function loadClients(selected) {
+    const result=await api('/admin/clients'); defaults=result.defaults || {}; $('client-select').replaceChildren();
     for (const row of result.clients) { if (!row.name) continue; const option=document.createElement('option'); option.value=row.name; option.textContent=row.name; $('client-select').append(option); }
-    $('login').hidden=true; $('manager').hidden=false; $('signout').hidden=false; $('loading').hidden=true;
-    if ($('client-select').value) await selectClient($('client-select').value);
-    else { current=null; setBusy(true); message('No clients are configured on this server yet.'); }
+    if(selected) $('client-select').value=selected;
   }
+  function newClient() {
+    if(dirty && !window.confirm('Discard unsaved changes?')) return;
+    creating=true; pollGeneration++; message(''); $('validation').hidden=true; $('client-select').selectedIndex=-1;
+    $('client-name').value='';
+    fill({name:'',revision:null,values:{...defaults,path:''},configured_secrets:{},validation:{}});
+    $('client-meta').textContent='New connection'; setBusy(false); $('client-name').focus();
+  }
+  async function openManager() {
+    await loadClients();
+    $('login').hidden=true; $('manager').hidden=false; $('signout').hidden=false; $('loading').hidden=true;
+    if ($('client-select').value) { creating=false; await selectClient($('client-select').value); }
+    else newClient();
+    try { const server=await api('/admin/server'); $('server-menu').hidden=!server.available;
+      if(server.active_job_id) { setBusy(true); pollServer(server.active_job_id).finally(()=>setBusy(false)); }
+    } catch(_) { $('server-menu').hidden=true; }
+  }
+  $('new-client').addEventListener('click',newClient);
   $('odoosh_ssh_host').addEventListener('change',()=>{
     const match=$('odoosh_ssh_host').value.trim().match(/^(?:ssh\s+)?([\w.-]+)@([\w.-]+)(?:\s+-p\s+(\d+))?$/);
     if (match) { $('odoosh_ssh_user').value=match[1]; $('odoosh_ssh_host').value=match[2]; if(match[3]) $('odoosh_ssh_port').value=match[3]; }
@@ -101,6 +120,7 @@
   $('client-form').addEventListener('change',()=>markDirty(true));
   $('client-select').addEventListener('change',async()=>{
     if (dirty && !window.confirm('Discard unsaved changes for this client?')) { $('client-select').value=current.name; return; }
+    creating=false;
     try { await selectClient($('client-select').value); } catch(error) { message(error.message); }
   });
   async function poll(jobId, generation) {
@@ -137,8 +157,9 @@
           if(equivalent) delete values[name];
         }
       }
-      const result=await api('/admin/clients/'+encodeURIComponent(current.name),{method:'PATCH',body:JSON.stringify({revision:current.revision,values})});
-      fill(result.client);
+      const wasCreating=creating;
+      const result=await api(wasCreating?'/admin/clients':'/admin/clients/'+encodeURIComponent(current.name),{method:wasCreating?'POST':'PATCH',body:JSON.stringify(wasCreating?{name:$('client-name').value,values}:{revision:current.revision,values})});
+      creating=false; fill(result.client); if(wasCreating) await loadClients(result.client.name);
       if (!validate) { status('Settings saved','New settings are active. Choose Save & Validate to check connectivity.','success'); return; }
       status('Checking connection…','Settings saved. Starting the connection check.');
       const job=await api('/admin/clients/'+encodeURIComponent(current.name)+'/validate',{method:'POST',body:'{}'});
@@ -147,6 +168,31 @@
     } catch(error) { message(error.message); status('Action needs attention',error.message,'error'); }
     finally { setBusy(false); }
   }
+  async function pollServer(id) {
+    $('server-status').hidden=false; const deadline=Date.now()+15*60*1000;
+    while(Date.now()<deadline) {
+      try {
+        const job=await api('/admin/server/'+id);
+        $('server-title').textContent=job.status==='succeeded'?'Oracle services ready':job.status==='failed'?'Server action needs attention':'Working on Oracle…';
+        $('server-message').textContent=job.message || 'Waiting for the server…';
+        if(job.terminal) { $('server-status').dataset.state=job.status==='succeeded'?'success':'error'; return; }
+      } catch(error) { $('server-message').textContent='Services are restarting. Reconnecting automatically…'; }
+      await new Promise(resolve=>setTimeout(resolve,2000));
+    }
+    $('server-message').textContent='This is taking longer than expected. Check Oracle service logs before retrying.';
+  }
+  async function serverAction(action) {
+    if(busy) return;
+    const question=action==='update'?'Update MCP from master, run deployment checks, and restart Oracle services?':'Restart the MCP API and worker on Oracle? Active work will block this action.';
+    if(!window.confirm(question)) return;
+    $('server-menu').open=false; setBusy(true); message('');
+    $('server-status').hidden=false; $('server-title').textContent='Requesting Oracle action…'; $('server-message').textContent='Checking for active work.';
+    try { const job=await api('/admin/server',{method:'POST',body:JSON.stringify({action})}); await pollServer(job.id); }
+    catch(error) { $('server-status').dataset.state='error'; $('server-title').textContent='Server action blocked'; $('server-message').textContent=error.message; }
+    finally { setBusy(false); }
+  }
+  $('server-restart').addEventListener('click',()=>serverAction('restart'));
+  $('server-update').addEventListener('click',()=>serverAction('update'));
   $('client-form').addEventListener('submit',event=>{ event.preventDefault(); save(true); });
   $('save-only').addEventListener('click',()=>save(false));
   $('login-form').addEventListener('submit',async event=>{

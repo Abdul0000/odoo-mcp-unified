@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     api_token: str = Field(default="change-me", alias="ODOO_AGENT_API_TOKEN")
     allowed_roots_raw: str = Field(default="/workspace/repos,/tmp,/home/odoo/src", alias="ODOO_AGENT_ALLOWED_ROOTS")
     state_dir: str = Field(default="/tmp/odoo_agent_state", alias="ODOO_AGENT_STATE_DIR")
+    server_control_dir: str = Field(default="/var/lib/odoo-mcp/control", alias="ODOO_AGENT_CONTROL_DIR")
     execution_enabled: bool = Field(default=False, alias="ODOO_AGENT_EXECUTION_ENABLED")
     execution_root: str = Field(default="/var/lib/odoo-mcp/execution", alias="ODOO_AGENT_EXECUTION_ROOT")
     execution_image: str = Field(default="odoo-mcp-execution:local", alias="ODOO_AGENT_EXECUTION_IMAGE")
