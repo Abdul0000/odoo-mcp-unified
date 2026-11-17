@@ -69,7 +69,7 @@ def test_agent_instructions_require_complete_safe_deploy_flow():
     assert "workflow_odoo_code_change" in rules
     assert "hidden repo, Git" in rules
     assert "Pydantic code inside Odoo addons" in rules
-    assert provider_flow["code_change"] == "execution_workspace_open"
+    assert provider_flow["code_change"] == ("execution_workspace_open" if settings.execution_enabled else "workflow_odoo_code_change")
     assert provider_flow["composite_fallback"] == "workflow_odoo_code_change"
     assert provider_flow["visual_change"] == "workflow_frontend_visual_implement"
     assert provider_flow["continuation"] == [
@@ -115,3 +115,10 @@ def test_readiness_requires_fresh_worker_and_runtime_proof(tmp_path, monkeypatch
     assert client.get('/ready').status_code == 200
     (tmp_path / 'worker-heartbeat').write_text(json.dumps(time.time() - 60))
     assert client.get('/ready').status_code == 503
+
+
+def test_agent_lane_metadata_tracks_execution_configuration(monkeypatch):
+    from odoo_agent_server.main import agent_instructions
+    for enabled, tool in [(False, 'workflow_odoo_code_change'), (True, 'execution_workspace_open')]:
+        monkeypatch.setattr(settings, 'execution_enabled', enabled)
+        assert agent_instructions()['instructions']['provider_flow']['code_change'] == tool

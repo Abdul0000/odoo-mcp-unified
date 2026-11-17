@@ -150,13 +150,13 @@ def agent_instructions() -> dict:
         "prompt_source": "MCP_SYSTEM_PROMPT.md",
         "system_prompt": load_mcp_system_prompt(),
         "instructions": {
-            "role": "Odoo 16-19 development agent. Use the provider-safe composite workflow; installed source is final authority.",
+            "role": "Odoo 16-19 development agent. Follow available coding lanes; installed source and runtime evidence are authoritative.",
             "rules": [
                 "Follow system_prompt exactly. Use workflow_odoo_code_change or its stated lane, execute returned next_call values, and trust server claim fields over prose.",
                 "Never call hidden repo, Git, verification, or deploy tools, expose credentials, or put Pydantic code inside Odoo addons; terminal success requires the proof defined in system_prompt.",
             ],
             "provider_flow": {
-                "code_change": "execution_workspace_open",
+                "code_change": "execution_workspace_open" if settings.execution_enabled else "workflow_odoo_code_change",
                 "composite_fallback": "workflow_odoo_code_change",
                 "routing": "Prefer native execution when worker and repository are available; use composite workflow only for its supported deployment or fallback capabilities.",
                 "debug_and_fix": "workflow_odoo_debug_and_fix",
