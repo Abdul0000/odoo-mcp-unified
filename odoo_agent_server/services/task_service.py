@@ -713,7 +713,7 @@ class TaskService:
             from .deploy_impact_service import classify_deploy_impact
             from .execution_service import git
 
-            diff = await asyncio.to_thread(git, ["show", "--format=", "--no-ext-diff", evidence["sha"], "--", *(evidence["paths"])], client.path)
+            diff = await asyncio.to_thread(git, ["show", "--format=", "--no-ext-diff", "--no-textconv", evidence["sha"], "--", *(evidence["paths"])], client.path)
             impact = classify_deploy_impact(
                 project_path=client.path, module_name=task["module_name"], changed_paths=evidence["paths"], git_diff=diff, deploy_mode="always_upgrade" if len(diff) >= 32000 else "auto"
             )

@@ -461,3 +461,16 @@ def test_resume_rediscovers_deploy_job_after_lost_queue_response(task):
     assert ledger.read(tid)["steps"]["lost-deploy"]["status"] == "reconciled"
     assert not result["success_allowed"]
     assert len(store.list_jobs()) == 1
+
+
+def test_legacy_job_status_does_not_invent_queued_phase_or_upgrade_evidence(task):
+    from odoo_agent_server.schemas import JobRecord, JobStatus
+    from odoo_agent_server.services.store_service import JsonStore
+    from odoo_agent_server.services.task_dashboard_service import TaskDashboardService
+
+    store = JsonStore()
+    store.create_job(JobRecord(job_type="module_deploy", status=JobStatus.passed, request={"client_name": "Alpha", "module_name": "addon"}, result={}))
+    row = TaskDashboardService().snapshot("Alpha")["deployments"][0]
+    assert row["phase"] == "passed"
+    assert row["source_deployed"] is None and row["module_upgraded"] is None
+    assert row["deploy_confirmed"] is False

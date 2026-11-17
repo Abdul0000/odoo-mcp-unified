@@ -262,7 +262,7 @@
         if(result.source_error) card.append(element('p',result.source_error));
         if(result.source_modules?.length) { const detail=element('details'),summary=element('summary','Source modules ('+result.source_modules.length+')'); detail.append(summary); evidenceRows(detail,result.source_modules.map(m=>m.module+' · depends: '+m.depends.join(', '))); card.append(detail); }
         const button=element('button','Refresh source & runtime facts','secondary'); button.type='button'; button.addEventListener('click',async()=>{button.disabled=true; await loadActivity(true);}); card.append(button);
-        $('activity-content').append(card); $('activity-state').textContent=result.next_action; return;
+        $('activity-content').append(card); $('activity-state').textContent='Facts are bound to this client configuration and source revision. '+(result.cache_hit?'Using a saved snapshot.':'Use Refresh source & runtime facts to fetch current metadata.'); return;
       }
       const result=await api('/admin/activity'+(client?'?client_name='+encodeURIComponent(client):''));
       if(generation!==activityGeneration||view!==mode) return;
@@ -270,7 +270,7 @@
       $('activity-state').textContent=rows.length?rows.length+' '+mode+' · persisted evidence':'No '+mode+' recorded for this selection.';
       for(const row of rows) {
         const card=element('article',null,'activity-item'),heading=element('div',null,'activity-heading');
-        heading.append(element('h3',mode==='tasks'?(row.description||row.task_id):(row.module_name||row.id||row.job_id)),element('span',row.status||row.phase||'unknown','tag')); card.append(heading);
+        heading.append(element('h3',mode==='tasks'?(row.description||row.task_id):(row.module_name||row.id||row.job_id)),element('span',mode==='deployments'?'Job: '+(row.status||'unknown'):(row.status||row.phase||'unknown'),'tag')); card.append(heading);
         const when=row.updated_at||row.finished_at||row.created_at;
         card.append(element('p',[row.client_name,row.branch,when?new Date(when).toLocaleString():null].filter(Boolean).join(' · ')));
         if(mode==='tasks') {
@@ -295,7 +295,7 @@
           const button=element('button','Reconcile existing work','secondary'); button.type='button'; button.disabled=!row.configuration_current;
           button.addEventListener('click',async()=>{button.disabled=true; try{await api('/admin/tasks/'+row.task_id+'/resume',{method:'POST',body:'{}'}); await loadActivity();}catch(error){message(error.message);button.disabled=false;}}); card.append(button);
         } else if(mode==='deployments') {
-          evidenceRows(card,['Phase: '+row.phase,'Source deployed: '+row.source_deployed,'Module upgraded: '+row.module_upgraded,'Deployment confirmed: '+row.deploy_confirmed,'Job ID: '+row.job_id]);
+          evidenceRows(card,['Phase: '+row.phase,'Source deployed: '+(row.source_deployed==null?'Not recorded':row.source_deployed),'Module upgraded: '+(row.module_upgraded==null?'Not recorded':row.module_upgraded),'Deployment confirmed: '+row.deploy_confirmed,'Job ID: '+row.job_id]);
           if(row.sha) card.append(element('code',row.sha));
           if(row.message) card.append(element('p',row.message));
           const details=element('details'),summary=element('summary','Deployment steps'); details.append(summary); evidenceRows(details,row.steps.map(s=>s.name+' · '+s.status+(s.duration_ms!=null?' · '+s.duration_ms+' ms':'')));card.append(details);
