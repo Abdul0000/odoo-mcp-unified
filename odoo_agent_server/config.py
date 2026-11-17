@@ -267,7 +267,9 @@ class Settings(BaseSettings):
         return key_path
 
 
-settings = Settings()
+from .runtime_settings import apply_saved_settings
+
+settings = apply_saved_settings(Settings())
 
 
 # ===========================================================================

@@ -67,3 +67,29 @@ The API only queues fixed actions under `/var/lib/odoo-mcp/control`. A systemd
 path unit runs `/opt/odoo-mcp/deploy/server_control.py`, installed root-owned.
 The API gains no sudo rights or writable root script. Saving client settings
 still applies immediately and does not require a restart.
+
+## Runtime, storage and service menus
+
+The control center includes **Clients**, **Runtime & performance**, **Storage &
+retention**, and **Oracle services**. Client edits continue to apply immediately.
+Server settings show the real effective values, environment variable names,
+validated ranges, and whether a value comes from the environment or a saved
+UI override. Runtime controls cover worker/queue capacity, watchdog timing and
+cache lifetimes; storage controls cover session/workspace retention, job history,
+artifacts and command logs.
+
+**Save settings** stages allowlisted, non-secret values atomically in
+`runtime_settings.json` under `ODOO_AGENT_STATE_DIR`. Both API and execution worker
+load and validate that file on startup. **Oracle services → Restart services**
+applies the staged values. Until then, the screen displays **Restart pending**
+and retains the current running values. Saving checks revision conflicts and
+blocks changes during active work or maintenance. Draft server settings survive
+switching between menus; leaving the page warns about unsaved edits.
+
+Saved UI overrides take precedence over environment values for these fields.
+Back up `runtime_settings.json` alongside `client_settings.json`. For operator
+recovery, restore or remove the runtime override file and restart both services.
+Malformed files fail startup rather than silently running unexpected settings.
+Authentication, permission flags, execution images, filesystem roots and secrets
+remain operator-managed; the environment overview reports only selected safe
+configuration values and configured/not-configured flags.

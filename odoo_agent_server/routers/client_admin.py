@@ -172,6 +172,18 @@ def server_status():
     return ServerControlService().status()
 
 
+@router.get('/admin/settings', dependencies=[Depends(_session)])
+def runtime_settings():
+    from ..services.runtime_admin_service import RuntimeAdminService
+    return RuntimeAdminService().detail()
+
+
+@router.patch('/admin/settings', dependencies=[Depends(_session)])
+def save_runtime_settings(payload: Update):
+    from ..services.runtime_admin_service import RuntimeAdminService
+    return RuntimeAdminService().save(payload.revision, payload.values)
+
+
 @router.post('/admin/server', dependencies=[Depends(_session)])
 def server_action(payload: ServerAction):
     from ..services.server_control_service import ServerControlService

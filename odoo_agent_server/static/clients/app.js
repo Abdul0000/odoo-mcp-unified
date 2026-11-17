@@ -2,6 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   let csrf = '', current = null, dirty = false, busy = false, pollGeneration = 0, creating = false, defaults = {};
+  let view = 'clients', runtime = null, runtimeDirty = false, controllerAvailable = false;
   const groups = {
     'repository-fields': [['repo','Repository URL','url','https://gitlab.com/group/project.git',true],['branch','Branch','text','staging'],['environment','Environment','select']],
     'odoo-fields': [['odoo_url','Odoo URL','url','https://your-project.odoo.com'],['odoo_db','Database name','text','Your database'],['odoo_login','Odoo login','text','Your Odoo username',true]],
@@ -36,11 +37,13 @@
   function markDirty(value) { dirty = value; $('dirty').hidden = !value; }
   function setBusy(value) {
     busy = value;
-    for (const id of ['save-validate','save-only','client-select','new-client','server-update','server-restart']) $(id).disabled = value;
+    for (const id of ['save-validate','save-only','client-select','new-client','server-update','server-restart','services-update','services-restart','save-settings','reload-settings']) $(id).disabled = value;
     for (const field of fields) $(field.name).disabled = value;
     $('client-name').disabled = value || !creating;
+    for(const input of $('runtime-fields').querySelectorAll('input')) input.disabled=value;
+    for(const id of ['services-update','services-restart']) $(id).disabled=value||!controllerAvailable;
   }
-  function showLogin() { $('login').hidden=false; $('manager').hidden=true; $('signout').hidden=true; $('loading').hidden=true; }
+  function showLogin() { $('login').hidden=false; $('manager').hidden=true; $('signout').hidden=true; $('server-menu').hidden=true; $('loading').hidden=true; }
   async function api(path, options={}) {
     const headers = {...options.headers};
     if (options.body) headers['Content-Type']='application/json';
@@ -108,9 +111,11 @@
     $('login').hidden=true; $('manager').hidden=false; $('signout').hidden=false; $('loading').hidden=true;
     if ($('client-select').value) { creating=false; await selectClient($('client-select').value); }
     else newClient();
-    try { const server=await api('/admin/server'); $('server-menu').hidden=!server.available;
+    await loadRuntime();
+    try { const server=await api('/admin/server'); controllerAvailable=server.available; $('server-menu').hidden=!server.available;
+      $('controller-note').textContent=server.available?'Active coding, validation or deployment work blocks maintenance.':'Service controller is unavailable. Ask the Oracle operator to install it.'; setBusy(busy);
       if(server.active_job_id) { setBusy(true); pollServer(server.active_job_id).finally(()=>setBusy(false)); }
-    } catch(_) { $('server-menu').hidden=true; }
+    } catch(_) { controllerAvailable=false; $('server-menu').hidden=true; $('controller-note').textContent='Unable to read service controller status.'; setBusy(busy); }
   }
   $('new-client').addEventListener('click',newClient);
   $('odoosh_ssh_host').addEventListener('change',()=>{
@@ -177,7 +182,7 @@
         const job=await api('/admin/server/'+id);
         $('server-title').textContent=job.status==='succeeded'?'Oracle services ready':job.status==='failed'?'Server action needs attention':'Working on Oracle…';
         $('server-message').textContent=job.message || 'Waiting for the server…';
-        if(job.terminal) { $('server-status').dataset.state=job.status==='succeeded'?'success':'error'; return; }
+        if(job.terminal) { $('server-status').dataset.state=job.status==='succeeded'?'success':'error'; if(job.status==='succeeded'&&!runtimeDirty) await loadRuntime(); return; }
       } catch(error) { $('server-message').textContent='Services are restarting. Reconnecting automatically…'; }
       await new Promise(resolve=>setTimeout(resolve,2000));
     }
@@ -185,6 +190,7 @@
   }
   async function serverAction(action) {
     if(busy) return;
+    if((dirty||runtimeDirty)&&!window.confirm('There are unsaved settings. Continue maintenance without saving them?')) return;
     const question=action==='update'?'Update MCP from master, run deployment checks, and restart Oracle services?':'Restart the MCP API and worker on Oracle? Active work will block this action.';
     if(!window.confirm(question)) return;
     $('server-menu').open=false; setBusy(true); message('');
@@ -193,6 +199,62 @@
     catch(error) { $('server-status').dataset.state='error'; $('server-title').textContent='Server action blocked'; $('server-message').textContent=error.message; }
     finally { setBusy(false); }
   }
+  function renderRuntime() {
+    if(!runtime) return;
+    $('runtime-fields').replaceChildren();
+    $('restart-badge').hidden=!runtime.restart_required;
+    $('runtime-title').textContent=view==='storage'?'Storage & retention':'Runtime & performance';
+    for(const field of runtime.fields) {
+      if(field.group!==view) continue;
+      const wrapper=document.createElement('div'); wrapper.className='field';
+      const label=document.createElement('label'); label.htmlFor='runtime-'+field.name; label.textContent=field.label;
+      const input=document.createElement('input'); input.id=label.htmlFor; input.type='number'; input.min=field.min; input.max=field.max; input.step='1'; input.required=true; input.value=runtime.values[field.name]; input.disabled=busy;
+      input.addEventListener('input',()=>{runtime.values[field.name]=input.value; runtimeDirty=true; $('settings-message').textContent='Unsaved server settings';});
+      const hint=document.createElement('p'); hint.className='hint'; hint.textContent=field.help;
+      if(runtime.values[field.name]!==runtime.effective[field.name]) hint.textContent+=' Running: '+runtime.effective[field.name]+'.';
+      const env=document.createElement('span'); env.className='env-key'; env.textContent=field.env+' · '+field.source;
+      wrapper.append(label,input,hint,env); $('runtime-fields').append(wrapper);
+    }
+  }
+  async function loadRuntime() {
+    try {
+      runtime=await api('/admin/settings'); runtimeDirty=false; renderRuntime();
+      $('system-overview').replaceChildren();
+      const labels={execution_enabled:'Command execution',functional_operations_enabled:'Functional operations',approval_required:'Approval guard',github_token_configured:'Global repository token',browser_configured:'Browser connection',state_dir:'State directory',execution_root:'Execution directory'};
+      for(const [key,value] of Object.entries(runtime.system)) {
+        const row=document.createElement('div'),dt=document.createElement('dt'),dd=document.createElement('dd'); dt.textContent=labels[key]||key; dd.textContent=typeof value==='boolean'?(value?'Enabled':'Disabled'):value; row.append(dt,dd); $('system-overview').append(row);
+      }
+      $('settings-message').textContent=runtime.restart_required?'Saved changes are waiting for a service restart.':'';
+    } catch(error) { message(error.message); }
+  }
+  function switchView(next) {
+    view=next; message('');
+    const titles={clients:['Client manager','Manage real client connections and validate access.'],runtime:['Runtime & performance','Tune worker capacity, queues and cache lifetimes.'],storage:['Storage & retention','Control how long sessions, jobs and artifacts are kept.'],services:['Oracle services','Apply server settings and manage MCP releases.']};
+    $('page-title').textContent=titles[next][0]; $('page-description').textContent=titles[next][1];
+    $('clients-view').hidden=next!=='clients'; $('settings-view').hidden=!['runtime','storage'].includes(next); $('services-view').hidden=next!=='services';
+    for(const button of document.querySelectorAll('[data-view]')) { if(button.dataset.view===next) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current'); }
+    renderRuntime();
+  }
+  for(const button of document.querySelectorAll('[data-view]')) button.addEventListener('click',()=>switchView(button.dataset.view));
+  $('reload-settings').addEventListener('click',async()=>{if(busy||(runtimeDirty&&!window.confirm('Discard unsaved server settings?'))) return; await loadRuntime();});
+  $('runtime-form').addEventListener('submit',async event=>{
+    event.preventDefault(); if(busy||!runtime) return;
+    const values={};
+    for(const field of runtime.fields) {
+      const value=Number(runtime.values[field.name]);
+      if(!Number.isInteger(value)||value<field.min||value>field.max) { message(field.label+' must be between '+field.min+' and '+field.max); return; }
+      values[field.name]=value;
+    }
+    setBusy(true); message('');
+    try {
+      runtime=await api('/admin/settings',{method:'PATCH',body:JSON.stringify({revision:runtime.revision,values})}); runtimeDirty=false; renderRuntime();
+      $('settings-message').dataset.state='success'; $('settings-message').textContent=runtime.restart_required?'Settings saved. Open Oracle services → Restart services to apply.':'Settings saved. Running configuration is up to date.';
+    } catch(error) { $('settings-message').dataset.state='error'; $('settings-message').textContent=error.message; }
+    finally {setBusy(false);}
+  });
+  $('global-server-status').append($('server-status'));
+  $('services-restart').addEventListener('click',()=>serverAction('restart'));
+  $('services-update').addEventListener('click',()=>serverAction('update'));
   $('server-restart').addEventListener('click',()=>serverAction('restart'));
   $('server-update').addEventListener('click',()=>serverAction('update'));
   $('client-form').addEventListener('submit',event=>{ event.preventDefault(); save(true); });
@@ -202,8 +264,8 @@
     try { const result=await api('/admin/session',{method:'POST',body:JSON.stringify({token:$('admin-token').value})}); $('admin-token').value=''; csrf=result.csrf_token; await openManager(); }
     catch(error) { message(error.message); } finally { button.disabled=false; }
   });
-  $('signout').addEventListener('click',async()=>{ try { await api('/admin/session',{method:'DELETE'}); csrf=''; current=null; pollGeneration++; $('client-form').reset(); markDirty(false); showLogin(); } catch(error) { message(error.message); } });
-  window.addEventListener('beforeunload',event=>{ if(dirty){event.preventDefault();event.returnValue='';} });
+  $('signout').addEventListener('click',async()=>{ try { if((dirty||runtimeDirty)&&!window.confirm('Sign out and discard unsaved settings?')) return; await api('/admin/session',{method:'DELETE'}); runtime=null; runtimeDirty=false; $('runtime-fields').replaceChildren(); $('system-overview').replaceChildren(); csrf=''; current=null; pollGeneration++; $('client-form').reset(); markDirty(false); showLogin(); } catch(error) { message(error.message); } });
+  window.addEventListener('beforeunload',event=>{ if(dirty||runtimeDirty){event.preventDefault();event.returnValue='';} });
   (async()=>{
     const code=new URLSearchParams(location.hash.slice(1)).get('login');
     if (location.hash) history.replaceState(null,'',location.pathname);

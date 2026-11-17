@@ -342,3 +342,64 @@ def test_existing_ssh_profile_can_use_shared_key_and_standard_paths(ui,monkeypat
     c=get_odoo_clients()[0]
     assert c['odoosh_ssh_key_path']=='/var/lib/odoo-mcp/keys/shared'
     assert c['odoosh_odoo_path']=='/home/odoo/src/odoo'
+
+
+def test_runtime_settings_private_validated_and_restart_staged(ui):
+    from odoo_agent_server.runtime_settings import FILE_NAME as RUNTIME_FILE
+    client, _ = ui
+    assert client.get('/admin/settings').status_code == 401
+    headers = login(client)
+    before = client.get('/admin/settings').json()
+    assert settings.api_token not in json.dumps(before)
+    payload = {'revision': before['revision'], 'values': {'coding_workflow_max_queue': 7}}
+    assert client.patch('/admin/settings', json=payload).status_code == 403
+    result = client.patch('/admin/settings', headers=headers, json=payload)
+    assert result.status_code == 200, result.text
+    data = result.json()
+    assert data['values']['coding_workflow_max_queue'] == 7
+    assert data['effective']['coding_workflow_max_queue'] == before['effective']['coding_workflow_max_queue']
+    assert data['restart_required'] and settings.coding_workflow_max_queue != 7
+    assert (settings.state_path / RUNTIME_FILE).stat().st_mode & 0o777 == 0o640
+    assert client.patch('/admin/settings', headers=headers, json=payload).status_code == 409
+    environment = {**os.environ, 'ODOO_AGENT_STATE_DIR': settings.state_dir}
+    output = subprocess.check_output([sys.executable, '-c', 'from odoo_agent_server.config import settings; print(settings.coding_workflow_max_queue)'], env=environment, text=True)
+    assert output.strip() == '7'
+    assert 'api_token' not in json.dumps(json.loads((settings.state_path / RUNTIME_FILE).read_text()))
+
+
+@pytest.mark.parametrize('values', [{'api_token': 'replacement'}, {'state_dir': '/tmp/other'},
+                                   {'require_approval': False}, {'background_max_workers': 1},
+                                   {'execution_max_workers': True}, {'job_max_count': 999999},
+                                   {'pattern_cache_seconds': '100'}, {'coding_workflow_max_queue': -1}])
+def test_runtime_settings_reject_access_changes_and_invalid_limits(ui, values):
+    client, _ = ui
+    headers = login(client)
+    before = client.get('/admin/settings').json()
+    result = client.patch('/admin/settings', headers=headers, json={'revision': before['revision'], 'values': values})
+    assert result.status_code == 422
+    assert client.get('/admin/settings').json()['revision'] == before['revision']
+
+
+def test_runtime_settings_block_active_work_and_bad_storage(ui):
+    from odoo_agent_server.runtime_settings import FILE_NAME as RUNTIME_FILE
+    client, _ = ui
+    headers = login(client)
+    before = client.get('/admin/settings').json()
+    root = settings.state_path / 'jobs'; root.mkdir(exist_ok=True)
+    (root / 'active-test.json').write_text(json.dumps({'status': 'running'}))
+    response = client.patch('/admin/settings', headers=headers, json={'revision': before['revision'], 'values': {'job_max_count': 250}})
+    assert response.status_code == 409
+    (settings.state_path / RUNTIME_FILE).write_text('{broken')
+    assert client.get('/admin/settings').status_code == 503
+    environment = {**os.environ, 'ODOO_AGENT_STATE_DIR': settings.state_dir}
+    proc = subprocess.run([sys.executable, '-c', 'from odoo_agent_server.config import settings'], env=environment, capture_output=True, text=True)
+    assert proc.returncode != 0
+
+
+def test_runtime_form_detects_environment_change_after_reload(ui, monkeypatch):
+    client, _ = ui
+    headers = login(client)
+    before = client.get('/admin/settings').json()
+    monkeypatch.setattr(settings, 'coding_workflow_max_queue', settings.coding_workflow_max_queue + 1)
+    response = client.patch('/admin/settings', headers=headers, json={'revision': before['revision'], 'values': {'job_max_count': 250}})
+    assert response.status_code == 409

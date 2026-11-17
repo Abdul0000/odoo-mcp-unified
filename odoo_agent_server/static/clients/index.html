@@ -8,7 +8,7 @@
   <script src="/clients/assets/app.js" defer></script>
 </head>
 <body>
-  <header><a class="brand" href="/clients"><span class="mark">o</span> Odoo MCP <span class="divider">/</span> <strong>Clients</strong></a><div class="header-actions"><details id="server-menu" hidden><summary>Oracle services</summary><div class="server-menu"><button id="server-update" type="button" class="quiet">Update &amp; restart</button><button id="server-restart" type="button" class="quiet">Restart services</button></div></details><button id="signout" class="quiet" hidden>Sign out</button></div></header>
+  <header><a class="brand" href="/clients"><span class="mark">o</span> Odoo MCP <span class="divider">/</span> <strong>Control center</strong></a><div class="header-actions"><details id="server-menu" hidden><summary>Oracle services</summary><div class="server-menu"><button id="server-update" type="button" class="quiet">Update &amp; restart</button><button id="server-restart" type="button" class="quiet">Restart services</button></div></details><button id="signout" class="quiet" hidden>Sign out</button></div></header>
   <main>
     <section id="login" class="login-card" hidden>
       <span class="eyebrow">CLIENT MANAGER</span>
@@ -22,8 +22,14 @@
       </form>
     </section>
     <section id="manager" hidden>
-      <div class="page-heading"><div><span class="eyebrow">CONNECTION SETTINGS</span><h1>Client manager</h1><p>Edit a client. Save your changes. Check the connection.</p></div><span class="tag">Oracle connected</span></div>
-      <div class="workspace">
+      <div class="page-heading"><div><span class="eyebrow">YOUR ORACLE WORKSPACE</span><h1 id="page-title">Client manager</h1><p id="page-description">Manage real client connections and validate access.</p></div><span class="tag">Oracle connected</span></div>
+      <nav class="section-nav" aria-label="Settings sections">
+        <button type="button" data-view="clients" aria-current="page"><span>01</span> Clients</button>
+        <button type="button" data-view="runtime"><span>02</span> Runtime &amp; performance</button>
+        <button type="button" data-view="storage"><span>03</span> Storage &amp; retention</button>
+        <button type="button" data-view="services"><span>04</span> Oracle services</button>
+      </nav>
+      <div id="clients-view" class="workspace">
         <aside class="card client-picker"><label for="client-select">Select client</label><select id="client-select" aria-label="Select client"></select><p id="client-meta" class="hint"></p><p id="client-source" class="hint"></p><button id="new-client" type="button" class="secondary add-client">+ Add client</button><div class="side-note"><span class="dot"></span><span>Changes apply immediately.<br>No restart needed.</span></div></aside>
         <div class="editor">
           <form id="client-form" class="card">
@@ -39,10 +45,26 @@
           <section id="validation" class="card validation" aria-live="polite" hidden><div class="status-heading"><span id="status-icon" class="status-icon" aria-hidden="true">•</span><h2 id="status-title">Connection check</h2></div><p id="status-message"></p><ul id="checks"></ul></section>
         </div>
       </div>
+      <section id="settings-view" hidden>
+        <div class="settings-banner"><div><strong>Server configuration</strong><p>Saved overrides apply to both API and worker after a service restart.</p></div><span id="restart-badge" class="tag" hidden>Restart pending</span></div>
+        <form id="runtime-form" class="card settings-card">
+          <div class="form-heading"><div><h2 id="runtime-title">Runtime settings</h2><p>Current Oracle values, with validated limits.</p></div><button id="reload-settings" class="quiet" type="button">Reload settings</button></div>
+          <div id="runtime-fields" class="grid"></div>
+          <div class="actions"><button id="save-settings" class="primary" type="submit">Save settings</button><span class="hint">Restart from Oracle services to apply.</span></div>
+          <p id="settings-message" role="status"></p>
+        </form>
+      </section>
+      <section id="services-view" hidden>
+        <div class="service-grid">
+          <article class="card settings-card"><span class="eyebrow">MAINTENANCE</span><h2>Oracle services</h2><p>Restart the API and worker to apply server settings, or deploy the latest MCP release from master.</p><div class="service-buttons"><button id="services-restart" class="primary" type="button">Restart services</button><button id="services-update" class="secondary" type="button">Update &amp; restart</button></div><p id="controller-note" class="hint">Checking service controller…</p></article>
+          <article class="card settings-card"><span class="eyebrow">CURRENT CONFIGURATION</span><h2>Environment overview</h2><dl id="system-overview" class="system-overview"></dl><p class="hint">Authentication, permissions and infrastructure paths are managed on Oracle.</p></article>
+        </div>
+      </section>
+      <div id="global-server-status"></div>
     </section>
     <div id="message" role="status" aria-live="polite" hidden></div>
     <div id="loading" class="loading">Opening client manager…</div>
   </main>
-  <footer>Odoo MCP · Client settings</footer>
+  <footer>Odoo MCP · Oracle control center</footer>
 </body>
 </html>
