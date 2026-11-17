@@ -14,6 +14,9 @@ run this operator helper on Oracle:
 sudo /opt/odoo-mcp/venv/bin/python /opt/odoo-mcp/current/deploy/client_manager_link.py
 ```
 
+If the service has no public base URL configured, add
+`--base-url https://YOUR-CONNECTOR-HOST` to that command.
+
 The helper prints a one-use link valid for ten minutes. The link exchanges its
 fragment for a six-hour browser session; it does not expose the permanent API
 token. Logout removes the browser cookie. Cookie authentication is admin-only,

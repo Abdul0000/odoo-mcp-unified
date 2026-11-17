@@ -7,6 +7,7 @@ this process. No service restart or client change is performed.
 """
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import pwd
@@ -15,6 +16,9 @@ import sys
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Create a one-use Client Manager sign-in link.')
+    parser.add_argument('--base-url', help='Public connector URL when no public URL is configured in the service.')
+    args = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('Run this helper with sudo to read the API service configuration.')
     pid = subprocess.check_output(['systemctl', 'show', '-p', 'MainPID', '--value', 'odoo-mcp.service'], text=True).strip()
@@ -33,7 +37,7 @@ def main():
     os.setuid(user.pw_uid)
     from odoo_agent_server.config import settings
     from odoo_agent_server.routers.client_admin import issue_login_code
-    base = settings.public_base_url or settings.oauth_issuer or 'http://127.0.0.1:8080'
+    base = args.base_url or settings.public_base_url or settings.oauth_issuer or 'http://127.0.0.1:8080'
     print(base.rstrip('/') + '/clients#login=' + issue_login_code())
 
 
