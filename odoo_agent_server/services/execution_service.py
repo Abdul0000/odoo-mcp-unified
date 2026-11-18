@@ -259,8 +259,10 @@ class ExecutionService:
             next_call = {"tool": "execution_publish", "arguments": {"workspace_id": workspace_id,
                          "message": record["request"]["task_description"][:2000],
                          "push": record.get("completion_target") != "commit",
-                         "request_id": f"publish-{workspace_id[:8]}-{verification['tree'][:16]}"}}
-        if phase in {"repair", "sync_required"}:
+                         "request_id": f"publish-{workspace_id[:8]}-{verification['tree'][:16]}-{(record.get('remote_base_sha') or '')[:8]}"}}
+        if phase == "sync_required":
+            next_call = {"tool": "execution_workspace_sync", "arguments": {"workspace_id": workspace_id, "request_id": f"sync-{workspace_id[:8]}-{os.urandom(6).hex()}"}}
+        if phase == "repair":
             next_call = {"tool": "execution_files", "arguments": {"workspace_id": workspace_id, "operation": "diff"}}
         if verification.get("needs_input") or phase in {"needs_review", "needs_input", "configuration_required"}:
             next_call = None
@@ -546,6 +548,99 @@ class ExecutionService:
             self.assert_idle(request.workspace_id)
             return self._publish(request)
 
+    def sync_background(self, request):
+        self.workspace(request.workspace_id)
+        record, created = self.store.create("operation", f"sync:{request.request_id}", request.model_dump(), data={"owner_instance": _INSTANCE, "operation_type": "sync"})
+        if created:
+            def run():
+                self.store.update(record["id"], "operation", status="running")
+                try:
+                    result = self.sync(request)
+                    self.store.update(record["id"], "operation", status="succeeded", result=result)
+                except HTTPException as exc:
+                    self.store.update(record["id"], "operation", status="needs_review", error=exc.detail)
+                except Exception:
+                    self.store.update(record["id"], "operation", status="needs_review", error="Sync interrupted; source and snapshot preserved")
+            try:
+                _submit_io(run)
+            except Exception:
+                self.store.update(record["id"], "operation", status="needs_review", error="Git queue full; retry with a fresh request_id")
+                raise
+        return self.operation_status(record["id"])
+
+    def sync(self, request):
+        """Merge in a disposable clone. Promote only a complete, conflict-free tree."""
+        wid = request.workspace_id
+        with self.store.workspace_lock(wid):
+            self.assert_idle(wid)
+            ws = self.workspace(wid)
+            root = self.root(wid)
+            client = ClientResolverService().resolve_client(ws.get("client_name"), project_path=ws["source_path"], require_complete=False)
+            target = client.authenticated_repo if client else git(["remote", "get-url", "origin"], root).strip()
+            branch = ws["source_branch"]
+            ref = "refs/odoo-mcp/sync-remote"
+            git(["-c", "core.logAllRefUpdates=false", "fetch", "--no-tags", "--no-write-fetch-head", "--", target, f"+refs/heads/{branch}:{ref}"], root, timeout=120)
+            latest = git(["rev-parse", ref], root).strip()
+            if request.resolutions and request.expected_remote_sha != latest:
+                raise HTTPException(409, {"error_code": "resolution_stale", "actual_head": latest, "message": "Remote moved; inspect conflicts again before resolving"})
+            if latest == ws.get("remote_base_sha"):
+                return {"status": "up_to_date", "workspace_id": wid, "remote_sha": latest}
+            if ws.get("sync_attempts", 0) >= 2:
+                raise HTTPException(409, "Branch keeps moving; two sync attempts reached. Coordinate concurrent writers before continuing")
+            old_head = git(["rev-parse", "HEAD"], root).strip()
+            tree = self.tree(wid)
+            identity = {"GIT_AUTHOR_NAME": settings.git_author_name, "GIT_AUTHOR_EMAIL": settings.git_author_email,
+                        "GIT_COMMITTER_NAME": settings.git_author_name, "GIT_COMMITTER_EMAIL": settings.git_author_email}
+            snapshot = git(["commit-tree", tree, "-p", old_head, "-m", "MCP preserved pre-sync work"], root, env=identity).strip()
+            git(["update-ref", f"refs/odoo-mcp/snapshots/{snapshot}", snapshot], root)
+            with tempfile.TemporaryDirectory(dir=self.store.root) as directory:
+                candidate = Path(directory) / "repo"
+                git(["clone", "--local", "--no-checkout", "--", str(root), str(candidate)], root)
+                git(["checkout", "--detach", snapshot], candidate)
+                try:
+                    git(["merge", "--no-commit", "--no-ff", latest], candidate, env=identity)
+                except HTTPException:
+                    raw = git(["diff", "--name-only", "--diff-filter=U", "-z"], candidate)
+                    conflicts = [path for path in raw.split("\0") if path]
+                    if not conflicts or len(raw) >= 32000 or len(conflicts) > 25:
+                        raise
+                    if set(request.resolutions) - set(conflicts):
+                        raise HTTPException(400, "Supply resolutions only for current conflicting files")
+                    if set(request.resolutions) != set(conflicts):
+                        details = [{"path": path, "diff": git(["diff", "--", path], candidate)[:4000]} for path in conflicts]
+                        return {"status": "merge_conflict", "workspace_id": wid, "remote_sha": latest, "snapshot_sha": snapshot,
+                                "conflicts": details, "source_preserved": True,
+                                "instruction": "Resolve both intents; call execution_workspace_sync with a new request_id, expected_remote_sha and resolutions for every conflicting path. Ask the user only for ambiguous business intent."}
+                    for path, content in request.resolutions.items():
+                        dest = candidate / path
+                        if Path(path).is_absolute() or ".git" in Path(path).parts or not dest.parent.resolve().is_relative_to(candidate.resolve()):
+                            raise HTTPException(400, "Unsafe resolution path")
+                        if content is not None and (len(content.encode()) > 2_000_000 or re.search(r"(?m)^(<{7}|={7}|>{7})( |$)", content)):
+                            raise HTTPException(400, "Resolution is too large or still contains conflict markers")
+                        mode = dest.lstat().st_mode & 0o777 if dest.exists() and not dest.is_symlink() else 0o660
+                        dest.unlink(missing_ok=True)
+                        if content is not None:
+                            dest.write_text(content)
+                            dest.chmod(mode)
+                        git(["add", "-A", "--", path], candidate)
+                merged = git(["write-tree"], candidate).strip()
+                # Local clone objects are hard-linked, but newly created trees are
+                # not: import the merged tree through a temporary commit.
+                merged_commit = git(["commit-tree", merged, "-p", snapshot, "-m", "MCP merged work"], candidate, env=identity).strip()
+                git(["fetch", "--no-tags", "--no-write-fetch-head", "--", str(candidate), merged_commit], root)
+                try:
+                    git(["reset", "--soft", latest], root)
+                    git(["read-tree", "--reset", "-u", merged], root)
+                except Exception:
+                    git(["reset", "--soft", old_head], root)
+                    git(["read-tree", "--reset", "-u", tree], root)
+                    raise
+            self.store.update(wid, "workspace", base_sha=latest, remote_base_sha=latest, check_results={}, failure_streaks={},
+                              phase="verify", error=None, published_tree=None, published_commit=None, pushed=False,
+                              sync_attempts=ws.get("sync_attempts", 0) + 1, sync_snapshot=snapshot)
+            return {"status": "synced", "workspace_id": wid, "remote_sha": latest, "snapshot_sha": snapshot,
+                    "verification_required": True, "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": wid}}}
+
     def publish_background(self, request):
         self.workspace(request.workspace_id)
         key = f"publish:{request.request_id}:{request.approval_id or 'pending'}"
@@ -580,6 +675,19 @@ class ExecutionService:
         if record["status"] in {"queued", "running"} and record.get("owner_instance") != _INSTANCE:
             record = self.store.update(operation_id, "operation", status="needs_review", error="API restarted; inspect task/local/remote SHA before creating a new request")
         active = record["status"] in {"queued", "running"}
+        if record.get("operation_type") == "sync" and not active:
+            result = record.get("result") or {}
+            out = {"status": record["status"], "operation_id": operation_id, "result": result, "error": record.get("error"),
+                   "success_allowed": False, "completion_required": True,
+                   "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": request["workspace_id"]}}}
+            if result.get("status") == "merge_conflict":
+                out.update(status="merge_conflict", next_call=None, input_required=False,
+                           argument_request={"tool": "execution_workspace_sync", "arguments": {"workspace_id": request["workspace_id"],
+                               "request_id": "resolve-" + os.urandom(8).hex(), "expected_remote_sha": result["remote_sha"]},
+                               "required_generated_arguments": ["resolutions"], "instruction": result["instruction"]})
+            elif record["status"] != "succeeded":
+                out.update(next_call=None, input_required=True)
+            return out
         if record["status"] == "verification_required":
             return {"status": "verification_required", "operation_id": operation_id, "verification": record["verification"],
                     "success_allowed": False, "completion_required": True,
@@ -634,7 +742,7 @@ class ExecutionService:
                     not workspace.get("remote_base_sha") or not advertised or advertised[0] != workspace["remote_base_sha"]
                 ):
                     raise HTTPException(409, {"error_code": "remote_advanced",
-                        "message": "Remote advanced since task preparation; preserve this task, sync/reapply in a fresh task and rerun checks",
+                        "message": "Remote advanced since task preparation; call execution_workspace_sync for this task, then rerun checks",
                         "expected_head": workspace.get("remote_base_sha"), "actual_head": advertised[0] if advertised else None})
             self.store.update(request.workspace_id, "workspace", phase="commit")
             if git(["status", "--porcelain"], root).strip():
@@ -650,7 +758,12 @@ class ExecutionService:
                 if not RepoService()._remote_matches(remote, expected):
                     raise HTTPException(409, "Task remote differs from configured source")
                 target = client.authenticated_repo if client else remote
-                git(["push", "--", target, f"HEAD:refs/heads/{branch}"], root, timeout=120)
+                try:
+                    git(["push", "--", target, f"HEAD:refs/heads/{branch}"], root, timeout=120)
+                except HTTPException as exc:
+                    if any(word in str(exc.detail) for word in ("non-fast-forward", "fetch first")):
+                        raise HTTPException(409, {"error_code": "remote_advanced", "message": "Remote moved during push; sync this workspace and rerun verification"}) from exc
+                    raise
                 received = git(["ls-remote", "--heads", "--", target, f"refs/heads/{branch}"], root).split()
                 if not received or received[0] != sha:
                     raise HTTPException(409, "Push returned without confirming the expected remote SHA")
@@ -661,7 +774,7 @@ class ExecutionService:
             self.store.update(request.workspace_id, "workspace", phase="done", completion_target="push" if request.push else "commit",
                               published_tree=verification["tree"], published_commit=sha, published_branch=branch,
                               remote_base_sha=sha if request.push and branch == workspace.get("source_branch") else workspace.get("remote_base_sha"),
-                              pushed=request.push, publishing=False)
+                              pushed=request.push, publishing=False, sync_attempts=0)
             return self.public(result)
         except Exception as exc:
             detail = getattr(exc, "detail", type(exc).__name__)

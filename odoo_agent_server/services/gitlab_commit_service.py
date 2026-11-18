@@ -203,7 +203,7 @@ class GitLabRepo:
         result = self.request("POST", "/repository/commits", {"branch": branch, "commit_message": message, "actions": actions})
         return {"commit": result["id"], "tree": result["id"]}
 
-    def push_workspace_changes(self, branch, *, message, key, build_changes, expected_base, max_rebases=4):
+    def push_workspace_changes(self, branch, *, message, key, build_changes, expected_base, max_rebases=2):
         outcome = CommitOutcome(status="no_changes")
         for attempt in range(1, max_rebases + 2):
             outcome.attempts = attempt

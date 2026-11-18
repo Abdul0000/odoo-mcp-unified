@@ -66,3 +66,11 @@ Task configuration changes invalidate old claims. task_knowledge(refresh=true)
 collects bounded source/runtime facts with provenance; manifests are declarations,
 not installed-state proof. Dirty source and failed credentials stay unverified.
 The dashboard displays persisted observations, not invented live success.
+
+For concurrent Git writers, use a fresh execution workspace. If publishing returns
+remote_advanced/sync_required, follow execution_workspace_sync and poll its operation.
+After sync, rerun the checks returned by workspace_status before publishing. If the
+sync operation returns merge_conflict, follow argument_request: inspect both intents,
+supply complete resolutions with expected_remote_sha, and use a new request_id.
+Ask only when business intent is ambiguous. Never select ours/theirs blindly or
+force-push. Lightweight ws_commit proves file lint only, not runtime correctness.

@@ -232,25 +232,19 @@ class GitService:
         fetch = self._run(["git", "fetch", remote], project, timeout_seconds)
         if fetch.exit_code != 0:
             return fetch
-        return self._run(["git", "pull", "--rebase", "--autostash", remote, branch], project, timeout_seconds)
+        return self._run(["git", "rebase", "--autostash", f"{remote}/{branch}"], project, timeout_seconds)
 
     def commit(self, project_path: str, message: str, paths: list[str], timeout_seconds: int = 60) -> CommandResult:
         project = self._project(project_path)
         branch_result = self.current_branch(str(project))
         branch = branch_result.stdout.strip() if branch_result.exit_code == 0 else None
-        # Speed fix: only pull --rebase if remote has commits we don't have.
-        # Check behind/ahead status first — skip network call if already ahead-only.
-        behind_check = self._run(["git", "rev-list", "--count", f"HEAD..origin/{branch}"], project, 10)
-        behind_count = behind_check.stdout.strip()
-        if behind_check.exit_code == 0 and behind_count == "0":
-            rebase_result = CommandResult(command=["git", "pull", "--rebase", "--skipped"], cwd=str(project), exit_code=0, stdout="Already ahead of remote — rebase skipped.\n")
-        else:
-            rebase_result = self.pull_rebase(str(project), "origin", branch, min(timeout_seconds, 120))
-        if rebase_result.exit_code != 0 and settings.target_git_repo:
-            return rebase_result
         identity_result = self.configure_identity(str(project))
         if identity_result.exit_code != 0:
             return identity_result
+        # Fetch before deciding whether remote work must be incorporated.
+        rebase_result = self.pull_rebase(str(project), "origin", branch, min(timeout_seconds, 120))
+        if rebase_result.exit_code != 0:
+            return rebase_result
         if paths:
             add_command = ["git", "add"]
             for rel in paths:
@@ -299,10 +293,8 @@ class GitService:
         with RepoLockService().locked(str(project), owner="git.push", timeout_seconds=min(timeout_seconds, 120)):
             result = self._run(command, project, timeout_seconds)
             if result.exit_code != 0 and ("non-fast-forward" in (result.stderr or "") or "fetch first" in (result.stderr or "") or "rejected" in (result.stderr or "")):
-                rebase = self.pull_rebase(str(project), remote, branch, min(timeout_seconds, 120))
-                if rebase.exit_code != 0:
-                    return rebase
-                result = self._run(command, project, timeout_seconds)
+                return CommandResult(command=command, cwd=str(project), exit_code=1,
+                                     stderr="SYNC_REQUIRED: Remote advanced. Fetch/merge in an isolated execution workspace, rerun verification, then retry normal push. No automatic unverified rebase/push was performed.")
         if result.exit_code == 0:
             sha = self.head_sha(str(project)).stdout.strip()
             result.stdout = (result.stdout or "") + f"\nPUSH_OK\nbranch={branch}\nsha={sha}\n"

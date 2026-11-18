@@ -193,6 +193,9 @@ def test_git_commit_configures_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "git_author_email", "mcp@example.local")
     repo = tmp_path / "repo"
     _init_repo(repo)
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "clone", "--bare", str(repo), str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "set-url", "origin", str(origin)], cwd=repo, check=True)
     subprocess.run(["git", "config", "--unset", "user.name"], cwd=repo, check=False)
     subprocess.run(["git", "config", "--unset", "user.email"], cwd=repo, check=False)
     (repo / "README.md").write_text("changed\n", encoding="utf-8")

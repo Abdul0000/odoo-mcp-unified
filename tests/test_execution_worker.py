@@ -273,7 +273,7 @@ def test_fresh_task_fast_forwards_without_moving_source_and_remote_race_blocks_p
         service.publish(WorkspacePublish(workspace_id=fresh["workspace_id"], message="fix", request_id="racing-push"))
     recovery = service.status(fresh["workspace_id"])
     assert not recovery["input_required"] and recovery["phase"] == "sync_required"
-    assert recovery["next_call"]["arguments"]["operation"] == "diff"
+    assert recovery["next_call"]["tool"] == "execution_workspace_sync"
     assert recovery["error"]["error_code"] == "remote_advanced"
     assert (service.root(fresh["workspace_id"]) / "remote.txt").read_text() == "one"
     (source / "hello.py").write_text("UNCOMMITTED = True\n")

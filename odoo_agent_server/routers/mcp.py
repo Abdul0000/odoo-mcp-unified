@@ -721,6 +721,22 @@ _CHATGPT_QUICK_WAIT_TOOLS = {
 
 
 _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
+    "ws.open": "Open current GitHub/GitLab module; resume saved edits. fresh=true discards WIP.",
+    "ws.status": "Read unpublished files, WIP/client/default branches and provider links.",
+    "ws.scaffold": "Generate Odoo module skeleton in the workspace; inspect/edit before commit.",
+    "ws.extend": "Add Odoo fields/methods/views in workspace; lint before commit.",
+    "ws.commit": "Lint and push workspace. Concurrent edits use three-way merge; overlaps block. Proof covers file lint only; use execution tools for runtime tests.",
+    'execution.status': 'Poll operation_id or worker capabilities.',
+    'execution.workspace_open': 'Open isolated task from fresh remote code; poll workspace_status.',
+    'execution.workspace_sync': 'Merge latest remote without losing edits; poll operation_id. Resolve conflicts with expected_remote_sha/resolutions. Rerun tests.',
+    'execution.task_plan': 'Declare checks and required layers; proof binds to current tree/runtime.',
+    'execution.workspace_status': 'Read task changes, verification and next_call; push is separate from deployment.',
+    'execution.files': 'Read/edit isolated files; existing writes require expected_sha256. Supports batch edits.',
+    'execution.publish': 'Queue verified commit/push; poll operation_id. push=false commits only. Remote changes require sync and fresh tests.',
+    'execution.process_start': 'Queue container command; no network or host credentials.',
+    'execution.process_poll': 'Read bounded command output and exit status.',
+    'execution.process_input': 'Send bounded stdin; eof closes input.',
+    'execution.process_cancel': 'Cancel command and its container.',
     "task.open": "Pin client/target and open a durable task.",
     "task.run": "Run scoped tool; preserve step_id and follow tool_result.",
     "task.status": "Reconcile task proof read-only.",

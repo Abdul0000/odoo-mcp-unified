@@ -329,7 +329,7 @@ def push_changes(
     key: str,
     build_changes: Callable[[dict[str, str], Callable[[], dict[str, dict[str, str]]], bool], tuple[list[FileChange], list[dict[str, Any]]]],
     expected_base: str | None,
-    max_rebases: int = 4,
+    max_rebases: int = 2,
 ) -> CommitOutcome:
     """Commit onto ``branch`` and move the ref without force, surviving a moving head.
 

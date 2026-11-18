@@ -26,6 +26,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
+from .three_way_merge import merge_text
 from . import lint_service as lint
 from . import outline_service, scaffold_service, symbol_service
 from concurrent.futures import ThreadPoolExecutor
@@ -835,7 +836,7 @@ class WorkspaceService:
                     results.append({"i": index, "path": path, "ok": False, **err})
                     continue
                 staged[path] = new_text
-                applied.append({**edit, "op": infer_op(edit)})  # journal entries always carry an explicit op
+                applied.append({**edit, "op": infer_op(edit), **({"base_content": current} if infer_op(edit) in {"write", "delete"} else {})})  # journal entries always carry an explicit op
                 results.append({"i": index, "path": path, "ok": True, "op": infer_op(edit)})
                 if healed:
                     healed_edits.append({"i": index, "path": path, "note": "search differed only by whitespace/indentation; matched the one place it fits and kept the file's indentation"})
@@ -1089,9 +1090,9 @@ class WorkspaceService:
             if plain and ops[0].get("op") == "write" and final != "\0missing":
                 if final is None:
                     if path in ws.tree:
-                        out.append({"path": path, "op": "delete"})
+                        out.append({"path": path, "op": "delete", "base_content": ws.base_for(path)})
                 else:
-                    out.append({"path": path, "op": "write", "content": final})
+                    out.append({"path": path, "op": "write", "content": final, "base_content": ws.base_for(path)})
                 continue
             seen = set()
             for o in ops:
@@ -1197,15 +1198,21 @@ class WorkspaceService:
             return None
         ops = data.get("ops", [])
         ws.wip_head = head["commit"]
-        conflicts = self._replay(ws, ops)
+        conflicts = self._replay(ws, ops, base_changed=data.get("base") != ws.base_commit)
         return {"ops": len(ops), "replayed": len(ops) - len(conflicts), "conflicts": conflicts, "from_base": str(data.get("base", ""))[:12], "note": "unfinished work restored from the WIP branch; ws_open fresh=true discards it"}
 
-    def _replay(self, ws: Workspace, ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _replay(self, ws: Workspace, ops: list[dict[str, Any]], *, base_changed=False) -> list[dict[str, Any]]:
         conflicts = []
         for i, op in enumerate(ops):
             path = op["path"]
             current = ws.overlay[path] if path in ws.overlay else (ws.load([path]).get(path) if ws.exists(path) else None)
-            new_text, err = apply_edit(current, op)
+            if infer_op(op) in {"write", "delete"} and "base_content" in op:
+                new_text, bad = merge_text(op["base_content"], op.get("content") if infer_op(op) == "write" else None, current)
+                err = {"code": "merge_conflict", "msg": "Saved full-file edit conflicts with current upstream; original WIP preserved"} if bad else None
+            elif base_changed and infer_op(op) in {"write", "delete"}:
+                new_text, err = None, {"code": "merge_conflict", "msg": "Legacy full-file journal has no preimage; refusing to overwrite newer code"}
+            else:
+                new_text, err = apply_edit(current, op)
             if err:
                 conflicts.append({"i": i, "path": path, **{k: v for k, v in err.items() if k != "closest"}})
                 continue
@@ -1254,10 +1261,6 @@ class WorkspaceService:
                     return {"status": "error", "error_code": "branch_exists", "error": f"branch '{target_branch}' already exists; open a workspace on it with ws_open(branch='{target_branch}') or choose a new branch name"}
                 repo.move_ref(target_branch, ws.base_commit, create=True)
             expected = ws.base_commit
-            overwrote: list[str] = []
-            journal_by_path: dict[str, list[dict[str, Any]]] = {}
-            for op in ws.journal:
-                journal_by_path.setdefault(op["path"], []).append(op)
 
             def build(head: dict[str, str], get_tree, moved: bool):
                 if not moved:
@@ -1271,24 +1274,13 @@ class WorkspaceService:
                     if upstream_same:
                         changes.append(FileChange(path, final))
                         continue
-                    ops = journal_by_path.get(path, [])
                     current = repo.blob_text(head_tree[path]["sha"]) if path in head_tree else None
-                    if not ops:
-                        changes.append(FileChange(path, final))
-                        continue
-                    if ops[0].get("op") == "write" or (ops[0].get("content") is not None and ops[0].get("search") is None):
-                        overwrote.append(path)
-                    text, bad = current, None
-                    for n, op in enumerate(ops):
-                        text, bad = apply_edit(text, op)
-                        if bad:
-                            conflicts.append({"path": path, "op_index": n, "reason": bad["msg"], "code": bad["code"], "upstream_snippets": bad.get("closest", [])})
-                            break
-                    if bad:
-                        continue
-                    if text is None and path not in head_tree:
-                        continue
-                    changes.append(FileChange(path, text))
+                    base = ws.base_for(path) if path in ws.tree else None
+                    merged, conflict = merge_text(base, final, current)
+                    if conflict:
+                        conflicts.append({"path": path, "reason": "Concurrent edits overlap or modify/delete the same file; both versions preserved", "code": "merge_conflict"})
+                    elif merged != current:
+                        changes.append(FileChange(path, merged))
                 if not conflicts:
                     post = []
                     for ch in changes:
@@ -1300,13 +1292,10 @@ class WorkspaceService:
                 return changes, conflicts
 
             outcome = (repo.push_workspace_changes(target_branch, message=message, key=key, build_changes=build, expected_base=expected) if hasattr(repo, "push_workspace_changes") else push_changes(repo, target_branch, message=message, key=key, build_changes=build, expected_base=expected))
-            result: dict[str, Any] = {"status": outcome.status, "branch": target_branch, "attempts": outcome.attempts, "api_calls": outcome.api_calls}
+            result: dict[str, Any] = {"status": outcome.status, "branch": target_branch, "attempts": outcome.attempts, "api_calls": outcome.api_calls, "verification_scope": "file_lint_only"}
             if outcome.status in {"pushed", "already_pushed", "no_changes"} and outcome.commit:
                 result.update({"commit": outcome.commit, "commit_short": outcome.commit[:12], "rebased_onto_newer_head": outcome.rebased})
-                if overwrote:
-                    result["overwrote_upstream_changes"] = sorted(set(overwrote))
-                if outcome.status != "no_changes":
-                    self._after_push(ws, target_branch, outcome)
+                self._after_push(ws, target_branch, outcome)
                 result["published"] = True
                 result["urls"] = {"commit": repo.web_url("commit", outcome.commit), "branch": repo.web_url("tree", target_branch)}
                 default = repo.default_branch()
@@ -1338,7 +1327,7 @@ class WorkspaceService:
             ws.tree = ws.repo.tree(head["tree"])
             ws.files.clear()
             ws.base_text.clear()
-        for path, text in list(ws.overlay.items()):
+        for path, text in (list(ws.overlay.items()) if outcome.status == "pushed" and not outcome.rebased else []):
             if text is None:
                 ws.files.pop(path, None)
                 ws.base_text.pop(path, None)

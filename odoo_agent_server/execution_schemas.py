@@ -71,6 +71,12 @@ class WorkspacePublish(WorkspaceId):
     approval_id: str | None = None
 
 
+class WorkspaceSync(WorkspaceId):
+    request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    expected_remote_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{40,64}$")
+    resolutions: dict[str, str | None] = Field(default_factory=dict, max_length=25)
+
+
 class ProcessStart(WorkspaceId):
     argv: list[str] = Field(min_length=1, max_length=100)
     cwd: str = "."

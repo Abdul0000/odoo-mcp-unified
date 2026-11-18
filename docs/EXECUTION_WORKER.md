@@ -214,3 +214,29 @@ missing runtime dependencies require configuration recovery, rather than consumi
 the source repair budget. Generic Python/Node capability does not imply an Odoo
 ORM/database runtime. ChatGPT-driven MCP execution needs no model API key; the
 independent background agent above remains optional.
+
+## Concurrent writers on the same branch
+
+Fresh task workspaces fetch the configured remote branch before editing. Publishing
+checks the remote head and never force-pushes. If it moved, follow the returned
+`execution_workspace_sync` call and poll its `operation_id`. Sync creates a Git
+snapshot of committed, uncommitted and untracked source, merges latest upstream in
+a disposable clone, and promotes only a complete merged tree. The user's source
+checkout stays unchanged. A successful sync invalidates all prior check results;
+run the declared checks again before publishing. Ordinary synchronization needs no
+user decision. Two successful resynchronizations are allowed between publishes;
+continued concurrent writes require coordination rather than endless retries.
+
+Overlapping changes return `merge_conflict`, bounded diffs and an
+`argument_request`. The chat agent supplies complete per-file `resolutions` and
+`expected_remote_sha` with a new request ID. A changed remote SHA rejects stale
+resolutions. Modify/delete, add/add, binary conflicts and ambiguous business intent
+must be resolved explicitly. Original work is retained in task Git snapshot refs.
+No automatic ours/theirs selection or force-push is used.
+
+The lightweight GitHub/GitLab API workspace also merges base/local/upstream text
+instead of replaying full writes over newer files, including restored WIP writes.
+Its `verification_scope=file_lint_only` reports the actual validation boundary;
+use the execution lane when runtime tests are required. The legacy Git push path
+returns `SYNC_REQUIRED` after a remote rejection; it cannot rebase and immediately
+push untested merged source.

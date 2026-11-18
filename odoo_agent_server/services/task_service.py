@@ -23,6 +23,7 @@ POLL_TOOLS = {"execution.workspace_status", "execution.process_poll", "execution
 RUN_TOOLS = POLL_TOOLS | {
     "client.check",
     "execution.workspace_open",
+    "execution.workspace_sync",
     "execution.files",
     "execution.task_plan",
     "execution.process_start",
