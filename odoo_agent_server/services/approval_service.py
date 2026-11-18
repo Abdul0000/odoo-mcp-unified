@@ -10,6 +10,15 @@ from ..schemas import ApprovalRecord, ApprovalStatus
 from .store_service import JsonStore
 
 
+# User-requested source editing and ordinary publishing need no second approval.
+# Explicit force gates (for protected branches) remain authoritative.
+ROUTINE_CODING_ACTIONS = frozenset({
+    'repo.prepare', 'repo.write', 'repo.delete', 'repo.apply_patch', 'repo.apply_patch_atomic',
+    'repo.write_many_fast_safe', 'repo.write_many_smart', 'repo.write_many_atomic',
+    'repo.clean_pyc', 'git.commit', 'git.push',
+})
+
+
 class ApprovalService:
     def __init__(self) -> None:
         self.store = JsonStore()
@@ -34,7 +43,7 @@ class ApprovalService:
             for item in required_actions
         )
         approval_required = force or (
-            bool(settings.require_approval)
+            action not in ROUTINE_CODING_ACTIONS and bool(settings.require_approval)
             and (not required_actions or action_is_required)
         )
         if not approval_required:

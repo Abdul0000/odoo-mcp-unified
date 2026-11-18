@@ -1175,6 +1175,9 @@ def list_tools(include_deprecated: bool = False, strict_names: bool = True) -> l
     required = settings.approval_required_actions if settings.require_approval else set()
 
     def approval_required(name: str) -> bool:
+        from ..services.approval_service import ROUTINE_CODING_ACTIONS
+        if name in ROUTINE_CODING_ACTIONS:
+            return False
         return name in required or any(
             rule.endswith(".*") and (
                 name.startswith(rule[:-1]) or rule.startswith(name + ".")

@@ -124,13 +124,13 @@ class BrowserExtensionService:
         devices = []
         for path in (self.root / 'devices').glob('*.json'):
             row = self.read(path)
-            if canonical and row['scope']['client_name'] != canonical:
+            if canonical and row['scope']['client_name'] not in {canonical, 'General browser'}:
                 continue
             connection = _CONNECTIONS.get(row['id'])
             devices.append({'device_id': row['id'], 'label': row['label'], **row['scope'], 'revoked': row['revoked'],
                             'connected': bool(connection and time.time() - connection['heartbeat'] < 60),
                             'busy_command_id': connection.get('busy') if connection else None})
-        return {'status': 'ok', 'devices': devices, 'setup_url': '/browser-extension', 'success_allowed': False,
+        return {'status': 'ok', 'devices': devices, 'connected_device_count': sum(bool(d['connected'] and not d['revoked']) for d in devices), 'setup_url': '/browser-extension', 'success_allowed': False,
                 'usage': {'tabs': {}, 'snapshot': {'tab_id': 'from tabs'}, 'click': {'tab_id': 'from tabs', 'snapshot_id': 'from snapshot', 'ref': 'from snapshot'},
                           'fill': {'tab_id': 'from tabs', 'snapshot_id': 'from snapshot', 'ref': 'from snapshot', 'text': 'new value'},
                           'select': {'tab_id': 'from tabs', 'snapshot_id': 'from snapshot', 'ref': 'from snapshot', 'value': 'option value from snapshot'},
@@ -199,10 +199,12 @@ class BrowserExtensionService:
         scope, _ = profile(request.client_name)
         if request.device_id:
             device = self.device(request.device_id)
-            if device['scope']['client_name'] != scope['client_name']:
+            if device['scope']['client_name'] not in {scope['client_name'], 'General browser'}:
                 raise HTTPException(403, 'Browser device belongs to another client')
         else:
             candidates = [item for item in self.status(scope['client_name'])['devices'] if item['connected'] and not item['revoked']]
+            dedicated = [item for item in candidates if item['client_name'] == scope['client_name']]
+            candidates = dedicated or candidates
             if len(candidates) != 1:
                 return {'status': 'select_browser' if candidates else 'browser_offline', 'devices': candidates,
                         'setup_url': '/browser-extension', 'success_allowed': False,
@@ -226,7 +228,7 @@ class BrowserExtensionService:
             raise HTTPException(422, 'An expected field value requires its snapshot ref')
         if action == 'assert' and not (args.get('expected_text') is not None or args.get('expected_value') is not None):
             raise HTTPException(422, 'assert requires expected_text or expected_value')
-        if action in INTERACTIONS and scope['environment'] != 'browser' and not settings.functional_operations_enabled:
+        if action in INTERACTIONS and device['scope']['environment'] != 'browser' and not settings.functional_operations_enabled:
             raise HTTPException(403, 'Functional operations are disabled in server settings')
         if action in MUTATIONS and not request.request_id:
             raise HTTPException(422, 'Browser mutations require a stable request_id')

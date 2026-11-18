@@ -92,3 +92,12 @@ read-only, or use inline checks and external temporary files. Keep all declared
 acceptance checks; do not replace a blocked compile check with AST-only validation.
 The execution runtime sets PYTHONPYCACHEPREFIX to writable container /tmp so
 explicit py_compile works with read-only source. Never stage bytecode or caches.
+
+## Routine coding authorization
+
+Requested source edits and ordinary staging commit/push need no second approval.
+Do not proactively create approval requests for these actions. Preserve exact-tree
+verification and conflict guards. Explicit protected-branch and business-record
+approval gates still apply when the server returns them. An old routine publish
+approval response now supplies a retry next_call; follow it instead of asking the
+user to approve an obsolete request.

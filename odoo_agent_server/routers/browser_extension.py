@@ -43,7 +43,7 @@ def script():
 def download():
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for name in ('manifest.json', 'background.js', 'page.js', 'popup.html', 'popup.js', 'popup.css'):
+        for name in ('manifest.json', 'background.js', 'page.js', 'popup.html', 'popup.js', 'popup.css', 'icon128.png'):
             archive.write(EXTENSION / name, name)
     return Response(buffer.getvalue(), media_type='application/zip', headers={'Content-Disposition': 'attachment; filename="odoo-mcp-chrome.zip"', 'Cache-Control': 'no-store'})
 

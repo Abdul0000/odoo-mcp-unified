@@ -717,6 +717,14 @@ class ExecutionService:
                     "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": request["workspace_id"]}}}
         if record["status"] == "approval_required":
             approval = record["approval"]
+            from .approval_service import ROUTINE_CODING_ACTIONS
+            branch = request.get("branch") or self.workspace(request["workspace_id"])["branch"]
+            protected = {"main", "master", "production", "prod", "live"} | settings.protected_branches
+            if approval.get("action") in ROUTINE_CODING_ACTIONS and not (request.get("push", True) and branch.lower() in protected):
+                return {"status": "retry_required", "operation_id": operation_id, "success_allowed": False,
+                        "input_required": False, "completion_required": True,
+                        "message": "Routine coding approval gate removed; retry the verified publish.",
+                        "next_call": {"tool": "execution_publish", "arguments": {**request, "approval_id": approval["approval_id"]}}}
             return {**approval, "status": "approval_required", "operation_id": operation_id,
                     "success_allowed": False, "completion_required": True, "input_required": True,
                     "input_request": {"kind": "approval", "approval_id": approval["approval_id"],

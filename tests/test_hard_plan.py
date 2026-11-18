@@ -90,27 +90,25 @@ def test_apply_patch_check_only_does_not_mutate_and_escape_rejected(tmp_path, mo
     assert rejected.status_code == 400
 
 
-def test_approval_is_single_use_when_global_approval_enabled(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
+def test_business_action_approval_is_still_single_use(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    from odoo_agent_server.services.approval_service import ApprovalService
     monkeypatch.setattr(settings, "require_approval", True)
+    monkeypatch.setattr(settings, "approval_required_actions_raw", "odoo.record_action.*")
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
-    project = tmp_path / "repo"
-    project.mkdir()
-    client = TestClient(app)
-
-    blocked = client.post("/repo/write", headers=_auth(), json={"project_path": str(project), "relative_path": "a.txt", "content": "one"})
-    approval_id = blocked.json()["detail"]["approval_id"]
-    client.post("/approvals/approve", headers=_auth(), json={"approval_id": approval_id})
-
-    first = client.post("/repo/write", headers=_auth(), json={"project_path": str(project), "relative_path": "a.txt", "content": "one", "approval_id": approval_id})
-    assert first.status_code == 200
-    second = client.post("/repo/write", headers=_auth(), json={"project_path": str(project), "relative_path": "b.txt", "content": "two", "approval_id": approval_id})
-    assert second.status_code == 403
-    assert "consumed" in second.text
-    monkeypatch.setattr(settings, "require_approval", False)
+    service = ApprovalService()
+    action = "odoo.record_action.sale.order.action_confirm"
+    with pytest.raises(HTTPException) as error:
+        service.ensure_allowed(action, None)
+    approval_id = error.value.detail["approval_id"]
+    service.store.set_approval_status(approval_id, ApprovalStatus.approved)
+    service.ensure_allowed(action, approval_id)
+    service.mark_consumed(approval_id)
+    with pytest.raises(HTTPException, match="consumed"):
+        service.ensure_allowed(action, approval_id)
 
 
-@pytest.mark.integration
+
 def test_protected_branch_push_requires_real_approved_git_push_approval_even_when_global_approval_off(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
@@ -138,8 +136,8 @@ def test_tools_list_reflects_runtime_approval_policy(monkeypatch):
     response = client.get("/tools/list", headers=_auth())
     assert response.status_code == 200
     by_name = {item["name"]: item for item in response.json()}
-    assert by_name["git_push"]["requires_approval"] is True
-    assert by_name["repo_apply_patch_atomic"]["requires_approval"] is True
+    assert by_name["git_push"]["requires_approval"] is False
+    assert by_name["repo_apply_patch_atomic"]["requires_approval"] is False
     assert by_name["repo_read"]["read_only"] is True
 
 
@@ -288,7 +286,7 @@ def test_absolute_patch_paths_are_rejected(tmp_path, monkeypatch):
     assert "Unsafe path" in response2.text
 
 
-def test_tool_bridge_respects_write_approval_gate(tmp_path, monkeypatch):
+def test_tool_bridge_allows_requested_writes_without_duplicate_approval(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
     monkeypatch.setattr(settings, "require_approval", True)
@@ -303,9 +301,8 @@ def test_tool_bridge_respects_write_approval_gate(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "failed"
-    assert "approval_required" in payload["error"]
-    assert not (project / "a.txt").exists()
+    assert payload["status"] == "ok"
+    assert (project / "a.txt").read_text() == "blocked"
     monkeypatch.setattr(settings, "require_approval", False)
 
 

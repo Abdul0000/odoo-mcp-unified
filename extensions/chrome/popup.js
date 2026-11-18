@@ -8,7 +8,7 @@ async function render() {
   for (const [id, profile] of Object.entries(saved)) {
     const article = document.createElement('article');
     const title = document.createElement('strong'); title.textContent = profile.client_name;
-    const status = document.createElement('p'); status.textContent = state.connected?.includes(id) ? 'Connected' : (profile.paused ? 'Paused' : 'Reconnecting…');
+    const status = document.createElement('p'); status.dataset.device = id; status.textContent = state.connected?.includes(id) ? 'Connected' : (profile.paused ? 'Paused' : 'Reconnecting…');
     const url = document.createElement('p'); url.className = 'origin'; url.textContent = profile.origins.join(', ');
     const label = document.createElement('label'); const controls = document.createElement('input'); controls.type = 'checkbox'; controls.checked = !!profile.allow_actions;
     label.append(controls, document.createTextNode('Allow browser actions'));
@@ -20,13 +20,13 @@ async function render() {
         const latest = await profiles(); latest[id].paused = false; latest[id].allow_actions = controls.checked;
         await chrome.storage.local.set({profiles: latest});
         await chrome.runtime.sendMessage({type: 'refresh', device_id: id});
-        message('Connecting. Keep Chrome open; the MCP can now inspect your browser.'); await render();
+        message('Connecting… Waiting for the MCP server to confirm.'); await render();
       } catch (e) {message(e.message);}
     };
     const pause = document.createElement('button'); pause.textContent = 'Pause'; pause.className = 'secondary';
     pause.onclick = async () => {
       const latest = await profiles(); latest[id].paused = true; await chrome.storage.local.set({profiles: latest});
-      await chrome.runtime.sendMessage({type: 'refresh', device_id: id}); message('Client connection paused.'); await render();
+      await chrome.runtime.sendMessage({type: 'refresh', device_id: id}); await chrome.storage.local.remove('connectionNotice:' + id); message('Browser connection paused.'); await render();
     };
     const remove = document.createElement('button'); remove.textContent = 'Remove'; remove.className = 'secondary';
     remove.onclick = async () => {
@@ -35,7 +35,23 @@ async function render() {
     };
     article.append(title, status, url, label, connect, pause, remove); $('profiles').append(article);
   }
+  await updateConnectionState();
 }
+let lastConnectionState;
+async function updateConnectionState() {
+  const saved = await profiles();
+  const state = await chrome.runtime.sendMessage({type: 'status'});
+  for (const element of document.querySelectorAll('[data-device]')) {
+    const id = element.dataset.device;
+    element.textContent = state.connected?.includes(id) ? 'Connected' : saved[id]?.paused ? 'Paused' : state.errors?.[id] || 'Connecting…';
+  }
+  const key = JSON.stringify([state.connected || [], state.errors || {}, Object.values(saved).map(p => !!p.paused)]);
+  if (key !== lastConnectionState) {
+    lastConnectionState = key;
+    message(state.connected?.length ? 'Connected to MCP. Your browser is ready.' : Object.keys(saved).length ? 'Browser offline or paused. Connect to enable MCP access.' : 'Pair your browser to begin.');
+  }
+}
+setInterval(() => updateConnectionState().catch(() => {}), 1500);
 $('pair').onsubmit = async event => {
   event.preventDefault();
   try {

@@ -39,3 +39,18 @@ def test_tools_list_advertises_wildcard_action_approval(monkeypatch):
     assert response.status_code == 200
     items = {row["name"]: row for row in response.json()}
     assert items["odoo_record_action"]["requires_approval"] is True
+
+
+def test_routine_coding_ignores_legacy_gates_but_force_still_requires_approval(tmp_path, monkeypatch):
+    from odoo_agent_server.services.approval_service import ROUTINE_CODING_ACTIONS
+    monkeypatch.setattr(settings, 'state_dir', str(tmp_path))
+    monkeypatch.setattr(settings, 'require_approval', True)
+    monkeypatch.setattr(settings, 'approval_required_actions_raw', 'git.*,repo.*,odoo.record_action.*')
+    service = ApprovalService()
+    for action in ROUTINE_CODING_ACTIONS:
+        service.ensure_allowed(action, None)
+    with pytest.raises(HTTPException) as error:
+        service.ensure_allowed('git.push', None, force=True)
+    assert error.value.detail['approval_required']
+    rows = TestClient(app).get('/tools/list', headers={'Authorization':'Bearer '+settings.api_token}).json()
+    assert not next(row for row in rows if row['name']=='git_push')['requires_approval']

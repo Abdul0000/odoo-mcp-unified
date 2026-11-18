@@ -147,7 +147,7 @@ def test_extension_download_contains_only_fixed_packaged_assets(relay):
     response = client.get('/browser-extension/extension.zip')
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.content)) as package:
-        assert len(package.namelist()) == 6
+        assert set(package.namelist()) == {'manifest.json', 'background.js', 'page.js', 'popup.html', 'popup.js', 'popup.css', 'icon128.png'}
         manifest = json.loads(package.read('manifest.json'))
         assert manifest['manifest_version'] == 3 and 'cookies' not in manifest['permissions']
         assert not manifest.get('host_permissions')
@@ -263,3 +263,23 @@ def test_general_fixed_code_needs_no_odoo_client_and_supports_any_website(relay,
         assert call(client, 'poll', client_name=None, command_id=opened['command_id'])['status'] == 'succeeded'
         forbidden = client.post('/tools/call', headers={'Authorization': 'Bearer ' + settings.api_token}, json={'name': 'browser_extension', 'arguments': {'action': 'open', 'request_id': 'not-chrome-internal', 'arguments': {'url': 'chrome://extensions'}}})
         assert forbidden.json()['status'] == 'failed'
+
+
+def test_general_browser_is_visible_and_usable_from_client_context(relay, monkeypatch):
+    service, _, client = relay
+    pair = service.pair(service.pair_code(None)['code'], EXT, 'General Chrome')
+    monkeypatch.setattr(settings, 'functional_operations_enabled', False)
+    with client.websocket_connect('/browser-extension/connect', headers={'Origin':'chrome-extension://'+EXT}) as ws:
+        authenticate(ws, pair)
+        status = call(client, 'status')
+        assert any(device['device_id']==pair['device_id'] and device['connected'] for device in status['devices'])
+        opened = call(client, 'open', request_id='client-context-gemini', arguments={'url':'https://gemini.google.com/'})
+        command = ws.receive_json()
+        assert command['action']=='open' and command['arguments']['allow_cross_origin']
+        finish(ws, command, {'performed':True, 'tab_id':12, 'url':'https://gemini.google.com/'})
+        assert call(client, 'poll', command_id=opened['command_id'])['status']=='succeeded'
+        call(client, 'snapshot', arguments={'tab_id':12})
+        command = ws.receive_json(); finish(ws, command, {'snapshot_id':'general-context', 'elements':[]})
+        clicked = call(client, 'click', request_id='client-general-click', arguments={'tab_id':12,'snapshot_id':'general-context','ref':'e1'})
+        command = ws.receive_json(); finish(ws, command, {'performed':True})
+        assert call(client, 'poll', command_id=clicked['command_id'])['status']=='succeeded'

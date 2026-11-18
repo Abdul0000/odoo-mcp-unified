@@ -3,6 +3,21 @@ const connections = new Map();
 const TTL = 48 * 60 * 60 * 1000;
 const writes = new Set(['open', 'navigate', 'click', 'fill', 'select', 'press', 'scroll']);
 const queues = new Map();
+const connectionErrors = new Map();
+async function announceConnection(config) {
+  // Debounce network flaps/reloads, but notify again after a deliberate pause.
+  const key = 'connectionNotice:' + config.device_id;
+  const saved = await chrome.storage.local.get(key);
+  if (Date.now() - (saved[key] || 0) < 60000) return;
+  await chrome.storage.local.set({[key]: Date.now()});
+  try {
+    await chrome.notifications.create('connected-' + config.device_id, {
+      type: 'basic', iconUrl: chrome.runtime.getURL('icon128.png'),
+      title: 'Odoo MCP Browser connected',
+      message: 'Your browser is connected to your MCP server. ' + (config.allow_actions ? 'Browser actions are enabled.' : 'Read-only access is enabled.'),
+    });
+  } catch {} // OS notification settings must never break the browser relay.
+}
 
 const state = async () => (await chrome.storage.local.get(['profiles', 'receipts']));
 const allowed = (url, config) => { try {const u = new URL(url); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password && (config.origins.includes('*') || config.origins.includes(u.origin));} catch {return false;} };
@@ -70,11 +85,12 @@ async function connect(config) {
   const url = new URL(config.server); url.protocol = 'wss:'; url.pathname = '/browser-extension/connect'; url.search = ''; url.hash = '';
   const ws = new WebSocket(url); ws.authenticated = false;
   connections.set(config.device_id, ws);
-  const keepalive = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'ping'})); }, 20000);
+  const keepalive = setInterval(() => { if (ws.authenticated && Date.now() - ws.lastHeartbeat > 60000) {ws.close(); return;} if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'ping'})); }, 20000);
   ws.onopen = () => ws.send(JSON.stringify({type: 'authenticate', device_id: config.device_id, token: config.device_token}));
   ws.onmessage = event => {
     let message; try { message = JSON.parse(event.data); } catch { ws.close(); return; }
-    if (message.type === 'ready') {ws.authenticated = true; config.clock_offset = Date.now() - message.server_time * 1000; return;}
+    if (message.type === 'pong') {ws.lastHeartbeat = Date.now(); return;}
+    if (message.type === 'ready') {ws.lastHeartbeat = Date.now(); ws.authenticated = true; connectionErrors.delete(config.device_id); config.clock_offset = Date.now() - message.server_time * 1000; void announceConnection(config); return;}
     if (message.type !== 'command') return;
     const pending = (queues.get(config.device_id) || Promise.resolve()).catch(() => {}).then(async () => {
       try {
@@ -87,7 +103,13 @@ async function connect(config) {
     queues.set(config.device_id, pending);
     pending.finally(() => {if (queues.get(config.device_id) === pending) queues.delete(config.device_id);});
   };
-  ws.onclose = event => { clearInterval(keepalive); if (connections.get(config.device_id) === ws) connections.delete(config.device_id); if (event.code !== 1008) setTimeout(reconnect, 3000); };
+  ws.onclose = event => {
+    clearInterval(keepalive);
+    if (connections.get(config.device_id) !== ws) return;
+    connections.delete(config.device_id);
+    connectionErrors.set(config.device_id, event.code === 1008 ? 'Pairing rejected. Pair this browser again.' : 'Connection lost. Reconnecting…');
+    if (event.code !== 1008) setTimeout(reconnect, 3000);
+  };
   ws.onerror = () => ws.close();
 }
 async function reconnect() {
@@ -105,7 +127,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       if (message.device_id) {const ws = connections.get(message.device_id); if (ws) ws.close(); connections.delete(message.device_id);} else {for (const ws of connections.values()) ws.close(); connections.clear();}
       await reconnect();
     }
-    return {connected: [...connections].filter(([, ws]) => ws.readyState === WebSocket.OPEN && ws.authenticated).map(([id]) => id)};
+    return {errors: Object.fromEntries(connectionErrors), connected: [...connections].filter(([, ws]) => ws.readyState === WebSocket.OPEN && ws.authenticated && Date.now() - ws.lastHeartbeat < 60000).map(([id]) => id)};
   })().then(reply, error => reply({error: String(error.message)}));
   return true;
 });

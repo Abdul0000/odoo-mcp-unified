@@ -35,34 +35,17 @@ def _make_module(root: Path) -> None:
     )
 
 
-def test_approval_gate_can_block_and_then_allow_write(tmp_path, monkeypatch):
+def test_requested_write_needs_no_second_approval(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
     monkeypatch.setattr(settings, "require_approval", True)
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
     project = tmp_path / "repo"
     project.mkdir()
-    client = TestClient(app)
+    response = TestClient(app).post("/repo/write", headers=_auth(),
+        json={"project_path":str(project), "relative_path":"a.txt", "content":"hello"})
+    assert response.status_code == 200
+    assert (project / "a.txt").read_text() == "hello"
 
-    blocked = client.post(
-        "/repo/write",
-        headers=_auth(),
-        json={"project_path": str(project), "relative_path": "a.txt", "content": "hello"},
-    )
-    assert blocked.status_code == 409
-    approval_id = blocked.json()["detail"]["approval_id"]
-
-    approved = client.post("/approvals/approve", headers=_auth(), json={"approval_id": approval_id, "reason": "test"})
-    assert approved.status_code == 200
-    assert approved.json()["status"] == "approved"
-
-    allowed = client.post(
-        "/repo/write",
-        headers=_auth(),
-        json={"project_path": str(project), "relative_path": "a.txt", "content": "hello", "approval_id": approval_id},
-    )
-    assert allowed.status_code == 200
-    assert (project / "a.txt").read_text(encoding="utf-8") == "hello"
-    monkeypatch.setattr(settings, "require_approval", False)
 
 
 def test_tool_call_bridge_can_run_self_qa(tmp_path, monkeypatch):

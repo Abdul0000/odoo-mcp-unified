@@ -59,8 +59,9 @@ class FakeSocket {
   close() {this.readyState = 3; this.onclose?.({code: 1008});}
 }
 globalThis.WebSocket = FakeSocket;
-let storageProtected = false;
+let storageProtected = false; const notifications = [];
 globalThis.chrome = {
+  notifications: {create: async (id, options) => {notifications.push({id, ...options});}},
   storage: {local: {setAccessLevel: async opts => {storageProtected = opts.accessLevel === 'TRUSTED_CONTEXTS';}, get: async () => structuredClone(saved), set: async values => Object.assign(saved, structuredClone(values))}},
   tabs: {query: async () => [{id: 12, url: 'https://client.test/web', title: 'Odoo'}, {id: 13, url: 'https://unrelated.test', title: 'Private other tab'}, {id: 14, url: 'chrome://extensions', title: 'Chrome settings'}],
     create: async ({url}) => {created++; return {id: 20, url};}, get: async id => id === 20 ? {id: 20, url: 'https://client.test/web', status: loadReady ? 'complete' : 'loading'} : {id: 12, windowId: 1, url: 'https://unrelated.test', status: 'complete'}, onUpdated: {addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn)}},
@@ -71,6 +72,8 @@ let background = fs.readFileSync(new URL('background.js', folder), 'utf8').repla
 await import('data:text/javascript;base64,' + Buffer.from(background).toString('base64')).catch(error => {throw new Error(error.message);});
 const wait = async predicate => {for (let i = 0; i < 200; i++) {if (predicate()) return; await new Promise(r => setTimeout(r, 5));} throw new Error('Timed out waiting for extension callback');};
 await wait(() => sockets[0]?.authenticated);
+await wait(() => notifications.length === 2);
+assert.ok(notifications.every(n => n.title.includes('connected')));
 assert.equal(storageProtected, true); const ws = sockets[0];
 const issue = async (command_id, action, args, target = ws) => {
   const before = target.sent.filter(e => e.type === 'result').length;

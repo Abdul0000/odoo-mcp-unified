@@ -384,6 +384,7 @@ def test_mcp_publish_approval_is_structured_and_resumes_exact_request(execution,
     verify(service, ws, monkeypatch)
     monkeypatch.setattr(settings, "require_approval", True)
     monkeypatch.setattr(settings, "approval_required_actions_raw", "git.push")
+    monkeypatch.setattr(settings, "protected_branches_raw", "staging")
     client = TestClient(app)
     def call(name, arguments):
         result = client.post('/mcp', headers={"Authorization": "Bearer " + settings.api_token}, json={
@@ -752,3 +753,25 @@ def test_publish_rejects_command_created_module_tests(execution, monkeypatch):
         service.publish(WorkspacePublish(workspace_id=ws, message='Block artifacts', request_id='artifact-publish'))
     assert error.value.detail['error_code'] == 'source_artifact_forbidden'
     assert subprocess.check_output(['git', '--git-dir', str(bare), 'rev-parse', 'staging']) == before
+
+
+def test_routine_verified_publish_needs_no_second_approval(execution, monkeypatch):
+    service, ws, _, bare = execution
+    service.files(WorkspaceFiles(workspace_id=ws, operation="write", path="feature.py", content="VALUE = 42\n"))
+    verify(service, ws, monkeypatch)
+    monkeypatch.setattr(settings, "require_approval", True)
+    monkeypatch.setattr(settings, "approval_required_actions_raw", "git.*")
+    result = service.publish(WorkspacePublish(workspace_id=ws, message="Verified feature", request_id="no-extra-approval"))
+    assert result["pushed"] is True
+    assert subprocess.check_output(["git", "--git-dir", str(bare), "show", "staging:feature.py"], text=True) == "VALUE = 42\n"
+
+
+def test_old_routine_approval_returns_executable_retry(execution):
+    service, ws, _, _ = execution
+    request = WorkspacePublish(workspace_id=ws, message='Verified feature', request_id='legacy-blocked-push')
+    record, _ = service.store.create('operation', 'legacy-approval-operation', request.model_dump(), status='approval_required',
+        data={'approval': {'action':'git.push', 'approval_id':'legacy-pending-id', 'approval_required':True}})
+    status = service.operation_status(record['id'])
+    assert status['status']=='retry_required' and not status['input_required']
+    assert status['next_call']['tool']=='execution_publish'
+    assert status['next_call']['arguments']['approval_id']=='legacy-pending-id'
