@@ -156,14 +156,83 @@ def test_background_conflict_provides_actionable_resolution_request(execution): 
     assert result['argument_request']['arguments']['expected_remote_sha'] == result['result']['remote_sha']
 
 
-def test_repeated_remote_changes_are_bounded(execution):  # noqa: F811
+def test_independent_remote_updates_do_not_exhaust_lifetime_sync_quota(execution):  # noqa: F811
     svc, wid, source, bare = execution
     for index in range(3):
         advance(source, bare, f"print('manual {index}')\n")
         request = WorkspaceSync(workspace_id=wid, request_id=f'sync-bounded-{index}')
-        if index < 2:
-            assert svc.sync(request)['status'] == 'synced'
-        else:
-            with pytest.raises(HTTPException, match='409'):
-                svc.sync(request)
-    assert (svc.root(wid) / 'hello.py').read_text() == "print('manual 1')\n"
+        assert svc.sync(request)['status'] == 'synced'
+    assert (svc.root(wid) / 'hello.py').read_text() == "print('manual 2')\n"
+
+
+def test_unchanged_remote_skips_fetch_clone_and_preserves_tests(execution, monkeypatch):  # noqa: F811
+    from odoo_agent_server.services import execution_service
+    svc, wid, _, _ = execution
+    verify(svc, wid, monkeypatch)
+    before = svc.verification(wid)
+    calls = []
+    original = execution_service.git
+    def traced(argv, *args, **kwargs):
+        calls.append(argv)
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(execution_service, 'git', traced)
+    result = svc.sync(WorkspaceSync(workspace_id=wid, request_id='fast-unchanged-sync'))
+    assert result['status'] == 'up_to_date' and result['verification_preserved']
+    assert not any('fetch' in argv or 'clone' in argv for argv in calls)
+    assert svc.verification(wid) == before and before['ready']
+
+
+def test_stale_resolution_refreshes_without_manual_blocker(execution):  # noqa: F811
+    import time
+    svc, wid, source, bare = execution
+    write(svc, wid, "print('agent')\n")
+    advance(source, bare, "print('manual')\n")
+    request = WorkspaceSync(workspace_id=wid, request_id='stale-resolution-auto-refresh', expected_remote_sha='0' * 40, resolutions={'hello.py': 'outdated resolution'})
+    queued = svc.sync_background(request)
+    for _ in range(100):
+        result = svc.operation_status(queued['operation_id'])
+        if result['status'] not in {'queued', 'running'}:
+            break
+        time.sleep(.05)
+    assert result['status'] == 'retry_required' and not result['input_required']
+    assert result['next_call']['tool'] == 'execution_workspace_sync'
+    assert 'resolutions' not in result['next_call']['arguments']
+    assert (svc.root(wid) / 'hello.py').read_text() == "print('agent')\n"
+
+
+def test_publish_already_detected_remote_change_skips_duplicate_sha_lookup(execution, monkeypatch):  # noqa: F811
+    from odoo_agent_server.services import execution_service
+    svc, wid, source, bare = execution
+    verify(svc, wid, monkeypatch)
+    advance(source, bare, "print('manual')\n")
+    with pytest.raises(HTTPException, match='409'):
+        svc.publish(WorkspacePublish(workspace_id=wid, message='sync first', request_id='remote-detected-before-sync'))
+    calls = []
+    original = execution_service.git
+    def traced(argv, *args, **kwargs):
+        calls.append(argv)
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(execution_service, 'git', traced)
+    assert svc.sync(WorkspaceSync(workspace_id=wid, request_id='skip-duplicate-sha'))['status'] == 'synced'
+    assert not any('ls-remote' in argv for argv in calls)
+    assert any('fetch' in argv for argv in calls)
+    assert not svc.verification(wid)['ready']
+
+
+def test_tree_detects_same_size_edit_with_coarse_file_timestamps(execution):  # noqa: F811
+    import os
+    svc, wid, _, _ = execution
+    root = svc.root(wid)
+    for key, value in [('core.trustctime', 'false'), ('core.checkStat', 'minimal')]:
+        subprocess.run(['git', 'config', key, value], cwd=root, check=True)
+    target = root / 'hello.py'
+    os.utime(target, (1_700_000_000, 1_700_000_000))
+    subprocess.run(['git', 'add', 'hello.py'], cwd=root, check=True)
+    stamp = target.stat()
+    index = root / '.git/index'
+    os.utime(index, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    original = svc.tree(wid)
+    old = target.read_bytes()
+    target.write_bytes(old.replace(b'hello', b'world'))
+    os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert svc.tree(wid) != original

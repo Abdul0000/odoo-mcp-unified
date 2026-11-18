@@ -288,7 +288,9 @@ class ExecutionService:
         root = self.root(workspace_id)
         with tempfile.TemporaryDirectory(dir=self.store.root) as temp:
             index = Path(temp) / "index"
-            shutil.copyfile(root / ".git" / "index", index)
+            # Preserve the original index timestamp: advancing it while copying
+            # can hide a same-size edit from Git's racy-index content check.
+            shutil.copy2(root / ".git" / "index", index)
             env = {"GIT_INDEX_FILE": str(index)}
             git(["add", "-A", "--", "."], root, env=env)
             return git(["write-tree"], root, env=env).strip()
@@ -559,7 +561,8 @@ class ExecutionService:
                     result = self.sync(request)
                     self.store.update(record["id"], "operation", status="succeeded", result=result)
                 except HTTPException as exc:
-                    self.store.update(record["id"], "operation", status="needs_review", error=exc.detail)
+                    retryable = isinstance(exc.detail, dict) and exc.detail.get("error_code") == "resolution_stale"
+                    self.store.update(record["id"], "operation", status="retry_required" if retryable else "needs_review", error=exc.detail)
                 except Exception:
                     self.store.update(record["id"], "operation", status="needs_review", error="Sync interrupted; source and snapshot preserved")
             try:
@@ -579,6 +582,18 @@ class ExecutionService:
             client = ClientResolverService().resolve_client(ws.get("client_name"), project_path=ws["source_path"], require_complete=False)
             target = client.authenticated_repo if client else git(["remote", "get-url", "origin"], root).strip()
             branch = ws["source_branch"]
+            error = ws.get("error") or {}
+            known_advanced = (ws.get("phase") == "sync_required" and isinstance(error, dict)
+                              and error.get("actual_head") and error["actual_head"] != ws.get("remote_base_sha")
+                              and not request.resolutions)
+            if not known_advanced:
+                advertised = git(["ls-remote", "--heads", "--", target, f"refs/heads/{branch}"], root, timeout=20).split()
+                if not advertised:
+                    raise HTTPException(409, {"error_code": "branch_missing", "message": "Remote branch was not advertised; check the configured branch before syncing"})
+                if request.resolutions and request.expected_remote_sha != advertised[0]:
+                    raise HTTPException(409, {"error_code": "resolution_stale", "actual_head": advertised[0], "message": "Remote moved; inspect conflicts again before resolving"})
+                if advertised[0] == ws.get("remote_base_sha"):
+                    return {"status": "up_to_date", "workspace_id": wid, "remote_sha": advertised[0], "verification_preserved": True}
             ref = "refs/odoo-mcp/sync-remote"
             git(["-c", "core.logAllRefUpdates=false", "fetch", "--no-tags", "--no-write-fetch-head", "--", target, f"+refs/heads/{branch}:{ref}"], root, timeout=120)
             latest = git(["rev-parse", ref], root).strip()
@@ -586,8 +601,8 @@ class ExecutionService:
                 raise HTTPException(409, {"error_code": "resolution_stale", "actual_head": latest, "message": "Remote moved; inspect conflicts again before resolving"})
             if latest == ws.get("remote_base_sha"):
                 return {"status": "up_to_date", "workspace_id": wid, "remote_sha": latest}
-            if ws.get("sync_attempts", 0) >= 2:
-                raise HTTPException(409, "Branch keeps moving; two sync attempts reached. Coordinate concurrent writers before continuing")
+            # Each call performs one bounded merge, not an internal retry loop.
+            # Independent upstream updates must not exhaust a lifetime quota.
             old_head = git(["rev-parse", "HEAD"], root).strip()
             tree = self.tree(wid)
             identity = {"GIT_AUTHOR_NAME": settings.git_author_name, "GIT_AUTHOR_EMAIL": settings.git_author_email,
@@ -686,6 +701,10 @@ class ExecutionService:
                            argument_request={"tool": "execution_workspace_sync", "arguments": {"workspace_id": request["workspace_id"],
                                "request_id": "resolve-" + os.urandom(8).hex(), "expected_remote_sha": result["remote_sha"]},
                                "required_generated_arguments": ["resolutions"], "instruction": result["instruction"]})
+            elif record["status"] == "retry_required":
+                out.update(input_required=False, next_call={"tool": "execution_workspace_sync", "arguments": {
+                    "workspace_id": request["workspace_id"], "request_id": "refresh-" + os.urandom(8).hex()}},
+                    next_action="Reinspect latest remote once; discard stale resolutions and follow fresh conflict details. No user decision is required for this refresh.")
             elif record["status"] != "succeeded":
                 out.update(next_call=None, input_required=True)
             return out

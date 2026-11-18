@@ -224,13 +224,16 @@ snapshot of committed, uncommitted and untracked source, merges latest upstream 
 a disposable clone, and promotes only a complete merged tree. The user's source
 checkout stays unchanged. A successful sync invalidates all prior check results;
 run the declared checks again before publishing. Ordinary synchronization needs no
-user decision. Two successful resynchronizations are allowed between publishes;
-continued concurrent writes require coordination rather than endless retries.
+user decision. Each sync request makes one bounded merge attempt. Independent
+upstream updates
+do not consume a lifetime retry quota; provider push retries remain bounded. An
+unchanged advertised SHA skips fetch/clone and preserves existing test evidence.
 
 Overlapping changes return `merge_conflict`, bounded diffs and an
 `argument_request`. The chat agent supplies complete per-file `resolutions` and
 `expected_remote_sha` with a new request ID. A changed remote SHA rejects stale
-resolutions. Modify/delete, add/add, binary conflicts and ambiguous business intent
+resolutions and returns an automatic re-inspection call, without asking the user. Modify/delete, add/add, binary conflicts and ambiguous
+business intent
 must be resolved explicitly. Original work is retained in task Git snapshot refs.
 No automatic ours/theirs selection or force-push is used.
 
