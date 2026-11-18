@@ -677,3 +677,20 @@ def test_contention_after_dispatched_mutation_stays_uncertain(task):
     assert result['next_call']['tool']=='task_resume' and result['uncertain_steps']
     asyncio.run(ledger.run(request, dispatch))
     assert len(calls)==1
+
+
+def test_planner_ignores_same_filename_in_unrelated_addon(task):
+    _, _, svc, wid, _ = task
+    root = svc.root(wid)
+    for module in ('changed', 'unrelated'):
+        (root / module / 'models').mkdir(parents=True)
+        (root / module / '__manifest__.py').write_text("{'name':'Example'}")
+    (root / 'changed/models/order.py').write_text('x=1')
+    (root / 'unrelated/test_order.py').write_text('import odoo')
+    from odoo_agent_server.services.execution_service import git
+    git(['add', '.'], root)
+    git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'existing addons'], root)
+    (root / 'changed/models/order.py').write_text('x=2')
+    result = suggest_checks(wid)
+    assert not any('unrelated/test_order.py' in c['argv'] for c in result['suggested_checks'])
+    assert 'orm' not in result['required_layers']

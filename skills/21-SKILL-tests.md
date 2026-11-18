@@ -58,3 +58,20 @@ read-only, or use inline checks and external temporary files. Keep all declared
 acceptance checks; do not replace a blocked compile check with AST-only validation.
 The execution runtime sets PYTHONPYCACHEPREFIX to writable container /tmp so
 explicit py_compile works with read-only source. Never stage bytecode or caches.
+
+### Runtime-compatible regression selection
+
+Inspect the owning addon and test imports before declaring checks. Matching filenames
+in unrelated addons are not evidence of relevance. Python unittest/pytest collection
+imports parent __init__.py and conftest.py; a pure test inside an Odoo package can
+still require Odoo. Prefer inline behavior assertions or standalone temporary tests
+that exercise the changed pure function without bootstrapping the addon. Use a real
+isolated Odoo runtime/database when ORM behavior is required; never label syntax as
+functional proof.
+
+If a saved check has recorded status runtime_unavailable, execution_task_plan accepts
+replace_unavailable_checks={old_name:new_name} plus replacement_reason explaining
+acceptance equivalence. Keep every required layer and all other checks. Supply a new
+check in the same layer and run it against the final tree. The revision preserves
+old command/failure evidence and grants no verification credit. Failed application
+assertions cannot be replaced through this recovery path.

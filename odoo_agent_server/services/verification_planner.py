@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from ..execution_schemas import TaskPlan
 from .execution_service import ExecutionService, git
+from .check_scope import addon_root, needs_odoo
 
 
 def suggest_checks(workspace_id, apply=False):
@@ -37,19 +38,12 @@ def suggest_checks(workspace_id, apply=False):
         if xml:
             add("changed-xml-syntax", ["python", "-c", "import pathlib,sys,xml.etree.ElementTree as ET; [ET.parse(pathlib.Path(p)) for p in sys.argv[1:]]", *xml], "syntax")
         stems = {Path(p).stem.removeprefix("test_") for p in paths}
-        modules = set()
-        for name in paths:
-            parent = Path(name).parent
-            for _ in range(10):
-                if (root / parent / "__manifest__.py").is_file():
-                    modules.add(parent.as_posix())
-                    break
-                if parent == Path("."):
-                    break
-                parent = parent.parent
+        modules = {addon_root(root, name) for name in paths}
 
         def native_path(name):
-            return any((module == "." and name.startswith("tests/")) or name.startswith(module + "/tests/") for module in modules)
+            module = addon_root(root, name)
+            return module is not None and module in modules and (
+                Path(name).is_relative_to(Path(module) / "tests") or needs_odoo(root, name))
 
         candidates = git(["ls-files", "--cached", "--others", "--exclude-standard", "--", "*test*.py"], root).splitlines()
         if len(candidates) > 2000:
@@ -60,7 +54,9 @@ def suggest_checks(workspace_id, apply=False):
             if Path(name).stem.removeprefix("test_") not in stems and not native_path(name):
                 continue
             svc.target(workspace_id, name)
-            if native_path(name):
+            if addon_root(root, name) not in modules:
+                continue
+            if native_path(name) or needs_odoo(root, name):
                 native.append(name)
             else:
                 unit.append(name)

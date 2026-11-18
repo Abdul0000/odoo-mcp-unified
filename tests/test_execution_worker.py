@@ -775,3 +775,38 @@ def test_old_routine_approval_returns_executable_retry(execution):
     assert status['status']=='retry_required' and not status['input_required']
     assert status['next_call']['tool']=='execution_publish'
     assert status['next_call']['arguments']['approval_id']=='legacy-pending-id'
+
+
+@pytest.mark.parametrize('runner,target', [('unittest', 'addon.tests.test_dates'), ('pytest', 'addon/tests/test_dates.py')])
+def test_preflight_detects_odoo_package_import_for_unit_checks(execution, runner, target):
+    service, ws, *_ = execution
+    root = service.root(ws)
+    (root / 'addon/tests').mkdir(parents=True)
+    (root / 'addon/__init__.py').write_text('from odoo import models')
+    (root / 'addon/tests/test_dates.py').write_text('def test_date(): assert True')
+    with pytest.raises(HTTPException) as unavailable:
+        service.plan(TaskPlan(workspace_id=ws, checks=[{'name':'date', 'argv':['python','-m',runner,target], 'layer':'unit'}]))
+    assert unavailable.value.detail['error_code'] == 'runtime_unavailable'
+    assert service.workspace(ws).get('checks') is None
+
+
+def test_unavailable_check_replacement_is_audited_and_requires_fresh_proof(execution):
+    service, ws, *_ = execution
+    original = {'name':'old', 'argv':['python','-c','assert 1 == 1'], 'layer':'unit'}
+    replacement = {'name':'new', 'argv':['python','-c','assert 2 == 2'], 'layer':'unit'}
+    service.plan(TaskPlan(workspace_id=ws, checks=[original]))
+    request = TaskPlan(workspace_id=ws, checks=[replacement], replace_unavailable_checks={'old':'new'},
+                       replacement_reason='Run equivalent behavior assertions without importing the unavailable application runtime.')
+    with pytest.raises(HTTPException):
+        service.plan(request)
+    service.store.update(ws, 'workspace', check_results={'old':{'status':'failed'}})
+    with pytest.raises(HTTPException):
+        service.plan(request)
+    service.store.update(ws, 'workspace', phase='configuration_required', check_results={'old':{'status':'runtime_unavailable'}})
+    service.plan(request)
+    record = service.workspace(ws)
+    assert record['plan_revisions'][0]['previous_results']['old']['status'] == 'runtime_unavailable'
+    assert record['required_layers'] == ['unit']
+    assert record['phase'] == 'verify'
+    assert not service.verification(ws)['ready']
+    assert service.verification(ws)['missing_checks'] == ['new']

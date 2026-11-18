@@ -318,6 +318,15 @@ class ExecutionService:
                         "required_layers": sorted(set(request.required_layers))}
             old = {c["name"]: TaskCheck.model_validate(c).model_dump() for c in workspace.get("checks", [])}
             new = {c["name"]: c for c in checks}
+            replacements = request.replace_unavailable_checks
+            if replacements and not request.replacement_reason:
+                raise HTTPException(400, "Runtime check replacement needs an acceptance-equivalence explanation")
+            for name, replacement in replacements.items():
+                result = workspace.get("check_results", {}).get(name, {})
+                if (name not in old or name in new or replacement not in new or replacement in old
+                        or result.get("status") != "runtime_unavailable"
+                        or old[name]["layer"] != new[replacement]["layer"]):
+                    raise HTTPException(409, "Only recorded runtime-unavailable checks may be replaced by a new check in the same layer")
             legacy_plan = "required_layers" not in workspace
             def strengthens(name, check):
                 candidate = new.get(name, {})
@@ -325,14 +334,23 @@ class ExecutionService:
                 return (all(candidate.get(k) == check[k] for k in semantic_fields)
                         and set(check["output_dirs"]).issubset(candidate.get("output_dirs", []))
                         and candidate.get("timeout_seconds", 0) >= check["timeout_seconds"])
-            if old and (any(not strengthens(name, check) for name, check in old.items())
+            if old and (any(not strengthens(name, check) for name, check in old.items() if name not in replacements)
                         or (not legacy_plan and not set(workspace["required_layers"]).issubset(contract["required_layers"]))
                         or workspace.get("max_repair_attempts", 3) != request.max_repair_attempts):
                 raise HTTPException(409, "Plans may add checks/layers, but cannot remove or replace acceptance checks or reset the repair budget")
-            results = workspace.get("check_results", {})
+            results = dict(workspace.get("check_results", {}))
             for name, check in old.items():
-                if new[name] != check:
+                if new.get(name) != check:
                     results.pop(name, None)
+            if replacements:
+                history = list(workspace.get("plan_revisions", []))
+                history.append({"replacements": replacements, "reason": request.replacement_reason,
+                    "previous_checks": {name: old[name] for name in replacements},
+                    "previous_results": {name: workspace.get("check_results", {}).get(name) for name in replacements},
+                    "tree": self.tree(request.workspace_id), "runtime_id": self.runtime_id()})
+                contract["plan_revisions"] = history
+                contract["phase"] = "verify"
+                contract["runtime_error"] = None
             contract["check_results"] = results
             self.store.update(request.workspace_id, "workspace", **contract)
             return {**self._status(request.workspace_id), "skills": [s for s in skills if s["name"] in changed_skills]}
@@ -378,6 +396,23 @@ class ExecutionService:
         capabilities = self.store._read(self.store.root / "capabilities.json") or {}
         if capabilities.get("image") != settings.execution_image:
             capabilities = {}
+        from .check_scope import test_targets, needs_odoo
+        runner, targets = test_targets(argv)
+        cwd = self.target(workspace_id, check.get("cwd", "."), directory=True)
+        collection = []
+        if runner:
+            for name in targets or ["."]:
+                target = self.target(workspace_id, str(cwd.relative_to(self.root(workspace_id)) / name))
+                collection.append(target)
+                if target.is_dir():
+                    for candidate in target.rglob("*.py"):
+                        if len(collection) >= 2000:
+                            raise HTTPException(409, "Test collection exceeds preflight budget; select explicit relevant test files")
+                        collection.append(self.target(workspace_id, str(candidate.relative_to(self.root(workspace_id)))))
+        if runner and not capabilities.get("odoo") and any(needs_odoo(self.root(workspace_id), str(path.relative_to(self.root(workspace_id)))) for path in collection):
+            raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "odoo",
+                "message": "Test collection imports Odoo through the test or parent package. Use a standalone pure-logic check outside the addon package, or configure an isolated Odoo runtime/database before planning this command.",
+                "recovery_action": "select_runtime_compatible_check_before_saving_plan"})
         if check["layer"] == "orm" and not capabilities.get("odoo"):
             raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "odoo", "message": "Configure an Odoo test runtime/image before selecting ORM checks; no functional verification was performed."})
         if Path(argv[0]).name == "npm" and not capabilities.get("npm"):

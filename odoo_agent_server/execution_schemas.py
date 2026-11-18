@@ -40,6 +40,9 @@ class TaskPlan(WorkspaceId):
     skills: list[str] = Field(default_factory=list, max_length=5)
     max_repair_attempts: int = Field(default=3, ge=1, le=10)
     required_layers: list[Literal["syntax", "unit", "build", "orm", "integration"]] = Field(default_factory=lambda: ["unit"], min_length=1, max_length=5)
+    replace_unavailable_checks: dict[str, str] = Field(default_factory=dict, max_length=12,
+        description="Old check name to replacement name; only recorded runtime_unavailable checks may be replaced, preserving their layer and all required layers.")
+    replacement_reason: str | None = Field(default=None, min_length=20, max_length=2000)
 
 
 class FileEdit(ExecutionRequest):
