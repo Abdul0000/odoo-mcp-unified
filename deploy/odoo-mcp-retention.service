@@ -1,0 +1,19 @@
+[Unit]
+Description=Expire Odoo MCP task history after 48 hours
+After=odoo-mcp.service
+JoinsNamespaceOf=odoo-mcp.service
+[Service]
+Type=oneshot
+User=odoo-mcp
+Group=odoo-mcp
+WorkingDirectory=/opt/odoo-mcp/current
+EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
+EnvironmentFile=-/etc/odoo-mcp/clients.env
+ExecStart=/opt/odoo-mcp/venv/bin/python -m odoo_agent_server.services.retention_service
+ExecStartPost=+/usr/bin/python3 /opt/odoo-mcp/deploy/purge_expired_workspaces.py
+UMask=0007
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/odoo-mcp
+PrivateTmp=true
+TimeoutStartSec=300

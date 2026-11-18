@@ -103,6 +103,8 @@ class TaskService:
             os.close(fd)
 
     def read(self, task_id):
+        if (settings.state_path / 'task-tombstones' / self.path(task_id).name).exists():
+            raise HTTPException(410, 'Task history expired under the retention policy.')
         try:
             return json.loads(self.path(task_id).read_text())
         except FileNotFoundError:
@@ -121,7 +123,7 @@ class TaskService:
         contract["client_name"] = client["name"]
         fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
         with self.lock(task_id):
-            if self.path(task_id).exists():
+            if self.path(task_id).exists() or (settings.state_path / 'task-tombstones' / self.path(task_id).name).exists():
                 task = self.read(task_id)
                 if task["fingerprint"] != fingerprint:
                     raise HTTPException(409, "request_id already belongs to another task contract")

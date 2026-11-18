@@ -9,6 +9,7 @@ FILE_NAME = 'runtime_settings.json'
 # Authentication, filesystem roots, executable/image paths and permission flags
 # deliberately remain operator-managed. Values here cannot grant new access.
 FIELDS = {
+    'history_retention_seconds': ('storage', 'Task & log retention (seconds)', 'Inactive history expires within 48 hours. Active work and unpublished code are protected.', 3600, 172800),
     'execution_max_workers': ('runtime', 'Command workers', 'Parallel command workers.', 1, 4),
     'execution_max_pending': ('runtime', 'Command queue limit', 'Maximum pending command jobs.', 1, 100),
     'background_max_workers': ('runtime', 'Background workers', 'Keep at least two for nested deployment jobs.', 2, 4),

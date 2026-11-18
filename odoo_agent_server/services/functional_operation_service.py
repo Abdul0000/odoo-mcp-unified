@@ -869,6 +869,8 @@ class FunctionalOperationService:
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
         intent = mutation_journal.read(client_name, request_id)
+        if intent and intent.get('state') == 'expired':
+            raise HTTPException(410, 'This mutation request expired; its payload was removed and it cannot be replayed.')
         existing = intent or self.store.get_mutation(request_id, client_name)
         if intent and intent.get('runtime_identity') != mutation_journal.identity(client_name):
             raise HTTPException(409, 'Odoo database or login changed since this request. Inspect prior evidence before issuing new work.')

@@ -432,7 +432,7 @@ class JsonStore:
         if not self.artifacts_dir.exists():
             return
         now = time.time()
-        ttl = max(3600, int(getattr(settings, "artifact_ttl_seconds", 604800)))
+        ttl = min(settings.history_retention_seconds, max(3600, int(getattr(settings, "artifact_ttl_seconds", 172800))))
         maximum = max(20, int(getattr(settings, "artifact_max_count", 500)))
         byte_limit = max(1_000_000, int(getattr(settings, "artifact_max_total_bytes", 250_000_000)))
         entries: list[tuple[float, int, Path]] = []

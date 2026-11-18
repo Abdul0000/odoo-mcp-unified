@@ -85,3 +85,22 @@ sudo journalctl -u odoo-mcp-webhook -f
 sudo tail -f /var/log/odoo-mcp/deploy.log
 curl -fsS https://mcp.example.com/health
 ```
+
+### Hosted history retention
+
+Run `sudo bash /opt/odoo-mcp/current/deploy/install_retention.sh` after the
+first deployment that introduces retention. The installed timers survive releases.
+`odoo-mcp-retention.timer` prunes inactive task history, terminal command payloads,
+outputs, caches and clean disposable workspaces every five minutes. The hard
+maximum age is 48 hours; the Client Manager Storage menu can reduce it.
+Active jobs, held workspace locks, uncommitted changes and unpublished commits
+remain protected. Client configuration, credentials and source repositories are
+outside the cleanup scope. Expired request IDs retain only minimal hash-keyed
+markers to prevent replay, without their original task or command data.
+
+`odoo-mcp-log-retention.timer` rotates/vacuums the dedicated host's system journal
+and rotates MCP file logs hourly. Journald retains two days with hourly files;
+cleanup runs on a schedule, so expiry has up to one timer interval of granularity.
+Inspect both service journals and `systemctl list-timers 'odoo-mcp-*retention*'`
+to verify cleanup. Mixed-owner expired workspace directories are removed by a
+root-owned helper restricted to explicitly expired execution directories.

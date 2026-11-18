@@ -117,7 +117,8 @@ class Settings(BaseSettings):
         alias="ODOO_AGENT_CODING_WORKSPACE_MAX_TOTAL_BYTES",
     )
     job_max_count: int = Field(default=500, ge=20, le=5000, alias="ODOO_AGENT_JOB_MAX_COUNT")
-    artifact_ttl_seconds: int = Field(default=604800, ge=3600, le=7776000, alias="ODOO_AGENT_ARTIFACT_TTL_SECONDS")
+    history_retention_seconds: int = Field(default=172800, ge=3600, le=172800, alias="ODOO_AGENT_HISTORY_RETENTION_SECONDS")
+    artifact_ttl_seconds: int = Field(default=172800, ge=3600, le=7776000, alias="ODOO_AGENT_ARTIFACT_TTL_SECONDS")
     artifact_max_count: int = Field(default=500, ge=20, le=5000, alias="ODOO_AGENT_ARTIFACT_MAX_COUNT")
     artifact_max_total_bytes: int = Field(default=250_000_000, ge=1_000_000, le=5_000_000_000, alias="ODOO_AGENT_ARTIFACT_MAX_TOTAL_BYTES")
 

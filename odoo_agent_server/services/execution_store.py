@@ -127,7 +127,8 @@ class ExecutionStore:
         if row["status"] in {"queued", "running", "initializing"}:
             live[record_id] = {"status": row["status"], "created": row["created"]}
         recent = index["recent"].setdefault(kind, [])
-        index["recent"][kind] = [record_id, *[key for key in recent if key != record_id]][:64]
+        remaining = [key for key in recent if key != record_id]
+        index["recent"][kind] = remaining if row['status'] == 'expired' else [record_id, *remaining][:64]
 
     def _index(self):
         """Caller holds queue.lock. Journal replay repairs a crash between the
@@ -164,6 +165,8 @@ class ExecutionStore:
         row = self._read(self._path(record_id, kind))
         if row is None:
             return None
+        if row['status'] == 'expired':
+            raise HTTPException(410, 'This execution request expired under the retention policy. Its payload/logs were removed; it cannot be replayed.')
         if row["fingerprint"] != fingerprint or row["request_key"] != request_key:
             from .. import execution_schemas as schemas
             model = {"workspace": schemas.WorkspaceOpen, "process": schemas.ProcessStart,
@@ -229,7 +232,8 @@ class ExecutionStore:
     def recent(self, kind, limit=8):
         with self._lock(self.root / "queue.lock"):
             ids = self._index()["recent"].get(kind, [])[:min(limit, 64)]
-            return [self.get(key, kind) for key in ids if self._path(key, kind).exists()]
+            return [row for key in ids if self._path(key, kind).exists()
+                    if (row := self.get(key, kind))['status'] != 'expired']
 
     def send_input(self, process_id, data, eof):
         with self._lock(self.root / "queue.lock"):
