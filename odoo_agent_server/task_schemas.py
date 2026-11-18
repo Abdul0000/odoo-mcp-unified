@@ -19,8 +19,8 @@ class TaskId(BaseModel):
 
 
 class TaskRun(TaskId):
-    step_id: str = Field(min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
-    tool: str = Field(max_length=100)
+    step_id: str | None = Field(default=None, min_length=8, max_length=100, pattern=r"^[A-Za-z0-9_.:-]+$")
+    tool: str | None = Field(default=None, min_length=1, max_length=100)
     arguments: dict[str, Any] = Field(default_factory=dict, max_length=60)
 
 

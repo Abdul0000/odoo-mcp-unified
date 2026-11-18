@@ -9064,7 +9064,7 @@ _TOOL_DESCRIPTORS.extend(
 from ..task_schemas import TaskOpen, TaskId, TaskRun, TaskList, TaskKnowledge, TaskTests, MutationPreview, TaskDeploy
 _TASK_TOOLS = {
     'task.open': (TaskOpen, 'Open a client-pinned durable task before coding, debugging, deployment or functional work. No model API key needed.', False),
-    'task.run': (TaskRun, 'Execute one existing tool through its normal guards and link its evidence to this task. Use a unique step_id per new call. Lost-response mutations are never blindly replayed.', False),
+    'task.run': (TaskRun, 'task_id alone follows one server-selected step. For edits supply tool/arguments; scope and IDs auto-bind. Explicit step_id distinguishes repeated identical intent. Lost mutations are never blindly replayed.', False),
     'task.status': (TaskId, 'Read task timeline, linked IDs, evidence claims and configuration freshness. Read task_resume for authoritative job/workspace reconciliation.', True),
     'task.resume': (TaskId, 'Reconcile existing workspace/jobs with bounded read-only polls after disconnect/restart. Does not repeat commit, push, upgrade or record mutation.', True),
     'task.list': (TaskList, 'List recent durable tasks for a client.', True),

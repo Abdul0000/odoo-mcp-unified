@@ -74,3 +74,11 @@ sync operation returns merge_conflict, follow argument_request: inspect both int
 supply complete resolutions with expected_remote_sha, and use a new request_id.
 Ask only when business intent is ambiguous. Never select ours/theirs blindly or
 force-push. Lightweight ws_commit proves file lint only, not runtime correctness.
+
+Prefer task_run(task_id) for server-selected lifecycle steps. For code inspection
+and edits supply tool/arguments; the coordinator binds scope, linked IDs and stable
+request IDs. Fix invalid_arguments from its field errors; nothing was dispatched.
+Do not invent a new request ID after uncertain writes. The server may propose and
+apply complete source-derived test plans, but missing ORM/business assertions still
+need task-specific checks. Treat model code as a proposal; completion comes only
+from stored current-tree/runtime/live evidence.

@@ -357,7 +357,7 @@ def test_coding_only_task_cannot_push_or_autodeploy(task):
     async def forbidden(*_):
         raise AssertionError("must not dispatch")
 
-    req = TaskRun(task_id=tid, step_id="bad-push-001", tool="execution_publish", arguments={"workspace_id": wid, "message": "Push without request", "request_id": "bad-publish-001"})
+    req = TaskRun(task_id=tid, step_id="bad-push-001", tool="execution_publish", arguments={"workspace_id": wid, "message": "Push without request", "request_id": "bad-publish-001", "push": True})
     with pytest.raises(HTTPException):
         asyncio.run(ledger.run(req, forbidden))
 
@@ -474,3 +474,141 @@ def test_legacy_job_status_does_not_invent_queued_phase_or_upgrade_evidence(task
     assert row["phase"] == "passed"
     assert row["source_deployed"] is None and row["module_upgraded"] is None
     assert row["deploy_confirmed"] is False
+
+
+def test_server_binds_missing_ids_and_deduplicates_identical_intent(task):
+    ledger, tid, _, wid, _ = task
+    calls = []
+    async def dispatched(name, args):
+        calls.append((name, args))
+        return {'status': 'written'}
+    request = TaskRun(task_id=tid, tool='execution_files', arguments={'operation': 'write', 'path': 'new.py', 'content': 'VALUE = 1\n'})
+    asyncio.run(ledger.run(request, dispatched))
+    replay = asyncio.run(ledger.run(request, dispatched))
+    assert calls[0][1]['workspace_id'] == wid
+    assert len(calls) == 1 and replay['idempotent_replay']
+    assert len(ledger.read(tid)['steps']) == 1
+
+
+def test_missing_arguments_are_correctable_without_poisoning_task(task):
+    ledger, tid, _, _, _ = task
+    async def forbidden(*_):
+        pytest.fail('Invalid arguments must never dispatch')
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_process_start'), forbidden))
+    assert result['status'] == 'invalid_arguments' and result['dispatched'] is False
+    assert any(error['field'] == 'argv' for error in result['tool_result']['argument_errors'])
+    assert not ledger.read(tid)['steps'] and ledger.read(tid)['phase'] == 'inspect'
+    completed = ledger.read(tid)
+    completed['claims']['push_verified'] = True
+    ledger.save(completed)
+    invalid = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_process_start'), forbidden))
+    assert not invalid['success_allowed'] and invalid['state_class'] == 'action_required'
+    assert invalid['argument_request']['arguments']['tool'] == 'execution_process_start'
+
+
+def test_declared_check_command_and_request_id_are_server_bound(task):
+    import sys
+    ledger, tid, svc, wid, _ = task
+    argv = [sys.executable, '-c', "assert 3 * 7 == 21"]
+    svc.plan(TaskPlan(workspace_id=wid, checks=[{'name': 'calculation', 'argv': argv}], required_layers=['unit']))
+    captured = []
+    async def dispatched(name, args):
+        captured.append(args)
+        return {'status': 'queued', 'process_id': 'f' * 32}
+    asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_process_start', arguments={'check_name': 'calculation'}), dispatched))
+    assert captured[0]['argv'] == argv and captured[0]['workspace_id'] == wid
+    assert captured[0]['request_id'].startswith('task-')
+
+
+def test_model_with_only_task_id_can_run_tests_and_publish(task, monkeypatch):
+    import sys
+    from odoo_agent_server.routers.tools import _dispatch
+    ledger, tid, svc, wid, _ = task
+    read = svc.files(WorkspaceFiles(workspace_id=wid, operation='read', path='hello.py'))
+    svc.files(WorkspaceFiles(workspace_id=wid, operation='write', path='hello.py', content='VALUE = 21\n', expected_sha256=read['sha256']))
+    argv = [sys.executable, '-B', '-c', "assert __import__('hello').VALUE == 21"]
+    svc.plan(TaskPlan(workspace_id=wid, checks=[{'name': 'actual-result', 'argv': argv}], required_layers=['unit']))
+    async def loop():
+        for _ in range(100):
+            result = await ledger.run(TaskRun(task_id=tid), _dispatch)
+            for process in list(svc.store.pending('process')):
+                worker_for(svc, monkeypatch).execute(svc.store.claim('process'))
+            if result['success_allowed']:
+                return result
+            await asyncio.sleep(.03)
+        pytest.fail('ID-only guided model made no bounded progress: ' + str({key: result.get(key) for key in ('status', 'state_class', 'next_call', 'argument_request', 'uncertain_steps')}))
+    result = asyncio.run(loop())
+    assert result['task']['claims']['coding_verified'] and result['task']['claims']['push_verified']
+    assert not result['deploy_confirmed']
+    assert svc.workspace(wid)['pushed']
+
+
+def test_guided_planner_derives_available_checks_instead_of_guessing(task):
+    from odoo_agent_server.routers.tools import _dispatch
+    ledger, tid, svc, wid, _ = task
+    svc.files(WorkspaceFiles(workspace_id=wid, operation='write', path='tests/test_hello.py', content='def test_result():\n    assert 3 * 7 == 21\n'))
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid), _dispatch))
+    planned = svc.workspace(wid)
+    assert any('pytest' in check['argv'] for check in planned['checks'])
+    assert set(planned['required_layers']) == {'syntax', 'unit'}
+    assert not result['success_allowed']  # Selecting commands is not passing them.
+
+
+def test_guided_mode_never_replays_an_uncertain_code_write(task):
+    from odoo_agent_server.routers.tools import _dispatch
+    ledger, tid, _, _, _ = task
+    async def lost(*_):
+        raise TimeoutError('lost write response')
+    with pytest.raises(TimeoutError):
+        asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_files', arguments={'operation': 'write', 'path': 'uncertain.py', 'content': 'VALUE = 1'}), lost))
+    calls = []
+    async def only_reads(name, args):
+        calls.append(name)
+        assert name in {'execution.workspace_status', 'execution.status', 'jobs.get'}
+        return await _dispatch(name, args)
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid), only_reads))
+    assert result['uncertain_steps'] and not result['success_allowed']
+    assert 'execution.files' not in calls
+
+
+def test_lost_sync_response_is_reconciled_using_server_record_id(task, monkeypatch):
+    from odoo_agent_server.routers.tools import _dispatch
+    from odoo_agent_server.services import execution_service
+    from tests.test_concurrent_git_sync import advance
+    ledger, tid, svc, wid, clients = task
+    from pathlib import Path
+    source = Path(clients[0]['path'])
+    advance(source, Path(clients[0]['repo']), "print('manual')\n")
+    monkeypatch.setattr(execution_service, '_submit_io', lambda callback: callback())
+    async def lost(name, args):
+        await _dispatch(name, args)
+        raise TimeoutError('lost sync response')
+    with pytest.raises(TimeoutError):
+        asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_workspace_sync'), lost))
+    saved = ledger.read(tid)
+    step = next(iter(saved['steps'].values()))
+    assert step['record_id'] in saved['refs']['operation_ids']
+    result = asyncio.run(ledger.resume(tid, _dispatch))
+    assert not result['uncertain_steps']
+    assert next(iter(ledger.read(tid)['steps'].values()))['status'] == 'reconciled'
+
+
+def test_ambiguous_process_ids_are_not_guessed(task):
+    ledger, tid, _, _, _ = task
+    saved = ledger.read(tid)
+    saved['refs']['process_ids'] = ['a' * 32, 'b' * 32]
+    ledger.save(saved)
+    async def forbidden(*_):
+        pytest.fail('Ambiguous process must not be polled')
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_process_poll'), forbidden))
+    assert result['status'] == 'invalid_arguments' and result['dispatched'] is False
+
+
+def test_bad_argument_types_return_field_errors_before_scope_handling(task):
+    ledger, tid, _, _, _ = task
+    async def forbidden(*_):
+        pytest.fail('Invalid client type must never dispatch')
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_workspace_open', arguments={'client_name': ['Alpha']}), forbidden))
+    assert result['status'] == 'invalid_arguments' and not result['dispatched']
+    assert result['tool_result']['argument_errors'][0]['field'] == 'client_name'
+    assert not ledger.read(tid)['steps']

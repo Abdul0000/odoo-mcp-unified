@@ -80,3 +80,32 @@ existing Sales/Purchase/Inventory/MRP/Accounting recipes. They validate installe
 model fields and user access first and expose no guessed stage-transition methods.
 Helpdesk requires the actual installed app. Use dynamic steps plus explicit
 postconditions for custom/version-specific transitions.
+
+## Guided workflow for models with limited reasoning
+
+Call `task_run(task_id)` to follow one server-selected next step. The server first
+reconciles existing operations, then forwards the current scoped next call. It
+never repeats an uncertain mutation or invents code, business intent or approvals.
+If source-derived test planning supplies every required layer without blockers,
+the server installs that plan through the existing guarded tool. Otherwise the
+response contains concrete test proposals and missing requirements for the model.
+
+For source reads/edits, supply `tool` and `arguments`. Linked workspace, unambiguous
+process/job/operation IDs, check argv, task description, commit message and scoped
+request IDs can be supplied by the coordinator. Conflicting explicit scope is
+rejected. Coding-only tasks default to local commits; push/deploy authority still
+comes from the pinned task target and normal approval policy. Model-selected tests
+cannot replace existing acceptance checks.
+
+`step_id` is optional. Its default is deterministic for the same tool/arguments,
+so identical mutations replay their receipt. Use a new explicit step ID when the
+same arguments represent a deliberate new action. Guided server next calls already
+supply distinct IDs for new check/publish attempts. Validation errors return exact
+field errors before a dispatched checkpoint is saved, allowing argument correction
+without creating a false uncertain mutation. Lost sync responses are reconciled
+from the pre-recorded operation ID just like publish/process operations.
+
+This reduces reasoning needed for orchestration, not business-code reasoning.
+Verify with scripted callers that only pass task_id, wrong/missing arguments,
+repeated calls and lost responses. Passing those tests is workflow evidence, not
+a benchmark showing every low-capability model writes correct Odoo logic.

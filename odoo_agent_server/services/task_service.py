@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from ..config import get_odoo_clients, settings
 from .client_admin_service import ClientAdminService
@@ -206,7 +207,9 @@ class TaskService:
                 return call
             if name not in RUN_TOOLS:
                 return None
-            arguments = call.get("arguments") or {}
+            arguments = dict(call.get("arguments") or {})
+            if name == "execution.publish" and task["target"] == "coding":
+                arguments["push"] = False
             digest = hashlib.sha256(json.dumps({"tool": name, "arguments": arguments}, sort_keys=True).encode()).hexdigest()[:24]
             return {"tool": "task_run", "arguments": {"task_id": task["task_id"], "step_id": "next-" + digest, "tool": name.replace(".", "_"), "arguments": arguments}}
 
@@ -338,6 +341,35 @@ class TaskService:
         if model is None:
             raise HTTPException(422, "Tool is not registered")
         args = dict(args)
+        client = ClientAdminService()._client(task["client_name"])
+        if "client_name" in model.model_fields and not args.get("client_name"):
+            args["client_name"] = task["client_name"]
+        if "project_path" in model.model_fields and model.model_fields["project_path"].is_required() and not args.get("project_path"):
+            args["project_path"] = client["path"]
+        if "workspace_id" in model.model_fields and not args.get("workspace_id") and task["refs"].get("workspace_id"):
+            args["workspace_id"] = task["refs"]["workspace_id"]
+        for key in ("process_id", "operation_id", "job_id"):
+            if key in model.model_fields and not args.get(key):
+                candidates = task["refs"].get("pending_" + key + "s") or task["refs"].get(key + "s", [])
+                if len(candidates) == 1:
+                    args[key] = candidates[0]
+        if name == "execution.workspace_open":
+            args.setdefault("task_description", task["description"])
+        if name == "execution.publish":
+            args.setdefault("push", task["target"] != "coding")
+            args.setdefault("message", task["description"])
+        if name == "execution.process_start" and args.get("check_name") and not args.get("argv") and task["refs"].get("workspace_id"):
+            from .execution_service import ExecutionService
+
+            checks = ExecutionService().workspace(task["refs"]["workspace_id"]).get("checks", [])
+            check = next((item for item in checks if item["name"] == args["check_name"]), None)
+            if check:
+                for key in ("argv", "cwd", "timeout_seconds"):
+                    if key in check:
+                        args.setdefault(key, check[key])
+        # Validate types before scope comparisons such as casefold/path handling.
+        # Keep the original supplied/default distinction for authorization below.
+        model.model_validate(args)
         if name == "jobs.get":
             args["wait_for_result"] = False
         if name.startswith("workflow.") and "wait_for_result" in model.model_fields:
@@ -381,7 +413,6 @@ class TaskService:
             if supplied and supplied.casefold() != task["client_name"].casefold():
                 raise HTTPException(409, "Task cannot change client")
             args["client_name"] = task["client_name"]
-        client = ClientAdminService()._client(task["client_name"])
         if task.get("module_name") and args.get("module_name") and args["module_name"] != task["module_name"]:
             raise HTTPException(409, "Task module differs from its pinned module")
         if "project_path" in model.model_fields and args.get("project_path"):
@@ -402,18 +433,76 @@ class TaskService:
                 raise HTTPException(409, key + " is not linked to this task")
         return model.model_validate(args).model_dump(mode="json")
 
+    async def guided(self, task_id, dispatch):
+        """One server-selected step; never invent code, tests or approval intent."""
+        import asyncio
+        from ..task_schemas import TaskRun
+
+        state = await self.resume(task_id, dispatch)
+        if state.get("success_allowed") or state.get("input_required") or state.get("state_class") == "blocked" or state.get("uncertain_steps"):
+            return state
+        call = state.get("next_call") or {}
+        if call.get("tool") == "task_run":
+            return await self.run(TaskRun.model_validate(call["arguments"]), dispatch)
+        argument = state.get("argument_request") or {}
+        proposed = argument.get("arguments") or {}
+        if proposed.get("tool") == "execution_task_plan":
+            from .verification_planner import suggest_checks
+            from .execution_service import ExecutionService
+
+            task = self.read(task_id)
+            wid = task["refs"].get("workspace_id")
+            if wid:
+                proposal = await asyncio.to_thread(suggest_checks, wid)
+                state["test_plan"] = proposal
+                if not proposal["missing_layers"] and not proposal["blockers"] and proposal["suggested_checks"]:
+                    ws = ExecutionService().workspace(wid)
+                    old = ws.get("checks", [])
+                    names = {check["name"] for check in old}
+                    checks = old + [check for check in proposal["suggested_checks"] if check["name"] not in names]
+                    return await self.run(TaskRun(task_id=task_id, tool="execution_task_plan", arguments={
+                        "checks": checks, "required_layers": sorted(set(ws.get("required_layers", [])) | set(proposal["required_layers"])),
+                        "max_repair_attempts": ws.get("max_repair_attempts", 3),
+                    }), dispatch)
+        state["guidance"] = "Call task_run(task_id) for server-selected workflow steps. Supply tool/arguments only for source inspection, code edits, unresolved test requirements or conflict resolutions. Follow input_request for business decisions/approval."
+        return state
+
     async def run(self, request, dispatch):
         from ..routers.tools import internal_tool_name, _TOOL_DESCRIPTORS
 
+        if not request.tool:
+            if request.arguments:
+                raise HTTPException(422, "Supply tool with arguments, or task_id alone to follow the server next step")
+            return await self.guided(request.task_id, dispatch)
         with self.lock(request.task_id):
             task = self.read(request.task_id)
             if not self.current(task):
                 raise HTTPException(409, "Client configuration changed; open a new task and revalidate preserved work.")
             name = internal_tool_name(request.tool)
-            args = self.bind(task, name, request.arguments)
+            from ..routers.tools import _TOOL_INPUT_MODELS
+
+            step_id = request.step_id or "auto-" + hashlib.sha256(json.dumps({"tool": name, "arguments": request.arguments}, sort_keys=True).encode()).hexdigest()[:24]
+            supplied = dict(request.arguments)
+            model = _TOOL_INPUT_MODELS.get(name)
+            if model and "request_id" in model.model_fields:
+                supplied.setdefault("request_id", "task-" + request.task_id[:12] + "-" + step_id[:32])
+            try:
+                args = self.bind(task, name, supplied)
+            except ValidationError as exc:
+                errors = [{"field": ".".join(map(str, error["loc"])), "type": error["type"], "message": error["msg"][:200]}
+                          for error in exc.errors(include_input=False, include_context=False)[:12]]
+                result = self.envelope(task)
+                result.update(status="invalid_arguments", dispatched=False, success_allowed=False,
+                              completion_required=True, state_class="action_required", terminal=False, next_call=None,
+                              tool_result={"argument_errors": errors}, argument_request={
+                                  "tool": "task_run", "arguments": {"task_id": task["task_id"], "tool": name.replace(".", "_")},
+                                  "required_generated_arguments": ["arguments." + error["field"] for error in errors],
+                                  "instruction": "Correct these exact fields; nothing was dispatched. Client/workspace/request IDs are server-bound; step_id is optional.",
+                              })
+                return result
             fingerprint = hashlib.sha256(json.dumps({"tool": name, "args": args}, sort_keys=True).encode()).hexdigest()
             readonly = next(t.read_only for t in _TOOL_DESCRIPTORS if t.name == name) or (name == "execution.files" and args.get("operation") in {"list", "read", "search", "diff"})
-            previous = task["steps"].get(request.step_id)
+            previous = task["steps"].get(step_id)
             if previous:
                 if previous["fingerprint"] != fingerprint:
                     raise HTTPException(409, "step_id already belongs to different arguments")
@@ -422,13 +511,15 @@ class TaskService:
             if not previous and len(task["steps"]) >= 200:
                 raise HTTPException(409, "Task step budget reached; inspect evidence and open a follow-up task.")
             step = {"tool": name, "fingerprint": fingerprint, "status": "dispatched", "started_at": now(), "read_only": readonly}
-            task["steps"][request.step_id] = step
-            if name in {"execution.workspace_open", "execution.process_start", "execution.publish"}:
+            task["steps"][step_id] = step
+            if name in {"execution.workspace_open", "execution.process_start", "execution.publish", "execution.workspace_sync"}:
                 kind, key, ref = (
                     ("workspace", args.get("request_id"), "workspace_id")
                     if name == "execution.workspace_open"
                     else ("process", args.get("request_id"), "process_ids")
                     if name == "execution.process_start"
+                    else ("operation", f"sync:{args.get('request_id')}", "operation_ids")
+                    if name == "execution.workspace_sync"
                     else ("operation", f"publish:{args.get('request_id')}:{args.get('approval_id') or 'pending'}", "operation_ids")
                 )
                 rid = hashlib.sha256((kind + ":" + key).encode()).hexdigest()[:32]
@@ -610,7 +701,7 @@ class TaskService:
                     result = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
                     self.observe(task, name, result, args)
                     for step in task["steps"].values():
-                        expected = {"execution.workspace_open": "workspace_id", "execution.process_start": "process_id", "execution.publish": "operation_id"}.get(step["tool"])
+                        expected = {"execution.workspace_open": "workspace_id", "execution.process_start": "process_id", "execution.publish": "operation_id", "execution.workspace_sync": "operation_id"}.get(step["tool"])
                         if expected and step.get("record_id") == args.get(expected) and step["status"] in {"dispatched", "reconciliation_required"}:
                             step.update(status="reconciled", finished_at=now())
                     observations.append({"tool": name, "result": result})

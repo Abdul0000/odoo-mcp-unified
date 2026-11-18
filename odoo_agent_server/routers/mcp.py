@@ -738,7 +738,7 @@ _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
     'execution.process_input': 'Send bounded stdin; eof closes input.',
     'execution.process_cancel': 'Cancel command and its container.',
     "task.open": "Pin client/target and open a durable task.",
-    "task.run": "Run scoped tool; preserve step_id and follow tool_result.",
+    "task.run": "task_id alone follows server next step; IDs auto-bind. Supply tool/arguments for edits.",
     "task.status": "Reconcile task proof read-only.",
     "task.resume": "Poll existing work after interruption; no write replay.",
     "task.list": "List recent durable client tasks.",
