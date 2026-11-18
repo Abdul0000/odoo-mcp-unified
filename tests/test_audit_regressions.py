@@ -120,28 +120,27 @@ def test_interrupted_dependency_install_is_rebuilt_before_cache_reuse(tmp_path):
     release.mkdir()
     (release / "requirements.txt").write_text("example==1.0")
     (tmp_path / "venvs").mkdir()
-    shim = tmp_path / "create-venv"
-    shim.write_text("""#!/bin/sh
-mkdir -p "$3/bin"
-cat > "$3/bin/python" <<'SCRIPT'
-#!/bin/sh
-if [ "$2" = pip ] && [ "$3" = install ]; then
-    echo install-attempt >> "$AUDIT_CALLS"
-    [ "$(wc -l < "$AUDIT_CALLS")" -gt 1 ] || exit 1
-fi
-exit 0
-SCRIPT
-chmod +x "$3/bin/python"
-""")
-    shim.chmod(0o755)
-    commands = tmp_path / "commands"
-    commands.mkdir()
-    (commands / "chown").write_text("#!/bin/sh\nexit 0\n")
-    (commands / "chown").chmod(0o755)
-    env = {**os.environ, "ROOT": str(tmp_path), "RELEASE": str(release), "PYTHON": str(shim), "AUDIT_CALLS": str(tmp_path / "calls"), "PATH": str(commands) + os.pathsep + os.environ["PATH"]}
+    # Mock process boundaries as shell functions: the production verification
+    # container deliberately mounts /tmp with noexec. Keep the actual cache,
+    # completion marker, error trap and retry logic from deploy.sh unchanged.
+    section = section.replace('"$VENV/bin/python" -', "audit_venv_python -")
+    boundaries = """
+audit_create_venv() {
+    mkdir -p "$3/bin"
+    ln -s "$AUDIT_PYTHON" "$3/bin/python"
+}
+audit_venv_python() {
+    if [ "$2" = pip ] && [ "$3" = install ]; then
+        echo install-attempt >> "$AUDIT_CALLS"
+        [ "$(wc -l < "$AUDIT_CALLS")" -gt 1 ] || return 1
+    fi
+}
+chown() { :; }
+"""
+    env = {**os.environ, "ROOT": str(tmp_path), "RELEASE": str(release), "PYTHON": "audit_create_venv", "AUDIT_PYTHON": sys.executable, "AUDIT_CALLS": str(tmp_path / "calls")}
 
     def run():
-        return subprocess.run(["bash", "-ec", section], env=env, capture_output=True, text=True)
+        return subprocess.run(["bash", "-ec", boundaries + section], env=env, capture_output=True, text=True)
 
     assert run().returncode != 0
     assert not list((tmp_path / "venvs").iterdir())
