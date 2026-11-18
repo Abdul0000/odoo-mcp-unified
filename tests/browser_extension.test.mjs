@@ -48,9 +48,31 @@ await pageOperation('press', {snapshot_id: enter.snapshot_id, ref: 'e0', key: 'E
 assert.equal(submissions, 1);
 
 
+// Visual overlays are isolated, non-interactive and cleaned without changing controls.
+const {browserIndicator} = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('visual.js', folder), 'utf8')).toString('base64'));
+const listeners = new Set(); let overlayHost;
+class OverlayElement {
+  constructor() {this.style = {}; this.isConnected = true;}
+  setAttribute() {} attachShadow(options) {this.shadowMode = options.mode; return {append() {}};}
+  remove() {this.isConnected = false;}
+}
+document.createElement = () => new OverlayElement();
+document.documentElement = {append: node => {overlayHost = node;}};
+globalThis.window = {addEventListener: (type, fn) => listeners.add(type + fn), removeEventListener: (type, fn) => listeners.delete(type + fn)};
+browserIndicator('working');
+assert.equal(overlayHost.shadowMode, 'closed'); assert.match(overlayHost.style.cssText, /pointer-events:none/);
+const ui = globalThis.__odooMcpVisual;
+let left = 10; button.getBoundingClientRect = () => ({left, top:20, width:100, height:30});
+ui.highlight(button); assert.equal(ui.target.style.left, '7px');
+left = 30; ui.onMove(); assert.equal(ui.target.style.left, '27px');
+browserIndicator('idle'); assert.equal(globalThis.__odooMcpVisual, ui, 'Reuse one overlay per page');
+browserIndicator('clear'); assert.equal(overlayHost.isConnected, false); assert.equal(listeners.size, 0);
+assert.equal(globalThis.__odooMcpVisual, undefined);
+
 const id = 'a'.repeat(32); const secret = 'test-paired-device-token';
 const saved = {profiles: {[id]: {server: 'https://relay.test', device_id: id, device_token: secret, origins: ['https://client.test'], allow_actions: true, paused: false}}};
 const generalId = '9'.repeat(32); saved.profiles[generalId] = {...saved.profiles[id], device_id: generalId, origins: ['*']};
+const groups = new Map(); const grouped = new Map(); const visualCalls = []; let groupCreated = 0;
 let created = 0; let loadReady = true; const updates = new Set(); const sockets = [];
 class FakeSocket {
   static OPEN = 1;
@@ -61,14 +83,17 @@ class FakeSocket {
 globalThis.WebSocket = FakeSocket;
 let storageProtected = false; const notifications = [];
 globalThis.chrome = {
+  scripting: {executeScript: async options => {visualCalls.push(options); return [{result:{snapshot_id:'mock-snapshot'}}];}},
+  tabGroups: {get: async id => {if (!groups.has(id)) throw new Error('No group'); return groups.get(id);}, update: async (id, options) => groups.set(id, {...groups.get(id), ...options})},
   notifications: {create: async (id, options) => {notifications.push({id, ...options});}},
   storage: {local: {setAccessLevel: async opts => {storageProtected = opts.accessLevel === 'TRUSTED_CONTEXTS';}, get: async () => structuredClone(saved), set: async values => Object.assign(saved, structuredClone(values))}},
   tabs: {query: async () => [{id: 12, url: 'https://client.test/web', title: 'Odoo'}, {id: 13, url: 'https://unrelated.test', title: 'Private other tab'}, {id: 14, url: 'chrome://extensions', title: 'Chrome settings'}],
-    create: async ({url}) => {created++; return {id: 20, url};}, get: async id => id === 20 ? {id: 20, url: 'https://client.test/web', status: loadReady ? 'complete' : 'loading'} : {id: 12, windowId: 1, url: 'https://unrelated.test', status: 'complete'}, onUpdated: {addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn)}},
+    group: async options => {const id = options.groupId ?? ++groupCreated; if (!groups.has(id)) groups.set(id, {id, windowId:options.createProperties.windowId}); for (const tabId of options.tabIds) grouped.set(tabId, id); return id;}, onRemoved: {addListener() {}},
+    create: async ({url}) => {created++; return {id: 20, url};}, get: async id => id === 20 ? {id: 20, windowId:1, groupId:grouped.get(id) ?? -1, url: 'https://client.test/web', status: loadReady ? 'complete' : 'loading'} : {id, windowId: 1, groupId:id === 22 ? 777 : grouped.get(id) ?? -1, pinned:id === 23, url: 'https://unrelated.test', status: 'complete'}, onUpdated: {addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn)}},
   alarms: {create() {}, onAlarm: {addListener() {}}},
   runtime: {id: 'test-extension', getURL: () => 'chrome-extension://test-extension/', onStartup: {addListener() {}}, onInstalled: {addListener() {}}, onMessage: {addListener() {}}},
 };
-let background = fs.readFileSync(new URL('background.js', folder), 'utf8').replace("import {pageOperation} from './page.js';", 'const pageOperation = () => {};');
+let background = fs.readFileSync(new URL('background.js', folder), 'utf8').replace("import {pageOperation} from './page.js';", 'const pageOperation = () => {};').replace("import {browserIndicator} from './visual.js';", 'const browserIndicator = () => {};');
 await import('data:text/javascript;base64,' + Buffer.from(background).toString('base64')).catch(error => {throw new Error(error.message);});
 const wait = async predicate => {for (let i = 0; i < 200; i++) {if (predicate()) return; await new Promise(r => setTimeout(r, 5));} throw new Error('Timed out waiting for extension callback');};
 await wait(() => sockets[0]?.authenticated);
@@ -97,13 +122,22 @@ try {
   await wait(() => updates.size > 0);
   assert.ok(!ws.sent.some(message => message.command_id === '0'.repeat(32)));
   loadReady = true;
-  for (const update of [...updates]) update(20, {status: 'complete'}, {id: 20, url: 'https://client.test/web', status: 'complete'});
+  for (const update of [...updates]) update(20, {status: 'complete'}, {id: 20, windowId:1, groupId:grouped.get(20) ?? -1, url: 'https://client.test/web', status: 'complete'});
   assert.equal((await loading).ok, true);
   const general = sockets.find(socket => socket.sent.some(message => message.type === 'authenticate' && message.device_id === generalId));
   await wait(() => general.authenticated);
   const allTabs = await issue('1'.repeat(32), 'tabs', {}, general);
   assert.equal(allTabs.result.tabs.length, 2);
   assert.ok(!JSON.stringify(allTabs.result).includes('chrome://'));
+  assert.equal(groupCreated, 1); assert.equal(groups.get(1).title, 'Odoo MCP'); assert.equal(groups.get(1).color, 'purple');
+  const anotherTab = await issue('2'.repeat(32), 'snapshot', {tab_id:21}, general);
+  assert.equal(anotherTab.ok, true); assert.equal(grouped.get(21), 1); assert.equal(groupCreated, 1);
+  await issue('3'.repeat(32), 'snapshot', {tab_id:22}, general);
+  await issue('4'.repeat(32), 'snapshot', {tab_id:23}, general);
+  assert.equal(grouped.has(22), false, 'Keep manually grouped tabs intact');
+  assert.equal(grouped.has(23), false, 'Keep pinned tabs intact');
+  assert.ok(visualCalls.some(call => call.args[0] === 'working'));
+  assert.ok(visualCalls.some(call => call.args[0] === 'idle'));
 
 
   console.log('DOM stale/CAS, password exclusion, input events, assertions, origin isolation and durable no-replay passed');

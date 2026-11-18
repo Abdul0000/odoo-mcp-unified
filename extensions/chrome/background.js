@@ -1,4 +1,5 @@
 import {pageOperation} from './page.js';
+import {browserIndicator} from './visual.js';
 const connections = new Map();
 const TTL = 48 * 60 * 60 * 1000;
 const writes = new Set(['open', 'navigate', 'click', 'fill', 'select', 'press', 'scroll']);
@@ -46,6 +47,46 @@ function loadedTab(id) {
     chrome.tabs.get(id).then(tab => {if (tab.status === 'complete') finish(tab);}, error => finish(null, error));
   });
 }
+const controlledTabs = new Map();
+const groupQueues = new Map();
+async function groupTab(tab) {
+  // Serialize per window so simultaneous devices cannot create duplicate groups.
+  const pending = (groupQueues.get(tab.windowId) || Promise.resolve()).catch(() => {}).then(async () => {
+    const current = await chrome.tabs.get(tab.id);
+    if (current.pinned || current.groupId >= 0) return; // Keep manually grouped/pinned tabs intact.
+    const key = 'mcpTabGroup:' + current.windowId;
+    const saved = await chrome.storage.local.get(key);
+    let group;
+    try {group = await chrome.tabGroups.get(saved[key]);} catch {}
+    const owned = group?.windowId === current.windowId && group.title === 'Odoo MCP';
+    const groupId = await chrome.tabs.group({tabIds: [current.id], ...(owned ? {groupId: group.id} : {createProperties: {windowId: current.windowId}})});
+    if (!owned) await chrome.tabGroups.update(groupId, {title: 'Odoo MCP', color: 'purple', collapsed: false});
+    await chrome.storage.local.set({[key]: groupId});
+  });
+  groupQueues.set(tab.windowId, pending);
+  try {await pending;} finally {if (groupQueues.get(tab.windowId) === pending) groupQueues.delete(tab.windowId);}
+}
+async function showControl(config, tab, phase) {
+  try {
+    if (!allowed(tab.url, config)) return;
+    const current = (await state()).profiles?.[config.device_id];
+    if (!current || current.paused || current.device_token !== config.device_token) return;
+    if (phase === 'working') {
+      await groupTab(tab).catch(() => {});
+      const owners = controlledTabs.get(tab.id) || new Set(); owners.add(config.device_id); controlledTabs.set(tab.id, owners);
+    }
+    await chrome.scripting.executeScript({target: {tabId: tab.id}, func: browserIndicator, args: [phase], world: 'ISOLATED'});
+  } catch {} // A display/permission failure must never turn a completed click into a retry.
+}
+chrome.tabs.onRemoved.addListener(tabId => controlledTabs.delete(tabId));
+async function clearControl(deviceId) {
+  for (const [tabId, owners] of controlledTabs) {
+    owners.delete(deviceId);
+    if (owners.size) continue;
+    controlledTabs.delete(tabId);
+    try {await chrome.scripting.executeScript({target: {tabId}, func: browserIndicator, args: ['clear'], world: 'ISOLATED'});} catch {}
+  }
+}
 async function runCommand(config, message) {
   const {action, arguments: args, command_id: id} = message;
   if (!id?.match(/^[a-f0-9]{32}$/) || Date.now() - (config.clock_offset || 0) > message.deadline * 1000) throw new Error('expired_command');
@@ -56,6 +97,7 @@ async function runCommand(config, message) {
     const tab = await chrome.tabs.create({url: args.url, active: true});
     const ready = await loadedTab(tab.id);
     if (!allowed(ready.url, config)) throw new Error('origin_changed: client redirected outside its paired origin');
+    await showControl(config, ready, 'working'); await showControl(config, ready, 'idle');
     return {tab_id: tab.id, url: ready.url, performed: true};
   }
   let tab = await chrome.tabs.get(args.tab_id);
@@ -66,6 +108,7 @@ async function runCommand(config, message) {
     await chrome.tabs.update(tab.id, {url: args.url});
     const ready = await loadedTab(tab.id);
     if (!allowed(ready.url, config)) throw new Error('origin_changed: client redirected outside its paired origin');
+    await showControl(config, ready, 'working'); await showControl(config, ready, 'idle');
     return {tab_id: tab.id, url: ready.url, performed: true};
   }
   if (action === 'screenshot') {
@@ -75,10 +118,13 @@ async function runCommand(config, message) {
     if (active?.id !== tab.id || active.url !== tab.url) throw new Error('tab_changed: screenshot discarded');
     return {tab_id: tab.id, url: tab.url, image: {mimeType: 'image/jpeg', data: image.split(',')[1]}};
   }
-  const result = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: pageOperation, args: [action, args], world: 'ISOLATED'});
-  const currentTab = await chrome.tabs.get(tab.id);
-  if (!allowed(currentTab.url, config)) throw new Error('origin_changed: inspect the browser locally');
-  return {tab_id: tab.id, ...result[0].result};
+  await showControl(config, tab, 'working');
+  try {
+    const result = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: pageOperation, args: [action, args], world: 'ISOLATED'});
+    const currentTab = await chrome.tabs.get(tab.id);
+    if (!allowed(currentTab.url, config)) throw new Error('origin_changed: inspect the browser locally');
+    return {tab_id: tab.id, ...result[0].result};
+  } finally {await showControl(config, await chrome.tabs.get(tab.id).catch(() => tab), 'idle');}
 }
 async function connect(config) {
   if (config.paused || connections.has(config.device_id)) return;
@@ -107,6 +153,7 @@ async function connect(config) {
     clearInterval(keepalive);
     if (connections.get(config.device_id) !== ws) return;
     connections.delete(config.device_id);
+    void clearControl(config.device_id);
     connectionErrors.set(config.device_id, event.code === 1008 ? 'Pairing rejected. Pair this browser again.' : 'Connection lost. Reconnecting…');
     if (event.code !== 1008) setTimeout(reconnect, 3000);
   };
@@ -124,6 +171,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
   (async () => {
     if (message.type === 'refresh') {
+      if (message.device_id) await clearControl(message.device_id); else for (const id of Object.keys((await state()).profiles || {})) await clearControl(id);
       if (message.device_id) {const ws = connections.get(message.device_id); if (ws) ws.close(); connections.delete(message.device_id);} else {for (const ws of connections.values()) ws.close(); connections.clear();}
       await reconnect();
     }

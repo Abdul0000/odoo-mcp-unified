@@ -147,7 +147,7 @@ def test_extension_download_contains_only_fixed_packaged_assets(relay):
     response = client.get('/browser-extension/extension.zip')
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.content)) as package:
-        assert set(package.namelist()) == {'manifest.json', 'background.js', 'page.js', 'popup.html', 'popup.js', 'popup.css', 'icon128.png'}
+        assert set(package.namelist()) == {'manifest.json', 'background.js', 'page.js', 'visual.js', 'popup.html', 'popup.js', 'popup.css', 'icon128.png'}
         manifest = json.loads(package.read('manifest.json'))
         assert manifest['manifest_version'] == 3 and 'cookies' not in manifest['permissions']
         assert not manifest.get('host_permissions')
