@@ -22,6 +22,15 @@ function claimReceipt(config, id, action) {
   receiptQueue = claimed.catch(() => {});
   return claimed;
 }
+function loadedTab(id) {
+  return new Promise((resolve, reject) => {
+    const finish = (tab, error) => {clearTimeout(timer); chrome.tabs.onUpdated.removeListener(updated); error ? reject(error) : resolve(tab);};
+    const updated = (tabId, info, tab) => {if (tabId === id && info.status === 'complete') finish(tab);};
+    const timer = setTimeout(() => finish(null, new Error('page_loading_timeout: navigation may have happened; inspect a fresh snapshot')), 15000);
+    chrome.tabs.onUpdated.addListener(updated);
+    chrome.tabs.get(id).then(tab => {if (tab.status === 'complete') finish(tab);}, error => finish(null, error));
+  });
+}
 async function runCommand(config, message) {
   const {action, arguments: args, command_id: id} = message;
   if (!id?.match(/^[a-f0-9]{32}$/) || Date.now() - (config.clock_offset || 0) > message.deadline * 1000) throw new Error('expired_command');
@@ -30,14 +39,19 @@ async function runCommand(config, message) {
   if (action === 'open') {
     if (!allowed(args.url, config)) throw new Error('origin_not_allowed');
     const tab = await chrome.tabs.create({url: args.url, active: true});
-    return {tab_id: tab.id, url: args.url, performed: true};
+    const ready = await loadedTab(tab.id);
+    if (!allowed(ready.url, config)) throw new Error('origin_changed: client redirected outside its paired origin');
+    return {tab_id: tab.id, url: ready.url, performed: true};
   }
-  const tab = await chrome.tabs.get(args.tab_id);
+  let tab = await chrome.tabs.get(args.tab_id);
+  if (tab.status === 'loading') tab = await loadedTab(tab.id);
   if (!allowed(tab.url, config)) throw new Error('origin_not_allowed');
   if (action === 'navigate') {
     if (!allowed(args.url, config)) throw new Error('origin_not_allowed');
     await chrome.tabs.update(tab.id, {url: args.url});
-    return {tab_id: tab.id, url: args.url, performed: true};
+    const ready = await loadedTab(tab.id);
+    if (!allowed(ready.url, config)) throw new Error('origin_changed: client redirected outside its paired origin');
+    return {tab_id: tab.id, url: ready.url, performed: true};
   }
   if (action === 'screenshot') {
     if (!tab.active) throw new Error('activate_target_tab: screenshots require the selected shared tab');

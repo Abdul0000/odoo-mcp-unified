@@ -50,7 +50,7 @@ assert.equal(submissions, 1);
 
 const id = 'a'.repeat(32); const secret = 'test-paired-device-token';
 const saved = {profiles: {[id]: {server: 'https://relay.test', device_id: id, device_token: secret, origins: ['https://client.test'], allow_actions: true, paused: false}}};
-let created = 0; const sockets = [];
+let created = 0; let loadReady = true; const updates = new Set(); const sockets = [];
 class FakeSocket {
   static OPEN = 1;
   constructor(url) {assert.ok(!String(url).includes(secret)); this.readyState = 1; this.sent = []; sockets.push(this); queueMicrotask(() => this.onopen?.());}
@@ -62,7 +62,7 @@ let storageProtected = false;
 globalThis.chrome = {
   storage: {local: {setAccessLevel: async opts => {storageProtected = opts.accessLevel === 'TRUSTED_CONTEXTS';}, get: async () => structuredClone(saved), set: async values => Object.assign(saved, structuredClone(values))}},
   tabs: {query: async () => [{id: 12, url: 'https://client.test/web', title: 'Odoo'}, {id: 13, url: 'https://unrelated.test', title: 'Private other tab'}],
-    create: async ({url}) => {created++; return {id: 20, url};}, get: async () => ({id: 12, windowId: 1, url: 'https://unrelated.test'})},
+    create: async ({url}) => {created++; return {id: 20, url};}, get: async id => id === 20 ? {id: 20, url: 'https://client.test/web', status: loadReady ? 'complete' : 'loading'} : {id: 12, windowId: 1, url: 'https://unrelated.test', status: 'complete'}, onUpdated: {addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn)}},
   alarms: {create() {}, onAlarm: {addListener() {}}},
   runtime: {id: 'test-extension', getURL: () => 'chrome-extension://test-extension/', onStartup: {addListener() {}}, onInstalled: {addListener() {}}, onMessage: {addListener() {}}},
 };
@@ -88,5 +88,13 @@ try {
   saved.profiles[id].allow_actions = false;
   const paused = await issue('f'.repeat(32), 'open', {url: 'https://client.test/web'});
   assert.equal(paused.ok, false); assert.equal(created, 1);
+  saved.profiles[id].allow_actions = true; loadReady = false;
+  const loading = issue('0'.repeat(32), 'open', {url: 'https://client.test/web'});
+  await wait(() => updates.size > 0);
+  assert.ok(!ws.sent.some(message => message.command_id === '0'.repeat(32)));
+  loadReady = true;
+  for (const update of [...updates]) update(20, {status: 'complete'}, {id: 20, url: 'https://client.test/web', status: 'complete'});
+  assert.equal((await loading).ok, true);
+
   console.log('DOM stale/CAS, password exclusion, input events, assertions, origin isolation and durable no-replay passed');
 } finally {for (const socket of sockets) socket.close();}
