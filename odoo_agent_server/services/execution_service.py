@@ -63,7 +63,8 @@ def git(argv, cwd, *, timeout=60, env=None):
         clean_env.update(env)
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(["git", "-c", f"safe.directory={Path(cwd).resolve()}",
-                                    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *argv], cwd=cwd,
+                                    "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                                    "-c", "maintenance.auto=false", "-c", "gc.auto=0", *argv], cwd=cwd,
                                    env=clean_env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             process.wait(timeout=timeout)

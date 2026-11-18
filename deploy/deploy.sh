@@ -59,7 +59,7 @@ if systemctl is-enabled --quiet odoo-mcp-execution.service; then
     DOCKER_BUILDKIT=0 docker build --memory 512m --memory-swap 512m --cpu-period 100000 --cpu-quota 100000 \
       -f "$RELEASE/deploy/Dockerfile.execution" -t "$CANDIDATE_IMAGE" "$RELEASE"
   fi
-  docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+  docker run --rm --init --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
     --user "$(stat -c '%u:%g' "$RELEASE")" --env HOME=/tmp \
     --memory 512m --cpus 1 --pids-limit 256 --tmpfs /tmp:rw,nosuid,nodev,size=256m \
     --mount "type=bind,src=$RELEASE,dst=/workspace,readonly" --workdir /workspace \
