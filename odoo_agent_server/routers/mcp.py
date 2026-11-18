@@ -650,6 +650,7 @@ _PROVIDER_TOOL_NAMES = {
 # workflow, the workspace lane, polling, and discovery, and drops tools that are
 # only useful for manual REST/debug flows.
 from ..execution_tools import EXECUTION_TOOLS
+_PROVIDER_TOOL_NAMES.add('browser.extension')
 _PROVIDER_TOOL_NAMES.update(EXECUTION_TOOLS)
 from .tools import _TASK_TOOLS
 _PROVIDER_TOOL_NAMES.update(_TASK_TOOLS)
@@ -692,6 +693,7 @@ _PROVIDER_TOOL_NAMES_MINIMAL = {
 
 # Backward-compatible names retained for tests/imports; all provider routes use
 # the same minimal flow.
+_PROVIDER_TOOL_NAMES_MINIMAL.add('browser.extension')
 _PROVIDER_TOOL_NAMES_MINIMAL.update(EXECUTION_TOOLS)
 _PROVIDER_TOOL_NAMES_MINIMAL.update(_TASK_TOOLS)
 _CLAUDE_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
@@ -1189,6 +1191,11 @@ async def _handle_shell(
                 )
             else:
                 result = await _dispatch(internal_name, arguments)
+            image_content = None
+            if internal_name == 'browser.extension' and isinstance(result, dict) and isinstance(result.get('result'), dict):
+                media = result['result'].pop('image', None)
+                if media:
+                    image_content = {'type': 'image', 'mimeType': media['mimeType'], 'data': media['data']}
             structured = _to_structured_content(result, tool_name=internal_name)
             if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
                 structured = _provider_safe_next_calls(structured)
@@ -1214,7 +1221,7 @@ async def _handle_shell(
             return _shell_response(
                 request_id,
                 {
-                    "content": [{"type": "text", "text": text}],
+                    "content": [{"type": "text", "text": text}] + ([image_content] if image_content else []),
                     "structuredContent": structured,
                     "isError": False,
                 },

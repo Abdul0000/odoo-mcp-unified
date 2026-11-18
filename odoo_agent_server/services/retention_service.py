@@ -294,6 +294,8 @@ class RetentionService:
                 if path.is_file() and not path.is_symlink() and self.old(path):
                     path.unlink()
                     self.counts["sidecars"] += 1
+        from .browser_extension_service import BrowserExtensionService
+        self.counts["sidecars"] += BrowserExtensionService().cleanup(self.cutoff)
         return {"retention_seconds": min(172800, settings.history_retention_seconds), "removed": self.counts}
 
 

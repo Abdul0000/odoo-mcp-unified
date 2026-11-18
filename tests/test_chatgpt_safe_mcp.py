@@ -15,6 +15,7 @@ def _mcp(method, params=None, request_id=1):
 
 
 _PROVIDER_TOOLS = {
+    "browser_extension",
     "connector_health",
     "skills_list",
     "skills_read",

@@ -15,6 +15,7 @@ from .config import settings
 from .routers.client_admin import router as client_admin_router
 from .routers.approvals import router as approvals_router
 from .routers.browser import router as browser_router
+from .routers.browser_extension import router as browser_extension_router
 from .routers.git import router as git_router
 from .routers.jobs import router as jobs_router
 from .routers.mcp import (
@@ -230,6 +231,7 @@ app.include_router(git_router)
 app.include_router(odoosh_router)
 app.include_router(odoo_router)
 app.include_router(browser_router)
+app.include_router(browser_extension_router)
 app.include_router(approvals_router)
 app.include_router(jobs_router)
 app.include_router(tools_router)

@@ -9061,6 +9061,11 @@ _TOOL_DESCRIPTORS.extend(
 )
 
 
+from ..browser_extension_schemas import BrowserExtensionRequest
+from ..services.browser_extension_service import BrowserExtensionService
+_TOOL_INPUT_MODELS['browser.extension'] = BrowserExtensionRequest
+_TOOL_DESCRIPTORS.append(ToolDescriptor(name='browser.extension', description='Control paired logged-in Chrome client tabs. Start status/tabs/snapshot; use snapshot refs for actions; poll command_id. UI evidence is separate from database correctness.', read_only=False))
+
 from ..task_schemas import TaskOpen, TaskId, TaskRun, TaskList, TaskKnowledge, TaskTests, MutationPreview, TaskDeploy
 _TASK_TOOLS = {
     'task.open': (TaskOpen, 'Open a client-pinned durable task before coding, debugging, deployment or functional work. No model API key needed.', False),
@@ -9141,6 +9146,8 @@ async def _dispatch_inner(name: str, args: dict) -> object:
             if not wid: raise HTTPException(409,'Open a linked execution workspace first')
             return await asyncio.to_thread(suggest_checks,wid,req.apply)
         return await asyncio.to_thread(FunctionalOperationService().preview,req.operation,req.arguments)
+    if name == 'browser.extension':
+        return await BrowserExtensionService().dispatch(BrowserExtensionRequest.model_validate(args))
     if name in EXECUTION_TOOLS:
         return await asyncio.to_thread(dispatch_execution, name, args)
     if name.startswith("ws."):

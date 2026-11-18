@@ -37,6 +37,7 @@ _DEPLOY_TOOLS = {"workflow.safe_deploy_module"}
 _POLL_TOOLS = {"jobs.get", "jobs.list", "workflow.resume_job"}
 _ALLOWED_REPEAT_TOOLS = {"jobs.get", "jobs.list", "artifacts.read"}
 _FUNCTIONAL_OPERATION_TOOLS = {
+    "browser.extension",
     "odoo.record_create",
     "odoo.record_write",
     "odoo.record_action",

@@ -9,6 +9,7 @@ from odoo_agent_server.routers.mcp import provider_tool_names_safe
 from odoo_agent_server.schemas import OdooCodeChangeRequest, OdooCodeFileChange
 
 _PROVIDER_TOOLS = {
+    "browser_extension",
     "ws_open",
     "ws_status",
     "ws_outline",
@@ -247,8 +248,8 @@ def test_provider_tool_contract_stays_within_context_budget(monkeypatch, executi
     monkeypatch.setattr(settings, "agent_model", None)
 
     tools = _mcp_tools_list()
-    # Budget re-measured after adding the explicit approval-continuation action. Keep headroom small so growth is noticed.
-    assert len(json.dumps(tools, ensure_ascii=False)) < 80_100
+    # Includes one scoped Chrome relay descriptor; action details are validated server-side.
+    assert len(json.dumps(tools, ensure_ascii=False)) < 82_000
 
 
 def test_provider_tool_descriptions_are_complete_and_semantically_compact():
