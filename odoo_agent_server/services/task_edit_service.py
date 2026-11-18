@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 
 from fastapi import HTTPException
+from .source_artifact_policy import validate_source_paths
 
 
 def replace_file(path, content, mode):
@@ -23,6 +24,7 @@ def replace_file(path, content, mode):
 def apply_edits(service, workspace_id, edits):
     if not edits:
         raise HTTPException(400, "batch requires edits")
+    validate_source_paths(service.root(workspace_id), [p for edit in edits for p in ([edit.path] if edit.operation != "delete" else []) + ([edit.destination] if edit.destination else [])])
     originals, desired = {}, {}
 
     def reserve(path):

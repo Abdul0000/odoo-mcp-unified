@@ -82,6 +82,9 @@ class ExecutionWorker:
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
                 "--workdir", "/workspace" + ("/" + str(cwd) if str(cwd) != "." else ""),
                 "--env", "HOME=/tmp", "--env", "PYTHONDONTWRITEBYTECODE=1",
+                "--env", "PYTHONPYCACHEPREFIX=/tmp/odoo-mcp-pycache",
+                "--env", "XDG_CACHE_HOME=/tmp/odoo-mcp-cache",
+                "--env", "PYTEST_ADDOPTS=-p no:cacheprovider",
                 *outputs,
                 record.get("runtime_id") if str(record.get("runtime_id", "")).startswith("sha256:") else settings.execution_image, *req.argv]
 

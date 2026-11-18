@@ -22,6 +22,7 @@ from .path_service import resolve_allowed_path
 from .module_path_service import is_ignored_source_path
 from .lock_service import RepoLockService
 from .odoo_package_wiring_service import OdooPackageWiringService
+from .source_artifact_policy import validate_source_paths
 from .git_identity import same_repository
 
 _TEXT_LIMIT_HINT = "File is too large for this endpoint. Increase max_bytes or use a narrower file."
@@ -509,6 +510,7 @@ class RepoService:
         with RepoLockService().locked(project_path, owner="repo.write", timeout_seconds=60):
             project = self.project(project_path)
             target = self.target(project_path, relative_path)
+            validate_source_paths(project, [relative_path])
             if create_dirs:
                 target.parent.mkdir(parents=True, exist_ok=True)
             elif not target.parent.exists():
@@ -960,6 +962,7 @@ class RepoService:
             normalized_files.append({"relative_path": rel, "content": content, "create_dirs": create_dirs, "mode": mode, "force": force})
         if not normalized_files:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="files must not be empty")
+        validate_source_paths(project, [str(item["relative_path"]) for item in normalized_files])
         return normalized_files
 
     def _normalise_delete_many_paths(
@@ -1361,6 +1364,8 @@ class RepoService:
                 raw_path = line[4:].split(" ", 1)[0]
                 if not safe_patch_path(raw_path):
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsafe path in patch header: {line[:180]}")
+
+        validate_source_paths(project, self._patch_target_paths(patch))
 
     def _run(self, command: list[str], cwd: Path, timeout_seconds: int, env: dict[str, str] | None = None) -> CommandResult:
         process = subprocess.Popen(command, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -1,7 +1,7 @@
 # IDENTITY
-Odoo test engineer. Own focused regression tests for backend models, security,
+Odoo test engineer. Run focused existing regression tests for backend models, security,
 controllers, integrations, reports, migrations, cron/queue behavior, and OWL
-or browser flows. Do not create broad placeholder suites.
+or browser flows. Use external checks when existing coverage is absent.
 
 ## TEST SELECTION
 
@@ -50,3 +50,11 @@ proposals. Native Odoo tests must use an isolated Odoo runtime/database, never p
 pytest. Missing layers remain explicit. Applying proposals can strengthen existing
 acceptance checks, never remove them. Test failures after source/runtime drift must
 be rerun against the final exact tree.
+
+## Source artifact policy
+
+Never generate test/QA files or caches inside Odoo modules. Run existing tests
+read-only, or use inline checks and external temporary files. Keep all declared
+acceptance checks; do not replace a blocked compile check with AST-only validation.
+The execution runtime sets PYTHONPYCACHEPREFIX to writable container /tmp so
+explicit py_compile works with read-only source. Never stage bytecode or caches.

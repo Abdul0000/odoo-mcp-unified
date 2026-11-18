@@ -128,8 +128,12 @@ def test_suggested_tests_are_source_derived_and_dont_fake_missing_layers(task):
 
 def test_native_odoo_tests_are_not_sent_to_plain_pytest(task):
     _, _, svc, wid, _ = task
-    for path, content in [("addon/__manifest__.py", "{'depends':['base']}"), ("addon/models/order.py", "x=1"), ("addon/tests/test_order.py", "from odoo.tests import TransactionCase")]:
+    for path, content in [("addon/__manifest__.py", "{'depends':['base']}"), ("addon/models/order.py", "x=1")]:
         svc.files(WorkspaceFiles(workspace_id=wid, operation="write", path=path, content=content))
+    # Simulate an existing native test supplied by the client repository.
+    tests = svc.root(wid) / "addon" / "tests"
+    tests.mkdir()
+    (tests / "test_order.py").write_text("from odoo.tests import TransactionCase")
     from odoo_agent_server.services.execution_service import git
 
     git(["add", "."], svc.root(wid))

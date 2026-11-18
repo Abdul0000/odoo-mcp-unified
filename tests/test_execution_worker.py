@@ -691,3 +691,64 @@ def test_workspace_status_never_waits_for_mutation_lock(execution):
         result = service.status(ws)
         assert time.monotonic() - started < .2
         assert result['state_class'] == 'running' and not result['success_allowed']
+
+
+def test_compile_uses_external_cache_and_preserves_syntax_gate(execution):
+    service, ws, _, _ = execution
+    root = service.root(ws)
+    record = {'id': 'cache-check', 'request': ProcessStart(workspace_id=ws, argv=['python', '-m', 'py_compile', 'hello.py'], request_id='cache-check').model_dump()}
+    command = ExecutionWorker(service=service).command(record)
+    assert 'PYTHONPYCACHEPREFIX=/tmp/odoo-mcp-pycache' in command
+    assert 'PYTEST_ADDOPTS=-p no:cacheprovider' in command
+    cache = root.parent / 'external-cache'
+    env = {**os.environ, 'PYTHONPYCACHEPREFIX': str(cache), 'PYTHONDONTWRITEBYTECODE': '1'}
+    result = subprocess.run([sys.executable, '-m', 'py_compile', str(root / 'hello.py')], env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert list(cache.rglob('*.pyc'))
+    assert not list(root.rglob('__pycache__'))
+    (root / 'hello.py').write_text('def broken(:\n')
+    result = subprocess.run([sys.executable, '-m', 'py_compile', str(root / 'hello.py')], env=env, capture_output=True)
+    assert result.returncode != 0
+    assert b'SyntaxError' in result.stderr
+
+
+def test_module_artifacts_blocked_without_affecting_existing_tests(execution):
+    from odoo_agent_server.services.source_artifact_policy import validate_source_paths
+    service, ws, _, _ = execution
+    root = service.root(ws)
+    (root / 'addon').mkdir()
+    (root / 'addon' / '__manifest__.py').write_text("{'name':'Addon'}\n")
+    for path in ['addon/tests/test_flow.py', 'addon/test_flow.py', 'addon/qa_report.py', 'addon/widget.test.js', 'addon/QA.md', 'addon/__pycache__/a.pyc', '.pytest_cache/value']:
+        with pytest.raises(HTTPException) as error:
+            service.files(WorkspaceFiles(workspace_id=ws, operation='write', path=path, content='pass\n'))
+        assert error.value.detail['error_code'] == 'source_artifact_forbidden'
+        assert not (root / path).exists()
+    with pytest.raises(HTTPException):
+        validate_source_paths(root, ['new/__manifest__.py', 'new/tests/test_flow.py'])
+    validate_source_paths(root, ['tests/test_connector.py', 'addon/models.py'])
+    with pytest.raises(HTTPException):
+        service.files(WorkspaceFiles(workspace_id=ws, operation='batch', edits=[
+            {'operation':'write', 'path':'new/__manifest__.py', 'content':"{'name':'New'}"},
+            {'operation':'write', 'path':'new/tests/test_flow.py', 'content':'pass\n'},
+        ]))
+    assert not (root / 'new').exists()
+    (root / 'addon' / 'tests').mkdir()
+    (root / 'addon' / 'tests' / 'test_existing.py').write_text('pass\n')
+    result = service.files(WorkspaceFiles(workspace_id=ws, operation='read', path='addon/tests/test_existing.py'))
+    assert result['content'] == 'pass\n'
+    with pytest.raises(HTTPException):
+        service.validate_check(ws, {'argv':['python','--version'], 'layer':'syntax', 'output_dirs':['addon/tests']})
+
+
+def test_publish_rejects_command_created_module_tests(execution, monkeypatch):
+    service, ws, _, bare = execution
+    root = service.root(ws)
+    (root / 'addon' / 'tests').mkdir(parents=True)
+    (root / 'addon' / '__manifest__.py').write_text("{'name':'Addon'}\n")
+    (root / 'addon' / 'tests' / 'test_flow.py').write_text('pass\n')
+    before = subprocess.check_output(['git', '--git-dir', str(bare), 'rev-parse', 'staging'])
+    verify(service, ws, monkeypatch)
+    with pytest.raises(HTTPException) as error:
+        service.publish(WorkspacePublish(workspace_id=ws, message='Block artifacts', request_id='artifact-publish'))
+    assert error.value.detail['error_code'] == 'source_artifact_forbidden'
+    assert subprocess.check_output(['git', '--git-dir', str(bare), 'rev-parse', 'staging']) == before

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..schemas import CommandResult
@@ -11,14 +13,15 @@ class TestRunner:
 
     def run(self, command: list[str], cwd: Path, timeout_seconds: int) -> CommandResult:
         try:
-            completed = subprocess.run(
-                command,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            with tempfile.TemporaryDirectory(prefix="odoo-mcp-check-") as temporary:
+                env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                       "PYTHONPYCACHEPREFIX": str(Path(temporary) / "pycache"),
+                       "XDG_CACHE_HOME": str(Path(temporary) / "cache"),
+                       "PYTEST_ADDOPTS": os.environ.get("PYTEST_ADDOPTS", "") + " -p no:cacheprovider"}
+                completed = subprocess.run(
+                    command, cwd=str(cwd), capture_output=True, text=True,
+                    timeout=timeout_seconds, check=False, env=env,
+                )
             return CommandResult(
                 command=command,
                 cwd=str(cwd),

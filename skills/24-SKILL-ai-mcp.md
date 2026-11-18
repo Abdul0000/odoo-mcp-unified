@@ -84,3 +84,11 @@ need task-specific checks. Treat model code as a proposal; completion comes only
 from stored current-tree/runtime/live evidence.
 New step/request IDs cannot bypass uncertain task mutations. Follow task_resume
 read-back until the existing receipt is reconciled; interrupted reads are retryable.
+
+## Source artifact policy
+
+Never generate test/QA files or caches inside Odoo modules. Run existing tests
+read-only, or use inline checks and external temporary files. Keep all declared
+acceptance checks; do not replace a blocked compile check with AST-only validation.
+The execution runtime sets PYTHONPYCACHEPREFIX to writable container /tmp so
+explicit py_compile works with read-only source. Never stage bytecode or caches.

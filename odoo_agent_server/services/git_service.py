@@ -13,6 +13,7 @@ from .client_resolver_service import ClientResolverService
 from .path_service import resolve_allowed_path
 from .repo_service import RepoService
 from .lock_service import RepoLockService
+from .source_artifact_policy import validate_git_artifacts
 from .git_identity import same_repository
 
 
@@ -259,6 +260,7 @@ class GitService:
             diff_result = self._run(["git", "diff", "--cached", "--quiet"], project, timeout_seconds)
             if diff_result.exit_code == 0:
                 return CommandResult(command=["git", "commit", "-m", message], cwd=str(project), exit_code=1, stderr="No staged changes to commit.")
+            validate_git_artifacts(project, ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT", "--"])
             return self._run(["git", "commit", "-m", message], project, timeout_seconds)
 
 
@@ -291,6 +293,14 @@ class GitService:
         else:
             command.extend([remote, f"HEAD:{branch}"])
         with RepoLockService().locked(str(project), owner="git.push", timeout_seconds=min(timeout_seconds, 120)):
+            from .execution_service import git
+            tracking = f"refs/remotes/{remote}/{branch}"
+            try:
+                base = git(["rev-parse", "--verify", tracking], project).strip()
+            except HTTPException:
+                base = None
+            validate_git_artifacts(project, ["diff", "--name-only", "-z", "--diff-filter=ACMRT", base, "HEAD", "--"]
+                                   if base else ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
             result = self._run(command, project, timeout_seconds)
             if result.exit_code != 0 and ("non-fast-forward" in (result.stderr or "") or "fetch first" in (result.stderr or "") or "rejected" in (result.stderr or "")):
                 return CommandResult(command=command, cwd=str(project), exit_code=1,

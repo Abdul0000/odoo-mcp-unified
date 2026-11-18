@@ -29,6 +29,7 @@ from .path_service import resolve_allowed_path
 from .repo_service import RepoService
 from .approval_service import ApprovalService
 from .skill_service import SkillService
+from .source_artifact_policy import validate_git_artifacts, validate_source_paths
 
 _INSTANCE = uuid4().hex
 _IO_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="execution_git")
@@ -382,6 +383,7 @@ class ExecutionService:
         if Path(argv[0]).name == "npm" and not capabilities.get("npm"):
             raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "npm"})
         for directory in check["output_dirs"]:
+            validate_source_paths(self.root(workspace_id), [directory + "/probe.py"])
             target = self.target(workspace_id, directory)
             if (not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", directory) or directory == "."
                     or (target.exists() and not target.is_dir())
@@ -458,6 +460,7 @@ class ExecutionService:
                     "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw),
                     "next_offset": min(len(raw), request.offset + request.limit)}
         if request.operation == "write":
+            validate_source_paths(self.root(request.workspace_id), [request.path])
             if request.content is None:
                 raise HTTPException(400, "content is required for write")
             if target.exists() and not target.is_file():
@@ -745,6 +748,8 @@ class ExecutionService:
         if not verification["ready"]:
             raise HTTPException(409, {"message": "Publish requires all planned checks to pass on the current tree",
                                       "verification": verification})
+        validate_git_artifacts(self.root(request.workspace_id),
+                               ["diff", "--name-only", "-z", "--diff-filter=ACMRT", "HEAD", verification["tree"], "--"])
         approvals = ApprovalService()
         protected = {"main", "master", "production", "prod", "live"} | settings.protected_branches
         approvals.ensure_allowed("git.push" if request.push else "git.commit", request.approval_id,

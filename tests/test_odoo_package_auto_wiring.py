@@ -54,13 +54,14 @@ def test_nested_python_package_wiring_reaches_addon_root(tmp_path, monkeypatch):
     assert (module / "__init__.py").read_text(encoding="utf-8") == "from . import controllers\n"
 
 
-def test_tests_are_wired_inside_tests_but_not_imported_by_addon_root(tmp_path, monkeypatch):
+def test_module_test_writes_are_rejected_before_package_wiring(tmp_path, monkeypatch):
     project, module = _addon(tmp_path, monkeypatch)
     (module / "__init__.py").write_text("from . import models\n", encoding="utf-8")
 
-    RepoService().write_file(str(project), "device_module/tests/test_device.py", "def test_device():\n    assert True\n")
-
-    assert (module / "tests" / "__init__.py").read_text(encoding="utf-8") == "from . import test_device\n"
+    with pytest.raises(HTTPException) as error:
+        RepoService().write_file(str(project), "device_module/tests/test_device.py", "def test_device():\n    assert True\n")
+    assert error.value.detail["error_code"] == "source_artifact_forbidden"
+    assert not (module / "tests").exists()
     assert (module / "__init__.py").read_text(encoding="utf-8") == "from . import models\n"
 
 

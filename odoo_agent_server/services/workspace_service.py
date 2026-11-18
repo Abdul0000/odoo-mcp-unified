@@ -25,8 +25,10 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
+from pathlib import PurePosixPath
 
 from .three_way_merge import merge_text
+from .source_artifact_policy import artifact_reason
 from . import lint_service as lint
 from . import outline_service, scaffold_service, symbol_service
 from concurrent.futures import ThreadPoolExecutor
@@ -606,6 +608,14 @@ class ClientTarget:
     branch: str
 
 
+def source_artifact_reason(ws, path, added_paths=()):
+    in_module = any(str(parent / manifest) in ws.tree or str(parent / manifest) in ws.overlay
+                    or str(parent / manifest) in added_paths
+                    for parent in PurePosixPath(path).parents
+                    for manifest in ("__manifest__.py", "__openerp__.py"))
+    return artifact_reason(path, in_module)
+
+
 class WorkspaceService:
     def __init__(self, resolve_client, *, protected: str | None = None, autocheckpoint: bool = True, checkpoint_mode: str = "sync", registry: WorkspaceRegistry | None = None, core_repo_factory=None, wip_files: bool = True) -> None:
         """``resolve_client(name) -> ClientTarget`` keeps this module free of web-framework imports.
@@ -792,11 +802,14 @@ class WorkspaceService:
             return path
         return f"{ws.root}/{path}"
 
-    def _guard(self, ws: Workspace, edit: dict[str, Any]) -> dict[str, Any] | None:
+    def _guard(self, ws: Workspace, edit: dict[str, Any], added_paths=()) -> dict[str, Any] | None:
         op = edit.get("op") or ("write" if edit.get("content") is not None else "replace" if edit.get("search") is not None else None)
         path = edit["path"]
         if op == "delete":
             return None
+        reason = source_artifact_reason(ws, path, added_paths)
+        if reason:
+            return {"code": "source_artifact_forbidden", "msg": reason}
         if not ws._is_text(path):
             return {"code": "binary_unsupported", "msg": f"{path} is not a text file type; ws_edit only handles text ({', '.join(TEXT_EXT[:6])}, ...). Add binary assets directly in git."}
         for key in ("content", "replace"):
@@ -817,9 +830,10 @@ class WorkspaceService:
             results, failed = [], False
             healed_edits: list[dict[str, Any]] = []
             applied: list[dict[str, Any]] = []
+            proposed_paths = {item["path"] for item in normalized}
             for index, edit in enumerate(normalized):
                 path = edit["path"]
-                bad = self._guard(ws, edit)
+                bad = self._guard(ws, edit, proposed_paths)
                 if bad:
                     failed = True
                     results.append({"i": index, "path": path, "ok": False, **bad})
@@ -1144,6 +1158,8 @@ class WorkspaceService:
         """
         try:
             with ws.lock:
+                if any(source_artifact_reason(ws, path) for path, content in ws.overlay.items() if content is not None):
+                    return {"saved": False, "status": "blocked_source_artifacts"}
                 ws.journal = self._compact_journal(ws)
                 if not ws.journal:
                     return {"saved": True, "ops": 0}
@@ -1241,6 +1257,10 @@ class WorkspaceService:
             changed = ws.changed_paths()
             if not changed:
                 return {"status": "no_changes", "message": "workspace has no differences from the branch"}
+            forbidden = [{"path": path, "reason": source_artifact_reason(ws, path)} for path in changed if ws.overlay.get(path) is not None]
+            forbidden = [item for item in forbidden if item["reason"]]
+            if forbidden:
+                return {"status": "blocked_source_artifacts", "files": forbidden}
             findings = self._lint_changed(ws)
             errors = [f for f in findings if f["severity"] == "error"]
             if errors and not allow_lint_errors:

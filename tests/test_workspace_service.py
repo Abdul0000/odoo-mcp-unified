@@ -642,3 +642,16 @@ class VisibleOnGitHub(unittest.TestCase):
         res = svc.edit(ws_id, [{"path": "models/sale.py", "search": "Char()", "replace": "Text()"}])
         self.assertFalse(res["checkpoint"]["saved"])
         self.assertIn("not accessible", res["checkpoint"]["reason"])
+
+
+def test_artifact_edit_rejected_atomically_before_wip_publish():
+    gh, _, svc, _ = make()
+    wid = svc.open("Acme", "my_mod")["ws_id"]
+    result = svc.edit(wid, [
+        {"path": "models/sale.py", "content": SALE_PY + "# changed\n"},
+        {"path": "tests/test_flow.py", "content": "pass\n"},
+    ])
+    assert result["status"] == "rejected" and result["applied"] == 0
+    assert result["results"][1]["code"] == "source_artifact_forbidden"
+    assert not svc.get(wid).overlay
+    assert not svc.get(wid).repo.ref_exists(svc.get(wid).wip_branch)
