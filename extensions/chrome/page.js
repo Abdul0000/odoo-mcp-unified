@@ -25,6 +25,7 @@ export async function pageOperation(action, args) {
   };
   if (action === 'snapshot') return snap();
   if (action === 'scroll') {
+    globalThis.__odooMcpVisual?.move(window.innerWidth / 2, window.innerHeight / 2, args.dy < 0 ? 'Scroll up' : 'Scroll down');
     window.scrollBy({top: args.dy, behavior: 'instant'});
     return {performed: true, scroll_y: window.scrollY};
   }
@@ -41,7 +42,7 @@ export async function pageOperation(action, args) {
   const e = entry.node;
   if (['password', 'file', 'hidden'].includes(e.type)) throw new Error('protected_field');
   if (action === 'assert') {
-    globalThis.__odooMcpVisual?.highlight(e);
+    globalThis.__odooMcpVisual?.highlight(e, action);
     const text = label(e);
     const value = typeof e.value === 'string' ? e.value : e.textContent;
     const passed = (args.expected_text == null || text.includes(args.expected_text)) && (args.expected_value == null || value === args.expected_value);
@@ -51,7 +52,7 @@ export async function pageOperation(action, args) {
   const formTarget = e.getAttribute('formaction') || e.form?.action;
   if (formTarget && !args.allow_cross_origin && new URL(formTarget, location.href).origin !== location.origin) throw new Error('cross_origin_form');
   e.scrollIntoView({block: 'center', inline: 'nearest'});
-  globalThis.__odooMcpVisual?.highlight(e);
+  globalThis.__odooMcpVisual?.highlight(e, action);
   if (action === 'click') {
     const destination = e.closest('a[href]')?.href;
     if (destination && !args.allow_cross_origin && new URL(destination, location.href).origin !== location.origin) throw new Error('cross_origin_link: use only the paired client origin');

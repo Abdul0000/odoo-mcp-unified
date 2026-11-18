@@ -53,6 +53,8 @@ const {browserIndicator} = await import('data:text/javascript;base64,' + Buffer.
 const listeners = new Set(); let overlayHost;
 class OverlayElement {
   constructor() {this.style = {}; this.isConnected = true;}
+  append(...children) {this.children = children;}
+  animate(frames, options) {this.animation = {frames, options, cancelled:false}; return {cancel: () => {this.animation.cancelled = true;}};}
   setAttribute() {} attachShadow(options) {this.shadowMode = options.mode; return {append() {}};}
   remove() {this.isConnected = false;}
 }
@@ -63,10 +65,15 @@ browserIndicator('working');
 assert.equal(overlayHost.shadowMode, 'closed'); assert.match(overlayHost.style.cssText, /pointer-events:none/);
 const ui = globalThis.__odooMcpVisual;
 let left = 10; button.getBoundingClientRect = () => ({left, top:20, width:100, height:30});
-ui.highlight(button); assert.equal(ui.target.style.left, '7px');
-left = 30; ui.onMove(); assert.equal(ui.target.style.left, '27px');
+ui.highlight(button, 'click'); assert.equal(ui.target.style.left, '7px');
+assert.equal(ui.cursor.style.transform, 'translate(60px, 35px)');
+assert.equal(ui.cursorLabel.textContent, 'MCP · click'); assert.equal(ui.ripple.animation.options.duration, 650);
+assert.match(ui.cursor.style.cssText, /pointer-events:none/);
+left = 30; ui.onMove(); assert.equal(ui.target.style.left, '27px'); assert.equal(ui.cursor.style.transform, 'translate(80px, 35px)');
+ui.move(-100, 10000, 'Scroll down'); assert.equal(ui.cursor.style.transform, 'translate(4px, 736px)');
+assert.equal(ui.cursorLabel.textContent, 'MCP · Scroll down');
 browserIndicator('idle'); assert.equal(globalThis.__odooMcpVisual, ui, 'Reuse one overlay per page');
-browserIndicator('clear'); assert.equal(overlayHost.isConnected, false); assert.equal(listeners.size, 0);
+browserIndicator('clear'); assert.equal(overlayHost.isConnected, false); assert.equal(listeners.size, 0); assert.equal(ui.ripple.animation.cancelled, true);
 assert.equal(globalThis.__odooMcpVisual, undefined);
 
 const id = 'a'.repeat(32); const secret = 'test-paired-device-token';
