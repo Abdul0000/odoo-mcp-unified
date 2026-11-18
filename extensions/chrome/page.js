@@ -67,9 +67,13 @@ export async function pageOperation(action, args) {
     e.value = args.value; e.dispatchEvent(new Event('input', {bubbles: true})); e.dispatchEvent(new Event('change', {bubbles: true}));
   } else if (action === 'press') {
     e.focus();
-    e.dispatchEvent(new KeyboardEvent('keydown', {key: args.key, bubbles: true}));
+    const defaultAllowed = e.dispatchEvent(new KeyboardEvent('keydown', {key: args.key, bubbles: true, cancelable: true}));
     e.dispatchEvent(new KeyboardEvent('keyup', {key: args.key, bubbles: true}));
-    if (args.key === 'Enter' && e.form && ['INPUT', 'TEXTAREA'].includes(e.tagName)) e.form.requestSubmit();
+    if (args.key === 'Enter' && defaultAllowed && e.form && ['INPUT', 'TEXTAREA'].includes(e.tagName)) e.form.requestSubmit();
+    if (args.key === 'Tab' && defaultAllowed) {
+      const items = [...document.querySelectorAll('a[href],button,input,textarea,select,[tabindex]')].filter(node => visible(node) && !node.disabled && node.tabIndex >= 0);
+      items[(items.indexOf(e) + 1) % items.length]?.focus();
+    }
   } else throw new Error('unsupported_action');
   // Business completion is verified by a subsequent snapshot/assertion, not this acknowledgement.
   globalThis.__odooMcpSnapshot = null;

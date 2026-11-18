@@ -12,6 +12,7 @@ class FakeElement {
 }
 class FakeInput extends FakeElement {get value() {return this._value || '';} set value(v) {this._value = v;}}
 globalThis.Element = FakeElement; globalThis.HTMLInputElement = FakeInput; globalThis.HTMLTextAreaElement = FakeInput;
+globalThis.KeyboardEvent = class extends Event {constructor(type, options) {super(type, options); this.key = options.key;}};
 globalThis.getComputedStyle = () => ({visibility: 'visible'});
 globalThis.location = {href: 'https://client.test/web', origin: 'https://client.test'};
 const input = new FakeInput('INPUT', '', 'text'); input.attributes['aria-label'] = 'Customer'; input.value = 'Original';
@@ -35,6 +36,17 @@ assert.equal((await pageOperation('assert', {snapshot_id: fresh2.snapshot_id, ex
 const negative = await pageOperation('assert', {snapshot_id: fresh2.snapshot_id, ref: 'e0', expected_value: 'Wrong'});
 assert.equal(negative.assertion_passed, false);
 await pageOperation('click', {snapshot_id: fresh2.snapshot_id, ref: 'e1'}); assert.equal(button.clicked, 1);
+let submissions = 0;
+input.form = {action: 'https://client.test/save', requestSubmit: () => {submissions++;}};
+input.dispatchEvent = event => event.type !== 'keydown';
+const cancelled = await pageOperation('snapshot', {});
+await pageOperation('press', {snapshot_id: cancelled.snapshot_id, ref: 'e0', key: 'Enter'});
+assert.equal(submissions, 0, 'Cancelled Enter must not submit again');
+input.dispatchEvent = () => true;
+const enter = await pageOperation('snapshot', {});
+await pageOperation('press', {snapshot_id: enter.snapshot_id, ref: 'e0', key: 'Enter'});
+assert.equal(submissions, 1);
+
 
 const id = 'a'.repeat(32); const secret = 'test-paired-device-token';
 const saved = {profiles: {[id]: {server: 'https://relay.test', device_id: id, device_token: secret, origins: ['https://client.test'], allow_actions: true, paused: false}}};
