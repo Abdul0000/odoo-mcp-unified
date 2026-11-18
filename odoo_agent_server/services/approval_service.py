@@ -67,7 +67,7 @@ class ApprovalService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Approval {approval_id} is for {record.action}, not {action}")
         if record.status != ApprovalStatus.approved:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Approval {approval_id} is {record.status.value}, not approved")
-        if bind_payload and json.dumps(record.payload_preview, sort_keys=True, default=str) != json.dumps(payload_preview or {}, sort_keys=True, default=str):
+        if (bind_payload or force) and json.dumps(record.payload_preview, sort_keys=True, default=str) != json.dumps(payload_preview or {}, sort_keys=True, default=str):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Approval {approval_id} does not match this exact mutation payload",

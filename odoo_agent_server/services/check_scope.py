@@ -1,5 +1,6 @@
 """Inspect test scope and imports without importing application packages."""
 import ast
+import re
 from pathlib import Path
 
 
@@ -23,23 +24,84 @@ def imports_odoo(path):
                for node in ast.walk(tree))
 
 
+def same_acceptance_command(old, new):
+    """A runtime adapter may change Python, never the assertions or selectors."""
+    if old == new:
+        return True
+    def python(value):
+        return bool(re.fullmatch(r"python(?:[23](?:\.\d+)?)?", Path(value).name))
+    return python(old[0]) and python(new[0]) and old[1:] == new[1:]
+
+
 def test_targets(argv):
-    """Conventional explicit pytest/unittest targets; no source execution."""
-    if len(argv) >= 3 and argv[1] == '-m' and argv[2] in {'pytest', 'unittest'}:
-        runner, args = argv[2], argv[3:]
-    elif Path(argv[0]).name == 'pytest':
-        runner, args = 'pytest', argv[1:]
+    """Parse collection arguments without treating option values as test paths.
+
+    Unknown plugin options conservatively retain default collection. No test code
+    is imported on the API host to discover runner options.
+    """
+    executable = Path(argv[0]).name
+    if executable in {"pytest", "py.test"}:
+        runner, args = "pytest", argv[1:]
+    elif re.fullmatch(r"python(?:[23](?:\.\d+)?)?", executable):
+        index = 1
+        while index < len(argv) and argv[index].startswith("-") and argv[index] not in {"-m", "-c", "--"}:
+            index += 2 if argv[index] in {"-W", "-X"} else 1
+        if index + 1 >= len(argv) or argv[index] != "-m" or argv[index + 1] not in {"pytest", "unittest"}:
+            return None, []
+        runner, args = argv[index + 1], argv[index + 2:]
     else:
         return None, []
-    targets = []
-    for arg in args:
-        if arg.startswith('-') or arg == 'discover':
+    values = {"-k", "-m", "-c", "-o", "-r", "--report", "--override-ini", "--rootdir", "--confcutdir",
+              "--basetemp", "--import-mode", "--junitxml", "--junit-xml", "--tb", "--color",
+              "--capture", "--maxfail", "--durations", "--durations-min", "--ignore",
+              "--ignore-glob", "--deselect", "--log-level", "--log-file", "--log-file-level",
+              "--log-cli-level", "--log-format", "--log-date-format", "--log-file-format", "--log-file-date-format",
+              "--log-cli-format", "--log-cli-date-format", "--assert", "--verbosity", "--show-capture",
+              "--junit-prefix", "--cov", "--cov-report", "--cov-config", "--cov-fail-under",
+              "-p", "-n", "--dist"} if runner == "pytest" else {
+              "-k", "-s", "--start-directory", "-t", "--top-level-directory", "-p", "--pattern", "--durations"}
+    flags = {"-q", "-v", "-s", "-x", "-l", "--lf", "--ff", "--last-failed", "--failed-first",
+             "--collect-only", "--co", "--disable-warnings", "--strict-markers", "--strict-config",
+             "--showlocals", "--full-trace", "--runxfail", "--no-header", "--no-summary",
+             "--continue-on-collection-errors", "--pyargs"} if runner == "pytest" else {
+             "-q", "-v", "-f", "-c", "-b", "--quiet", "--verbose", "--failfast", "--catch", "--buffer", "--locals"}
+    targets, start, fallback = [], None, False
+    discovery = runner == "unittest" and "discover" in args
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            targets.extend(args[index + 1:])
+            break
+        if runner == "unittest" and arg == "discover":
+            index += 1
             continue
-        name = arg.split('::', 1)[0]
-        if runner == 'unittest' and '/' not in name and not name.endswith('.py'):
-            name = name.replace('.', '/') + '.py'
-        targets.append(name)
-    return runner, targets
+        key, _, attached = arg.partition("=")
+        if key in values:
+            value = attached if "=" in arg else args[index + 1] if index + 1 < len(args) else ""
+            if runner == "unittest" and key in {"-s", "--start-directory"}:
+                start = value
+            index += 1 if "=" in arg else 2
+            continue
+        if key in flags or arg.startswith("-") and len(arg) > 1 and set(arg[1:]) <= {"q", "v"}:
+            index += 1
+            continue
+        if arg.startswith("-"):
+            fallback = True
+        else:
+            targets.append(arg)
+        index += 1
+    if fallback:
+        return runner, ["."]
+    if start is not None:
+        return runner, [start or "."]
+    if discovery:
+        return runner, targets[:1]
+    if runner == "unittest":
+        targets = [name if "/" in name or name.endswith(".py") else name.replace(".", "/") + ".py" for name in targets]
+    elif "--pyargs" in args:
+        targets = [name.split("::", 1)[0].replace(".", "/") for name in targets]
+    return runner, [name.split("::", 1)[0] for name in targets]
 
 
 def needs_odoo(root, name):

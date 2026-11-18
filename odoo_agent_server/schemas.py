@@ -2295,6 +2295,12 @@ class SafeDeployModuleRequest(BaseProjectRequest, ApprovalMixin):
     def deploy_module_root_rel_must_be_safe(cls, value: str | None) -> str | None:
         return _safe_module_root_rel(value)
 
+    @model_validator(mode="after")
+    def deployment_root_matches_technical_module(self) -> "SafeDeployModuleRequest":
+        if self.module_root_rel and Path(self.module_root_rel).name != self.module_name:
+            raise ValueError("module_root_rel must end in the selected technical module name")
+        return self
+
 
 class FullVerifyRequest(SelfRunRequest):
     clean_pyc: bool = False

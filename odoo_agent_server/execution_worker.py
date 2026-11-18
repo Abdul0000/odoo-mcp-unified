@@ -9,6 +9,7 @@ import fcntl
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import re
 from pathlib import Path
 import selectors
 import signal
@@ -189,14 +190,16 @@ class ExecutionWorker:
                 with (logs / f"{process_id}.log").open("rb") as stream:
                     stream.seek(max(0, stream.seek(0, 2) - 4000))
                     tail = stream.read().decode("utf-8", errors="replace")
-                if code in {137, -9} or any(token in tail for token in (
-                    "No module named", "command not found", "not found: npm", "npm: not found",
-                    "Read-only file system", "No space left on device", "Cannot allocate memory",
-                    "MemoryError", "ENOMEM", "ENOSPC")):
-                    details["failure_class"] = "resource_limit" if code in {137, -9} or any(t in tail for t in ("No space left", "MemoryError", "ENOMEM", "ENOSPC")) else "dependency_or_runtime"
+                # Application output is untrusted. An assertion mentioning a missing
+                # module is still a failed assertion, never a replaceable runtime check.
+                assertion_failed = bool(re.search(r"(?m)^(?:E\s+)?AssertionError(?:\b|:)", tail))
+                missing_dependency = bool(re.search(r"(?m)^(?:E\s+)?ModuleNotFoundError: No module named ['\"][^'\"]+['\"]\s*$", tail))
+                resource_error = bool(re.search(r"(?m)^(?:E\s+)?(?:MemoryError(?::.*)?|OSError: \[Errno (?:12|28)\].*)$", tail))
+                if not assertion_failed and (code in {137, -9} or missing_dependency or resource_error):
+                    details["failure_class"] = "resource_limit" if code in {137, -9} or resource_error else "dependency_or_runtime"
                     details["recovery_action"] = "configure_runtime_or_resources_then_rerun_same_check"
                     status = "runtime_unavailable"
-                    details["error"] = "Check runtime or writable build output configuration is unavailable; source verification did not pass"
+                    details["error"] = "Check runtime/resources are unavailable; rerun the same acceptance assertions after runtime repair"
             if status == "cleanup_failed":
                 self.store.update(process_id, "process", status=status, **details)
             else:

@@ -36,6 +36,10 @@ def validate_published_workspace(payload):
     root = payload.module_root_rel or payload.module_name
     if root.startswith("/") or ".." in Path(root).parts or not (Path(client.path) / root).resolve().is_relative_to(Path(client.path).resolve()):
         raise HTTPException(400, "Module root must remain inside client checkout")
+    module = (Path(client.path) / root).resolve()
+    if (Path(root).name != payload.module_name or module.name != payload.module_name
+            or not any((module / name).is_file() for name in ("__manifest__.py", "__openerp__.py"))):
+        raise HTTPException(409, "Deployment source root must be the manifest root of the selected technical module")
     touched = git(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", sha, "--", root], client.path).splitlines()
     if not touched:
         raise HTTPException(409, "Published commit did not change the selected module")

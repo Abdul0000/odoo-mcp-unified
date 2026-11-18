@@ -8,4 +8,4 @@ if [[ "$#" -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 
-exec /usr/bin/systemctl start "odoo-mcp-deploy@$1.service"
+exec /usr/bin/systemctl --no-block start "odoo-mcp-deploy@$1.service"

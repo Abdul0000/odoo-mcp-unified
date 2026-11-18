@@ -32,12 +32,24 @@ if [[ ! -d "$RELEASE" ]]; then
   git -C "$RELEASE" checkout --detach "$COMMIT"
 fi
 REQ_HASH="$(sha256sum "$RELEASE/requirements.txt" | awk '{print $1}')"
-VENV="$ROOT/venvs/$REQ_HASH"
-if [[ ! -x "$VENV/bin/python" ]]; then
-  rm -rf "$VENV"
-  "$PYTHON" -m venv "$VENV"
-  "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
-  chown -R odoo-mcp:odoo-mcp "$VENV"
+# Version the cache to avoid rebuilding a legacy venv used by the live API.
+# Build at its final path: relocating a venv would break absolute entrypoint shebangs.
+VENV="$ROOT/venvs/v2-$REQ_HASH"
+if [[ ! -x "$VENV/bin/python" || ! -f "$VENV/.complete" ]] || [[ "$(cat "$VENV/.complete" 2>/dev/null || true)" != "$REQ_HASH" ]]; then
+  rm -rf -- "$VENV"
+  (
+    # A failed install is never a usable cache. SIGKILL leftovers lack the marker
+    # and are rebuilt on the next attempt under the deployment lock.
+    trap 'rm -rf -- "$VENV"' EXIT
+    "$PYTHON" -m venv "$VENV"
+    "$VENV/bin/python" -m pip install --disable-pip-version-check --cache-dir "$ROOT/cache/pip" -r "$RELEASE/requirements.txt"
+    "$VENV/bin/python" -m pip check
+    "$VENV/bin/python" -c "import uvicorn, fastapi, pydantic"
+    chown -R odoo-mcp:odoo-mcp "$VENV"
+    printf '%s\n' "$REQ_HASH" > "$VENV/.complete.next"
+    mv -f "$VENV/.complete.next" "$VENV/.complete"
+    trap - EXIT
+  )
 fi
 # Only the new release needs ownership updates; reuse dependency artifacts.
 chown -R odoo-mcp:odoo-mcp "$RELEASE"

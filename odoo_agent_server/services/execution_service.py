@@ -327,6 +327,12 @@ class ExecutionService:
                         or result.get("status") != "runtime_unavailable"
                         or old[name]["layer"] != new[replacement]["layer"]):
                     raise HTTPException(409, "Only recorded runtime-unavailable checks may be replaced by a new check in the same layer")
+                from .check_scope import same_acceptance_command
+                if (not same_acceptance_command(old[name]["argv"], new[replacement]["argv"])
+                        or old[name]["cwd"] != new[replacement]["cwd"]
+                        or new[replacement]["timeout_seconds"] < old[name]["timeout_seconds"]
+                        or not set(old[name]["output_dirs"]).issubset(new[replacement]["output_dirs"])):
+                    raise HTTPException(409, "Runtime recovery must preserve acceptance arguments, source scope and outputs; only the Python interpreter may change. Configure the runtime and rerun the original assertions.")
             legacy_plan = "required_layers" not in workspace
             def strengthens(name, check):
                 candidate = new.get(name, {})
@@ -388,9 +394,12 @@ class ExecutionService:
             code = argv[argv.index("-c") + 1] if argv.index("-c") + 1 < len(argv) else ""
             try:
                 nodes = ast.parse(code).body
-                if nodes and all(isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
-                                 and isinstance(n.value.func, ast.Name) and n.value.func.id == "print" for n in nodes):
-                    raise HTTPException(400, "Printing output alone is not verification")
+                def inert(node):
+                    return (isinstance(node, ast.Pass) or isinstance(node, ast.Expr) and (
+                        isinstance(node.value, ast.Constant) or isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name) and node.value.func.id == "print"))
+                if not nodes or all(inert(node) for node in nodes):
+                    raise HTTPException(400, "Empty commands and printing output alone are not verification")
             except SyntaxError:
                 pass  # A failing command is still useful evidence; the worker records it.
         capabilities = self.store._read(self.store.root / "capabilities.json") or {}
@@ -398,18 +407,30 @@ class ExecutionService:
             capabilities = {}
         from .check_scope import test_targets, needs_odoo
         runner, targets = test_targets(argv)
+        root = self.root(workspace_id).resolve()
         cwd = self.target(workspace_id, check.get("cwd", "."), directory=True)
         collection = []
         if runner:
             for name in targets or ["."]:
-                target = self.target(workspace_id, str(cwd.relative_to(self.root(workspace_id)) / name))
+                target = self.target(workspace_id, str(cwd.relative_to(root) / name))
+                if runner == "pytest" and "--pyargs" in argv and not target.exists():
+                    target = self.target(workspace_id, str(cwd.relative_to(root) / (name + ".py")))
+                if runner == "unittest" and not target.exists():
+                    # Dotted selectors may end in class/method names, not file names.
+                    parts = Path(name).with_suffix("").parts
+                    for end in range(len(parts) - 1, 0, -1):
+                        candidate = str(Path(*parts[:end])) + ".py"
+                        resolved = self.target(workspace_id, str(cwd.relative_to(root) / candidate))
+                        if resolved.is_file():
+                            target = resolved
+                            break
                 collection.append(target)
                 if target.is_dir():
                     for candidate in target.rglob("*.py"):
                         if len(collection) >= 2000:
                             raise HTTPException(409, "Test collection exceeds preflight budget; select explicit relevant test files")
-                        collection.append(self.target(workspace_id, str(candidate.relative_to(self.root(workspace_id)))))
-        if runner and not capabilities.get("odoo") and any(needs_odoo(self.root(workspace_id), str(path.relative_to(self.root(workspace_id)))) for path in collection):
+                        collection.append(self.target(workspace_id, str(candidate.relative_to(root))))
+        if runner and not capabilities.get("odoo") and any(needs_odoo(root, str(path.relative_to(root))) for path in collection):
             raise HTTPException(409, {"error_code": "runtime_unavailable", "required_runtime": "odoo",
                 "message": "Test collection imports Odoo through the test or parent package. Use a standalone pure-logic check outside the addon package, or configure an isolated Odoo runtime/database before planning this command.",
                 "recovery_action": "select_runtime_compatible_check_before_saving_plan"})
@@ -725,6 +746,8 @@ class ExecutionService:
 
     def operation_status(self, operation_id):
         record = self.store.get(operation_id, "operation")
+        if record["status"] == "expired":
+            raise HTTPException(410, {"error_code": "execution_expired", "message": "Operation history expired under retention; inspect the current workspace before starting new work. Do not replay an old mutation."})
         request = record["request"]
         if record["status"] in {"queued", "running"} and record.get("owner_instance") != _INSTANCE:
             record = self.store.update(operation_id, "operation", status="needs_review", error="API restarted; inspect task/local/remote SHA before creating a new request")
@@ -795,8 +818,13 @@ class ExecutionService:
                                ["diff", "--name-only", "-z", "--diff-filter=ACMRT", "HEAD", verification["tree"], "--"])
         approvals = ApprovalService()
         protected = {"main", "master", "production", "prod", "live"} | settings.protected_branches
+        protected_push = request.push and branch.lower() in protected
+        approval_payload = request.model_dump(exclude={"approval_id"})
+        if protected_push:
+            approval_payload.update(branch=branch, verified_tree=verification["tree"],
+                repository=_plain_remote(client.repo if client else git(["remote", "get-url", "origin"], self.root(request.workspace_id)).strip()))
         approvals.ensure_allowed("git.push" if request.push else "git.commit", request.approval_id,
-                                 request.model_dump(exclude={"approval_id"}), force=request.push and branch.lower() in protected)
+                                 approval_payload, force=protected_push, bind_payload=protected_push)
         record, created = self.store.create("publish", request.request_id, request.model_dump(), status="running")
         if not created:
             return self.public(record)

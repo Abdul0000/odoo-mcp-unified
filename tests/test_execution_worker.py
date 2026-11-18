@@ -793,7 +793,7 @@ def test_preflight_detects_odoo_package_import_for_unit_checks(execution, runner
 def test_unavailable_check_replacement_is_audited_and_requires_fresh_proof(execution):
     service, ws, *_ = execution
     original = {'name':'old', 'argv':['python','-c','assert 1 == 1'], 'layer':'unit'}
-    replacement = {'name':'new', 'argv':['python','-c','assert 2 == 2'], 'layer':'unit'}
+    replacement = {'name':'new', 'argv':['python3','-c','assert 1 == 1'], 'layer':'unit'}
     service.plan(TaskPlan(workspace_id=ws, checks=[original]))
     request = TaskPlan(workspace_id=ws, checks=[replacement], replace_unavailable_checks={'old':'new'},
                        replacement_reason='Run equivalent behavior assertions without importing the unavailable application runtime.')

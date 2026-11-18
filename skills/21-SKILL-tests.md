@@ -71,7 +71,9 @@ functional proof.
 
 If a saved check has recorded status runtime_unavailable, execution_task_plan accepts
 replace_unavailable_checks={old_name:new_name} plus replacement_reason explaining
-acceptance equivalence. Keep every required layer and all other checks. Supply a new
-check in the same layer and run it against the final tree. The revision preserves
-old command/failure evidence and grants no verification credit. Failed application
-assertions cannot be replaced through this recovery path.
+the runtime repair. Preserve the exact acceptance command arguments, cwd, outputs,
+and every required layer. Only Python interpreter selection may change; test bodies
+and selectors cannot be swapped. Configure missing dependencies and rerun the same
+assertions against the final tree. The revision retains old failure evidence and
+grants no verification credit. Never replace an application assertion with a weaker
+check. Empty commands are rejected.
