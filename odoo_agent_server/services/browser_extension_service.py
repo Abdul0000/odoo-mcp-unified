@@ -36,7 +36,10 @@ def origin(url):
     return f'{parsed.scheme}://{host}{suffix}'
 
 
-def profile(client_name):
+def profile(client_name=None):
+    if not client_name or client_name == 'General browser':
+        scope = {'client_name': 'General browser', 'origins': ['*'], 'environment': 'browser'}
+        return scope, hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
     client = ClientAdminService()._client(client_name)
     allowed = origin(client.get('odoo_url') or '')
     scope = {'client_name': client['name'], 'origins': [allowed], 'environment': client.get('environment') or 'unspecified'}
@@ -46,7 +49,7 @@ def profile(client_name):
 class BrowserExtensionService:
     def __init__(self):
         self.root = settings.state_path / 'browser-extension'
-        for folder in ('devices', 'pairing', 'commands', 'expired'):
+        for folder in ('devices', 'pairing', 'fixed-pairing', 'commands', 'expired'):
             (self.root / folder).mkdir(parents=True, exist_ok=True)
 
     def path(self, kind, key):
@@ -61,16 +64,28 @@ class BrowserExtensionService:
         except FileNotFoundError:
             raise HTTPException(404, 'Browser relay record not found') from None
 
-    def pair_code(self, client_name):
+    def pair_code(self, client_name, permanent=False, rotate=False):
         scope, revision = profile(client_name)
-        code = secrets.token_urlsafe(24)
-        key = hashlib.sha256(code.encode()).hexdigest()
         with settings_lock(self.root):
+            if permanent:
+                identity = hashlib.sha256(scope['client_name'].casefold().encode()).hexdigest()
+                saved_path = self.path('fixed-pairing', identity)
+                saved = self.read(saved_path) if saved_path.exists() else None
+                if saved and rotate:
+                    self.path('pairing', hashlib.sha256(saved['code'].encode()).hexdigest()).unlink(missing_ok=True)
+                    saved = None
+                code = saved['code'] if saved else secrets.token_urlsafe(32)
+                atomic_json(saved_path, {'code': code, 'client_name': scope['client_name']})
+                expires = None
+            else:
+                code, expires = secrets.token_urlsafe(24), time.time() + 300
+            key = hashlib.sha256(code.encode()).hexdigest()
             for file in (self.root / 'pairing').glob('*.json'):
-                if self.read(file)['expires'] < time.time():
+                expiry = self.read(file).get('expires')
+                if expiry is not None and expiry < time.time():
                     file.unlink(missing_ok=True)
-            atomic_json(self.path('pairing', key), {'scope': scope, 'revision': revision, 'expires': time.time() + 300})
-        return {'code': code, 'expires_in': 300, **scope}
+            atomic_json(self.path('pairing', key), {'scope': scope, 'revision': revision, 'expires': expires, 'reusable': permanent})
+        return {'code': code, 'expires_in': None if permanent else 300, 'reusable': permanent, **scope}
 
     def pair(self, code, extension_id, label):
         if not re.fullmatch('[a-p]{32}', extension_id):
@@ -78,22 +93,26 @@ class BrowserExtensionService:
         with settings_lock(self.root):
             path = self.path('pairing', hashlib.sha256(code.encode()).hexdigest())
             row = self.read(path)
-            path.unlink(missing_ok=True)
-            if row['expires'] <= time.time():
+            if not row.get('reusable'):
+                path.unlink(missing_ok=True)
+            if row['expires'] is not None and row['expires'] <= time.time():
                 raise HTTPException(410, 'Pairing code expired; generate another code')
-            _, current = profile(row['scope']['client_name'])
+            current_scope, current = profile(row['scope']['client_name'])
+            if row.get('reusable'):
+                row.update(scope=current_scope, revision=current)
+                atomic_json(path, row)
             if current != row['revision']:
                 raise HTTPException(409, 'Client URL/environment changed; generate another code')
             device_id, token = uuid4().hex, secrets.token_urlsafe(32)
             device = {**row, 'id': device_id, 'extension_id': extension_id, 'label': label[:80],
-                      'token_hash': hashlib.sha256(token.encode()).hexdigest(), 'expires': time.time() + 30 * 86400,
+                      'token_hash': hashlib.sha256(token.encode()).hexdigest(), 'expires': None if row.get('reusable') else time.time() + 30 * 86400,
                       'created_at': time.time(), 'revoked': False}
             atomic_json(self.path('devices', device_id), device)
         return {'device_id': device_id, 'device_token': token, **row['scope']}
 
     def device(self, device_id):
         device = self.read(self.path('devices', device_id))
-        if device.get('revoked') or device['expires'] <= time.time():
+        if device.get('revoked') or (device['expires'] is not None and device['expires'] <= time.time()):
             raise HTTPException(401, 'Browser pairing expired or revoked')
         _, current = profile(device['scope']['client_name'])
         if current != device['revision']:
@@ -172,7 +191,7 @@ class BrowserExtensionService:
 
     async def dispatch(self, request):
         if request.action == 'status':
-            return self.status(request.client_name)
+            return self.status(profile(request.client_name)[0]['client_name'])
         if request.action == 'poll':
             if not request.command_id:
                 raise HTTPException(422, 'poll requires command_id')
@@ -183,7 +202,7 @@ class BrowserExtensionService:
             if device['scope']['client_name'] != scope['client_name']:
                 raise HTTPException(403, 'Browser device belongs to another client')
         else:
-            candidates = [item for item in self.status(request.client_name)['devices'] if item['connected'] and not item['revoked']]
+            candidates = [item for item in self.status(scope['client_name'])['devices'] if item['connected'] and not item['revoked']]
             if len(candidates) != 1:
                 return {'status': 'select_browser' if candidates else 'browser_offline', 'devices': candidates,
                         'setup_url': '/browser-extension', 'success_allowed': False,
@@ -191,7 +210,7 @@ class BrowserExtensionService:
             device = self.device(candidates[0]['device_id'])
         args = BrowserAction.model_validate(request.arguments).model_dump(exclude_none=True)
         action = request.action
-        if action in {'open', 'navigate'} and (not args.get('url') or origin(args['url']) not in device['scope']['origins']):
+        if action in {'open', 'navigate'} and (not args.get('url') or (origin(args['url']) not in device['scope']['origins'] and '*' not in device['scope']['origins'])):
             raise HTTPException(403, 'Navigation is restricted to the paired client origin')
         if action not in {'tabs', 'open'} and args.get('tab_id') is None:
             raise HTTPException(422, 'Select tab_id from browser_extension(action=tabs); do not guess it')
@@ -207,7 +226,7 @@ class BrowserExtensionService:
             raise HTTPException(422, 'An expected field value requires its snapshot ref')
         if action == 'assert' and not (args.get('expected_text') is not None or args.get('expected_value') is not None):
             raise HTTPException(422, 'assert requires expected_text or expected_value')
-        if action in INTERACTIONS and not settings.functional_operations_enabled:
+        if action in INTERACTIONS and scope['environment'] != 'browser' and not settings.functional_operations_enabled:
             raise HTTPException(403, 'Functional operations are disabled in server settings')
         if action in MUTATIONS and not request.request_id:
             raise HTTPException(422, 'Browser mutations require a stable request_id')
@@ -238,7 +257,7 @@ class BrowserExtensionService:
                 return self.poll(request.client_name, command_id)
             connection['busy'] = command_id
             try:
-                await connection['ws'].send_json({'type': 'command', 'command_id': command_id, 'action': action, 'arguments': args, 'deadline': row['deadline']})
+                await connection['ws'].send_json({'type': 'command', 'command_id': command_id, 'action': action, 'arguments': {**args, 'allow_cross_origin': '*' in device['scope']['origins']}, 'deadline': row['deadline']})
             except Exception:
                 row.update(status='reconciliation_required', error='Send interrupted; inspect page before any new mutation')
                 atomic_json(path, row)
@@ -256,7 +275,7 @@ class BrowserExtensionService:
                         if exc.status_code == 404:
                             continue
                         raise
-                    expired = row['expires'] < time.time() if kind == 'pairing' else row['created_at'] < cutoff
+                    expired = (row['expires'] is not None and row['expires'] < time.time()) if kind == 'pairing' else row['created_at'] < cutoff
                     if expired:
                         if kind == 'commands':
                             atomic_json(self.path('expired', path.stem), {'expired': True})

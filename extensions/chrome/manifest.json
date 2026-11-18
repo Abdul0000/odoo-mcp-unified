@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Odoo MCP Browser",
-  "description": "Connect selected logged-in Odoo tabs to your own MCP server.",
-  "version": "1.0.0",
+  "description": "Connect logged-in website tabs to your own MCP server.",
+  "version": "1.1.0",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "scripting", "tabs", "activeTab", "alarms"],
   "optional_host_permissions": ["https://*/*", "http://*/*"],

@@ -214,3 +214,52 @@ def test_expiry_marker_race_cannot_recreate_a_mutating_request(relay, monkeypatc
         result = client.post('/tools/call', headers={'Authorization': 'Bearer ' + settings.api_token}, json={'name': 'browser_extension', 'arguments': {'client_name': 'Alpha', 'action': 'click', 'request_id': request_id, 'arguments': {'tab_id': 12, 'snapshot_id': 'fresh', 'ref': 'e1'}}}).json()
         assert result['status'] == 'failed' and not svc.path('commands', command_id).exists()
         ws.send_json({'type': 'ping'}); assert ws.receive_json()['type'] == 'pong'
+
+
+def test_fixed_pairing_code_is_stable_reusable_and_survives_cleanup(relay):
+    svc, _, _ = relay
+    fixed = svc.pair_code('Alpha', permanent=True)
+    assert fixed['expires_in'] is None and fixed['reusable']
+    assert svc.pair_code('Alpha', permanent=True)['code'] == fixed['code']
+    first = svc.pair(fixed['code'], EXT, 'First Chrome')
+    second = svc.pair(fixed['code'], EXT, 'Second Chrome')
+    assert first['device_id'] != second['device_id']
+    svc.cleanup(time.time() + 172800)
+    assert svc.pair(fixed['code'], EXT, 'After cleanup')['client_name'] == 'Alpha'
+    assert fixed['code'] not in json.dumps(svc.status())
+
+
+def test_reset_invalidates_old_fixed_code_but_not_existing_devices(relay):
+    svc, _, _ = relay
+    old = svc.pair_code('Alpha', permanent=True)
+    paired = svc.pair(old['code'], EXT, 'Existing Chrome')
+    new = svc.pair_code('Alpha', permanent=True, rotate=True)
+    assert new['code'] != old['code']
+    with pytest.raises(HTTPException):
+        svc.pair(old['code'], EXT, 'Old code must fail')
+    assert svc.device(paired['device_id'])
+    assert svc.pair(new['code'], EXT, 'New Chrome')['client_name'] == 'Alpha'
+
+
+def test_general_fixed_code_needs_no_odoo_client_and_supports_any_website(relay, monkeypatch):
+    svc, _, client = relay
+    monkeypatch.delenv('ODOO_CLIENTS', raising=False)
+    monkeypatch.setattr(settings, 'functional_operations_enabled', False)
+    fixed = svc.pair_code(None, permanent=True)
+    pair = svc.pair(fixed['code'], EXT, 'General Chrome')
+    assert pair['origins'] == ['*'] and pair['client_name'] == 'General browser'
+    assert svc.device(pair['device_id'])['expires'] is None
+    with client.websocket_connect('/browser-extension/connect', headers={'Origin': 'chrome-extension://' + EXT}) as ws:
+        authenticate(ws, pair)
+        opened = call(client, 'open', client_name=None, request_id='general-open-001', arguments={'url': 'https://www.example.org/path'})
+        command = ws.receive_json()
+        assert command['arguments']['allow_cross_origin'] is True
+        finish(ws, command, {'performed': True, 'tab_id': 12, 'url': 'https://www.example.org/path'})
+        call(client, 'snapshot', client_name=None, arguments={'tab_id': 12})
+        command = ws.receive_json(); finish(ws, command, {'snapshot_id': 'general', 'elements': []})
+        clicked = call(client, 'click', client_name=None, request_id='general-click-001', arguments={'tab_id': 12, 'snapshot_id': 'general', 'ref': 'e1'})
+        command = ws.receive_json(); finish(ws, command, {'performed': True})
+        assert call(client, 'poll', client_name=None, command_id=clicked['command_id'])['status'] == 'succeeded'
+        assert call(client, 'poll', client_name=None, command_id=opened['command_id'])['status'] == 'succeeded'
+        forbidden = client.post('/tools/call', headers={'Authorization': 'Bearer ' + settings.api_token}, json={'name': 'browser_extension', 'arguments': {'action': 'open', 'request_id': 'not-chrome-internal', 'arguments': {'url': 'chrome://extensions'}}})
+        assert forbidden.json()['status'] == 'failed'

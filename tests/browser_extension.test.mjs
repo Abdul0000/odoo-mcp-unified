@@ -50,6 +50,7 @@ assert.equal(submissions, 1);
 
 const id = 'a'.repeat(32); const secret = 'test-paired-device-token';
 const saved = {profiles: {[id]: {server: 'https://relay.test', device_id: id, device_token: secret, origins: ['https://client.test'], allow_actions: true, paused: false}}};
+const generalId = '9'.repeat(32); saved.profiles[generalId] = {...saved.profiles[id], device_id: generalId, origins: ['*']};
 let created = 0; let loadReady = true; const updates = new Set(); const sockets = [];
 class FakeSocket {
   static OPEN = 1;
@@ -61,7 +62,7 @@ globalThis.WebSocket = FakeSocket;
 let storageProtected = false;
 globalThis.chrome = {
   storage: {local: {setAccessLevel: async opts => {storageProtected = opts.accessLevel === 'TRUSTED_CONTEXTS';}, get: async () => structuredClone(saved), set: async values => Object.assign(saved, structuredClone(values))}},
-  tabs: {query: async () => [{id: 12, url: 'https://client.test/web', title: 'Odoo'}, {id: 13, url: 'https://unrelated.test', title: 'Private other tab'}],
+  tabs: {query: async () => [{id: 12, url: 'https://client.test/web', title: 'Odoo'}, {id: 13, url: 'https://unrelated.test', title: 'Private other tab'}, {id: 14, url: 'chrome://extensions', title: 'Chrome settings'}],
     create: async ({url}) => {created++; return {id: 20, url};}, get: async id => id === 20 ? {id: 20, url: 'https://client.test/web', status: loadReady ? 'complete' : 'loading'} : {id: 12, windowId: 1, url: 'https://unrelated.test', status: 'complete'}, onUpdated: {addListener: fn => updates.add(fn), removeListener: fn => updates.delete(fn)}},
   alarms: {create() {}, onAlarm: {addListener() {}}},
   runtime: {id: 'test-extension', getURL: () => 'chrome-extension://test-extension/', onStartup: {addListener() {}}, onInstalled: {addListener() {}}, onMessage: {addListener() {}}},
@@ -71,11 +72,11 @@ await import('data:text/javascript;base64,' + Buffer.from(background).toString('
 const wait = async predicate => {for (let i = 0; i < 200; i++) {if (predicate()) return; await new Promise(r => setTimeout(r, 5));} throw new Error('Timed out waiting for extension callback');};
 await wait(() => sockets[0]?.authenticated);
 assert.equal(storageProtected, true); const ws = sockets[0];
-const issue = async (command_id, action, args) => {
-  const before = ws.sent.filter(e => e.type === 'result').length;
-  ws.onmessage({data: JSON.stringify({type: 'command', command_id, action, arguments: args, deadline: Date.now() / 1000 + 60})});
-  await wait(() => ws.sent.filter(e => e.type === 'result').length > before);
-  return ws.sent.filter(e => e.type === 'result').at(-1);
+const issue = async (command_id, action, args, target = ws) => {
+  const before = target.sent.filter(e => e.type === 'result').length;
+  target.onmessage({data: JSON.stringify({type: 'command', command_id, action, arguments: args, deadline: Date.now() / 1000 + 60})});
+  await wait(() => target.sent.filter(e => e.type === 'result').length > before);
+  return target.sent.filter(e => e.type === 'result').at(-1);
 };
 try {
   const tabs = await issue('b'.repeat(32), 'tabs', {});
@@ -95,6 +96,12 @@ try {
   loadReady = true;
   for (const update of [...updates]) update(20, {status: 'complete'}, {id: 20, url: 'https://client.test/web', status: 'complete'});
   assert.equal((await loading).ok, true);
+  const general = sockets.find(socket => socket.sent.some(message => message.type === 'authenticate' && message.device_id === generalId));
+  await wait(() => general.authenticated);
+  const allTabs = await issue('1'.repeat(32), 'tabs', {}, general);
+  assert.equal(allTabs.result.tabs.length, 2);
+  assert.ok(!JSON.stringify(allTabs.result).includes('chrome://'));
+
 
   console.log('DOM stale/CAS, password exclusion, input events, assertions, origin isolation and durable no-replay passed');
 } finally {for (const socket of sockets) socket.close();}

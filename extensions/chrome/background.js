@@ -5,7 +5,7 @@ const writes = new Set(['open', 'navigate', 'click', 'fill', 'select', 'press', 
 const queues = new Map();
 
 const state = async () => (await chrome.storage.local.get(['profiles', 'receipts']));
-const allowed = (url, config) => { try { return config.origins.includes(new URL(url).origin); } catch { return false; } };
+const allowed = (url, config) => { try {const u = new URL(url); return ['http:', 'https:'].includes(u.protocol) && !u.username && !u.password && (config.origins.includes('*') || config.origins.includes(u.origin));} catch {return false;} };
 let receiptQueue = Promise.resolve();
 function claimReceipt(config, id, action) {
   const claimed = receiptQueue.then(async () => {

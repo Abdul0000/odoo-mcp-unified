@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class BrowserExtensionRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    client_name: str
+    client_name: str | None = None
     action: Literal['status', 'poll', 'tabs', 'open', 'navigate', 'snapshot', 'click', 'fill', 'select', 'press', 'scroll', 'assert', 'screenshot'] = 'status'
     device_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')
     command_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{32}$')

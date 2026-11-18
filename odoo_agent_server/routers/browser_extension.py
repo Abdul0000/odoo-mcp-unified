@@ -17,7 +17,9 @@ EXTENSION = Path(__file__).resolve().parents[2] / 'extensions' / 'chrome'
 
 class PairCode(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    client_name: str
+    client_name: str | None = None
+    permanent: bool = False
+    rotate: bool = False
 
 
 class PairDevice(BaseModel):
@@ -48,7 +50,7 @@ def download():
 
 @router.post('/admin/browser-extension/pair', dependencies=[Depends(_session)])
 def create_pair(payload: PairCode):
-    return BrowserExtensionService().pair_code(payload.client_name)
+    return BrowserExtensionService().pair_code(payload.client_name, permanent=payload.permanent, rotate=payload.rotate)
 
 
 @router.get('/admin/browser-extension', dependencies=[Depends(_session)])

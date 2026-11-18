@@ -15,12 +15,12 @@ async function render() {
     const connect = document.createElement('button'); connect.textContent = 'Connect / apply';
     connect.onclick = async () => {
       try {
-        const granted = await chrome.permissions.request({origins: profile.origins.map(origin => origin + '/*')});
-        if (!granted) throw new Error('Client site permission was not granted.');
+        const granted = await chrome.permissions.request({origins: profile.origins.includes('*') ? ['https://*/*', 'http://*/*'] : profile.origins.map(origin => origin + '/*')});
+        if (!granted) throw new Error('Website permission was not granted.');
         const latest = await profiles(); latest[id].paused = false; latest[id].allow_actions = controls.checked;
         await chrome.storage.local.set({profiles: latest});
         await chrome.runtime.sendMessage({type: 'refresh', device_id: id});
-        message('Connecting. Keep Chrome open; the MCP can now inspect this client.'); await render();
+        message('Connecting. Keep Chrome open; the MCP can now inspect your browser.'); await render();
       } catch (e) {message(e.message);}
     };
     const pause = document.createElement('button'); pause.textContent = 'Pause'; pause.className = 'secondary';

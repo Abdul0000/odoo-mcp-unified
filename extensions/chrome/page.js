@@ -48,11 +48,11 @@ export async function pageOperation(action, args) {
   }
   if (e.disabled || e.getAttribute('aria-disabled') === 'true') throw new Error('disabled_element');
   const formTarget = e.getAttribute('formaction') || e.form?.action;
-  if (formTarget && new URL(formTarget, location.href).origin !== location.origin) throw new Error('cross_origin_form');
+  if (formTarget && !args.allow_cross_origin && new URL(formTarget, location.href).origin !== location.origin) throw new Error('cross_origin_form');
   e.scrollIntoView({block: 'center', inline: 'nearest'});
   if (action === 'click') {
     const destination = e.closest('a[href]')?.href;
-    if (destination && new URL(destination, location.href).origin !== location.origin) throw new Error('cross_origin_link: use only the paired client origin');
+    if (destination && !args.allow_cross_origin && new URL(destination, location.href).origin !== location.origin) throw new Error('cross_origin_link: use only the paired client origin');
     e.click();
   } else if (action === 'fill') {
     if (e.isContentEditable) e.textContent = args.text;
