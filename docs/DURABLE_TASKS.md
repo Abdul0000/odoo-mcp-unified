@@ -109,3 +109,6 @@ This reduces reasoning needed for orchestration, not business-code reasoning.
 Verify with scripted callers that only pass task_id, wrong/missing arguments,
 repeated calls and lost responses. Passing those tests is workflow evidence, not
 a benchmark showing every low-capability model writes correct Odoo logic.
+
+A new step/request ID cannot bypass a prior uncertain mutation in the same task.
+Read-only reconciliation remains available; interrupted reads do not block writes.

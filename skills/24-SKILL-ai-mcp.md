@@ -82,3 +82,5 @@ Do not invent a new request ID after uncertain writes. The server may propose an
 apply complete source-derived test plans, but missing ORM/business assertions still
 need task-specific checks. Treat model code as a proposal; completion comes only
 from stored current-tree/runtime/live evidence.
+New step/request IDs cannot bypass uncertain task mutations. Follow task_resume
+read-back until the existing receipt is reconciled; interrupted reads are retryable.

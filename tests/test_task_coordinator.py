@@ -612,3 +612,30 @@ def test_bad_argument_types_return_field_errors_before_scope_handling(task):
     assert result['status'] == 'invalid_arguments' and not result['dispatched']
     assert result['tool_result']['argument_errors'][0]['field'] == 'client_name'
     assert not ledger.read(tid)['steps']
+
+
+def test_new_request_id_cannot_bypass_uncertain_mutation(task):
+    ledger, tid, _, _, _ = task
+    calls = []
+    async def lost(name, args):
+        calls.append(name)
+        raise TimeoutError('lost write response')
+    with pytest.raises(TimeoutError):
+        asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_files', arguments={'operation': 'write', 'path': 'first.py', 'content': 'VALUE = 1'}), lost))
+    retry = asyncio.run(ledger.run(TaskRun(task_id=tid, step_id='new-attempt-123', tool='execution_files', arguments={'operation': 'write', 'path': 'second.py', 'content': 'VALUE = 2'}), lost))
+    assert len(calls) == 1 and retry['status'] == 'reconciliation_required' and retry['dispatched'] is False
+    assert retry['next_call']['tool'] == 'task_resume' and len(ledger.read(tid)['steps']) == 1
+
+
+def test_interrupted_read_does_not_require_mutation_reconciliation(task):
+    from odoo_agent_server.routers.tools import _dispatch
+    ledger, tid, _, _, _ = task
+    saved = ledger.read(tid)
+    saved['steps']['old-read-123'] = {'tool': 'execution.files', 'status': 'dispatched', 'read_only': True}
+    ledger.save(saved)
+    resumed = asyncio.run(ledger.resume(tid, _dispatch))
+    assert not resumed['uncertain_steps']
+    async def written(name, args):
+        return {'status': 'written'}
+    result = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_files', arguments={'operation': 'write', 'path': 'new.py', 'content': 'VALUE = 1'}), written))
+    assert result['tool_result']['status'] == 'written'

@@ -508,6 +508,15 @@ class TaskService:
                     raise HTTPException(409, "step_id already belongs to different arguments")
                 if not readonly:
                     return self.envelope(task, idempotent_replay=True, step=previous, next_action="Call task_resume to reconcile existing server jobs; do not replay a dispatched mutation.")
+            uncertain = [key for key, item in task["steps"].items()
+                         if item["status"] in {"dispatched", "reconciliation_required"} and not item.get("read_only", False)]
+            if not readonly and uncertain:
+                result = self.envelope(task)
+                result.update(status="reconciliation_required", success_allowed=False, dispatched=False,
+                              state_class="running", terminal=False, completion_required=True,
+                              uncertain_steps=uncertain, next_call={"tool": "task_resume", "arguments": {"task_id": task["task_id"]}},
+                              next_action="Reconcile the existing mutation before new writes. A new step/request ID cannot bypass an uncertain outcome.")
+                return result
             if not previous and len(task["steps"]) >= 200:
                 raise HTTPException(409, "Task step budget reached; inspect evidence and open a follow-up task.")
             step = {"tool": name, "fingerprint": fingerprint, "status": "dispatched", "started_at": now(), "read_only": readonly}
@@ -707,7 +716,7 @@ class TaskService:
                     observations.append({"tool": name, "result": result})
                 except HTTPException as exc:
                     observations.append({"tool": name, "error": scrub(exc.detail)})
-            uncertain = [key for key, s in task["steps"].items() if s["status"] in {"dispatched", "reconciliation_required"}]
+            uncertain = [key for key, s in task["steps"].items() if s["status"] in {"dispatched", "reconciliation_required"} and not s.get("read_only", False)]
             if (uncertain and not calls) or (uncertain_deploy and not refs.get("deploy_job_id")):
                 task["phase"] = "reconciliation_required"
             latest = observations[-1].get("result") if observations else None
