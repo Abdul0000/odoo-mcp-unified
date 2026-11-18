@@ -157,6 +157,19 @@ class BrowserExtensionService:
             result['next_action'] = 'Inspect a fresh snapshot and existing business records; do not repeat an uncertain action.'
         return result
 
+    def reserve(self, path, row):
+        # Share the short filesystem transaction with retention. No await is
+        # allowed while holding this lock: WebSocket delivery happens afterwards.
+        with settings_lock(self.root):
+            if self.path('expired', row['command_id']).exists():
+                raise HTTPException(410, 'Expired browser requests cannot be replayed')
+            if path.exists():
+                if self.read(path)['fingerprint'] != row['fingerprint']:
+                    raise HTTPException(409, 'request_id belongs to different browser arguments')
+                return False
+            atomic_json(path, row)
+            return True
+
     async def dispatch(self, request):
         if request.action == 'status':
             return self.status(request.client_name)
@@ -221,7 +234,8 @@ class BrowserExtensionService:
                 ApprovalService().ensure_allowed('browser.interact', request.approval_id, {'client_name': scope['client_name'], 'action': action, 'arguments': args}, force=settings.require_approval, bind_payload=True)
             row = {'command_id': command_id, 'device_id': device['id'], 'client_name': scope['client_name'], 'action': action,
                    'arguments': args, 'fingerprint': fingerprint, 'status': 'dispatched', 'created_at': time.time(), 'deadline': time.time() + 60}
-            atomic_json(path, row)
+            if not self.reserve(path, row):
+                return self.poll(request.client_name, command_id)
             connection['busy'] = command_id
             try:
                 await connection['ws'].send_json({'type': 'command', 'command_id': command_id, 'action': action, 'arguments': args, 'deadline': row['deadline']})
@@ -233,16 +247,21 @@ class BrowserExtensionService:
 
     def cleanup(self, cutoff):
         removed = 0
-        for path in (self.root / 'pairing').glob('*.json'):
-            if self.read(path)['expires'] < time.time():
-                path.unlink(missing_ok=True)
-                removed += 1
-        for path in (self.root / 'commands').glob('*.json'):
-            row = self.read(path)
-            if row['created_at'] < cutoff:
-                atomic_json(self.path('expired', path.stem), {'expired': True})
-                path.unlink(missing_ok=True)
-                removed += 1
+        for kind in ('pairing', 'commands'):
+            for path in (self.root / kind).glob('*.json'):
+                with settings_lock(self.root):
+                    try:
+                        row = self.read(path)
+                    except HTTPException as exc:
+                        if exc.status_code == 404:
+                            continue
+                        raise
+                    expired = row['expires'] < time.time() if kind == 'pairing' else row['created_at'] < cutoff
+                    if expired:
+                        if kind == 'commands':
+                            atomic_json(self.path('expired', path.stem), {'expired': True})
+                        path.unlink(missing_ok=True)
+                        removed += 1
         return removed
 
     async def connect(self, ws: WebSocket):

@@ -197,3 +197,20 @@ def test_page_assertion_supports_visible_confirmation_text(relay):
         result = call(client, 'poll', command_id=waiting['command_id'])
         assert result['status'] == 'succeeded' and result['result']['assertion_passed']
         assert result['evidence_scope'] == 'browser_ui_only' and not result['success_allowed']
+
+
+def test_expiry_marker_race_cannot_recreate_a_mutating_request(relay, monkeypatch):
+    import hashlib
+    from odoo_agent_server.services.approval_service import ApprovalService
+    from odoo_agent_server.services.client_settings_store import atomic_json
+    svc, pair, client = relay
+    with client.websocket_connect('/browser-extension/connect', headers={'Origin': 'chrome-extension://' + EXT}) as ws:
+        authenticate(ws, pair)
+        call(client, 'snapshot', arguments={'tab_id': 12})
+        command = ws.receive_json(); finish(ws, command, {'snapshot_id': 'fresh', 'elements': []})
+        request_id = 'expiry-race-click'
+        command_id = hashlib.sha256(f"{pair['device_id']}:{request_id}".encode()).hexdigest()[:32]
+        monkeypatch.setattr(ApprovalService, 'ensure_allowed', lambda *a, **kw: atomic_json(svc.path('expired', command_id), {'expired': True}))
+        result = client.post('/tools/call', headers={'Authorization': 'Bearer ' + settings.api_token}, json={'name': 'browser_extension', 'arguments': {'client_name': 'Alpha', 'action': 'click', 'request_id': request_id, 'arguments': {'tab_id': 12, 'snapshot_id': 'fresh', 'ref': 'e1'}}}).json()
+        assert result['status'] == 'failed' and not svc.path('commands', command_id).exists()
+        ws.send_json({'type': 'ping'}); assert ws.receive_json()['type'] == 'pong'
