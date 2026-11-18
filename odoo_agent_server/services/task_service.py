@@ -20,6 +20,10 @@ from ..config import get_odoo_clients, settings
 from .client_admin_service import ClientAdminService
 from .client_settings_store import atomic_json
 
+class TaskBusy(HTTPException):
+    """Transient contention, distinct from validation/authorization failures."""
+
+
 POLL_TOOLS = {"execution.workspace_status", "execution.process_poll", "execution.status", "jobs.get", "odoo.mutation_audit"}
 RUN_TOOLS = POLL_TOOLS | {
     "client.check",
@@ -99,7 +103,7 @@ class TaskService:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                raise HTTPException(409, "Task is already processing a step; poll task_status.") from None
+                raise TaskBusy(409, "Task is already processing a step; poll task_status.") from None
             yield
         finally:
             os.close(fd)
@@ -468,6 +472,28 @@ class TaskService:
         return state
 
     async def run(self, request, dispatch):
+        try:
+            return await self._run(request, dispatch)
+        except TaskBusy:
+            # No step was dispatched by this attempt. Preserve the exact intent
+            # and let the current lock holder finish; never replay uncertain work.
+            task = self.read(request.task_id)
+            result = self.envelope(task)
+            uncertain = [key for key, step in task["steps"].items()
+                         if step["status"] == "reconciliation_required" and not step.get("read_only", False)]
+            if uncertain:
+                result.update(status="reconciliation_required", state_class="running", input_required=False,
+                              success_allowed=False, completion_required=True, terminal=False,
+                              uncertain_steps=uncertain,
+                              next_call={"tool": "task_resume", "arguments": {"task_id": request.task_id}})
+                return result
+            result.update(status="task_busy", state_class="running", input_required=False,
+                          success_allowed=False, completion_required=True, terminal=False,
+                          retry_after_ms=200, dispatched=False,
+                          next_call={"tool": "task_run", "arguments": request.model_dump(mode="json", exclude_none=True)})
+            return result
+
+    async def _run(self, request, dispatch):
         from ..routers.tools import internal_tool_name, _TOOL_DESCRIPTORS
 
         if not request.tool:

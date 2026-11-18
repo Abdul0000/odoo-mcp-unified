@@ -643,3 +643,37 @@ def test_interrupted_read_does_not_require_mutation_reconciliation(task):
         return {'status': 'written'}
     result = asyncio.run(ledger.run(TaskRun(task_id=tid, tool='execution_files', arguments={'operation': 'write', 'path': 'new.py', 'content': 'VALUE = 1'}), written))
     assert result['tool_result']['status'] == 'written'
+
+
+def test_contended_task_run_preserves_intent_without_dispatch(task):
+    ledger, tid, *_ = task
+    calls = []
+    async def dispatch(*args):
+        calls.append(args)
+        raise AssertionError('Contended attempt must not dispatch')
+    request = TaskRun(task_id=tid, tool='execution_workspace_status', arguments={}, step_id='contended-status')
+    before = ledger.read(tid)
+    with ledger.lock(tid):
+        result = asyncio.run(ledger.run(request, dispatch))
+        guided = asyncio.run(ledger.run(TaskRun(task_id=tid), dispatch))
+    assert result['status']=='task_busy' and not result['input_required']
+    assert result['next_call']['arguments']==request.model_dump(mode='json', exclude_none=True)
+    assert not result['dispatched'] and not calls
+    assert guided['status']=='task_busy'
+    assert ledger.read(tid)==before
+
+
+def test_contention_after_dispatched_mutation_stays_uncertain(task):
+    from odoo_agent_server.services.task_service import TaskBusy
+    ledger, tid, *_ = task
+    calls = []
+    async def dispatch(*args):
+        calls.append(args)
+        raise TaskBusy(409, 'Another task is busy after this mutation started')
+    request = TaskRun(task_id=tid, tool='execution_files', step_id='uncertain-busy-write',
+        arguments={'operation':'write', 'path':'new.py', 'content':'VALUE = 1\n'})
+    result = asyncio.run(ledger.run(request, dispatch))
+    assert result['status']=='reconciliation_required'
+    assert result['next_call']['tool']=='task_resume' and result['uncertain_steps']
+    asyncio.run(ledger.run(request, dispatch))
+    assert len(calls)==1
