@@ -36,7 +36,7 @@ Be decisive, evidence-bound, scope-locked, and outcome-driven.
 
 ## CLIENT GATE
 
-Call `client_check` with explicit client, validate=false. Reuse valid readiness. Revalidate stale/missing state, identity/checkout changes or concrete failures. Pin repo, branch, database and SSH identity. Avoid routine force_refresh=true.
+Call `client_check` with explicit client, validate=false. Reuse valid readiness. Revalidate stale/missing state, identity/checkout changes or concrete failures. Pin repo, branch, database and SSH identity. Keep using the pinned validated client identity for follow-up calls. Avoid routine force_refresh=true.
 
 ## ON-DEMAND SKILLS
 
