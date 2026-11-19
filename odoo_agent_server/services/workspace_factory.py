@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from ..config import settings
 from .client_resolver_service import ClientResolverService
 from .github_commit_service import GitHubError, GitHubRepo, parse_repo
-from .gitlab_commit_service import GitLabRepo, parse_gitlab_repo
+from .gitlab_commit_service import GitLabRepo, is_gitlab_repo_url, parse_gitlab_repo
 from .workspace_service import ClientTarget, WorkspaceError, WorkspaceService
 
 
@@ -21,7 +21,7 @@ def _resolve(name: str | None) -> ClientTarget:
     if not token:
         raise WorkspaceError("git_token_missing", f"client '{client.name}' has no repository access token (set 'token' in ODOO_CLIENTS or GITHUB_TOKEN)")
     repo_url = client.repo or ""
-    if "gitlab." in repo_url.lower() or "gitlab.com/" in repo_url.lower():
+    if is_gitlab_repo_url(repo_url):
         try:
             base_url, project_path = parse_gitlab_repo(repo_url)
         except ValueError as exc:

@@ -14,6 +14,29 @@ from typing import Any, Callable
 from .github_commit_service import FileChange, GitHubError, CommitOutcome, git_blob_sha
 
 
+class GitLabError(GitHubError):
+    """Provider-labelled error that remains compatible with shared workspace handling."""
+
+    def __init__(self, status: int, message: str, *, retryable: bool = False, path: str = ""):
+        RuntimeError.__init__(self, f"GitLab {status} {path}: {message}")
+        self.status = status
+        self.message = message
+        self.retryable = retryable
+        self.path = path
+
+
+def is_gitlab_repo_url(url: str) -> bool:
+    """Choose GitLab from the URL host, never from a group/project path segment."""
+    raw = (url or "").strip()
+    if raw.startswith("git@") and ":" in raw:
+        host = raw[4:].split(":", 1)[0]
+    else:
+        parsed = urllib.parse.urlsplit(raw if "://" in raw else "https://" + raw)
+        host = parsed.hostname or ""
+    host = host.lower().rstrip(".")
+    return host == "gitlab.com" or host.startswith("gitlab.")
+
+
 def parse_gitlab_repo(url: str) -> tuple[str, str]:
     raw = (url or "").strip()
     if raw.startswith("git@") and ":" in raw:
@@ -52,7 +75,7 @@ class GitLabRepo:
             with urllib.request.urlopen(req, timeout=30) as response:
                 raw = response.read(8_000_001)
                 if len(raw) > 8_000_000:
-                    raise GitHubError(413, "GitLab response exceeded bounded transport size")
+                    raise GitLabError(413, "response exceeded bounded transport size")
                 try:
                     data = json.loads(raw) if raw else None
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -78,9 +101,17 @@ class GitLabRepo:
         if status in ok:
             return data
         message = data.get("message", str(data)) if isinstance(data, dict) else str(data)
-        if status == 409 or (status == 400 and any(word in str(message).lower() for word in ("branch", "changed", "last_commit", "already exists", "does not exist"))):
-            raise GitHubError(422, str(message), path=path)
-        raise GitHubError(status, str(message), retryable=status >= 500 or status == 599, path=path)
+        message_lower = str(message).lower()
+        concurrency_conflict = any(
+            marker in message_lower
+            for marker in (
+                "last_commit", "last commit", "changed since", "branch changed",
+                "branch has changed", "already exists", "does not exist",
+            )
+        )
+        if status == 409 or (status == 400 and concurrency_conflict):
+            raise GitLabError(422, str(message), path=path)
+        raise GitLabError(status, str(message), retryable=status >= 500 or status == 599, path=path)
 
     def web_url(self, kind="", ref=""):
         base = f"{self.base_url}/{self.project_path}"
@@ -161,7 +192,7 @@ class GitLabRepo:
         data = self.request("GET", path)
         text = data if isinstance(data, str) else str(data or "")
         if len(text.encode("utf-8")) > 400_000:
-            raise GitHubError(413, "Blob exceeds workspace file size limit; use native execution", path=sha)
+            raise GitLabError(413, "blob exceeds workspace file size limit; use native execution", path=sha)
         return text
 
     def blobs_text(self, shas: dict[str, str], workers: int = 8):
@@ -179,11 +210,11 @@ class GitLabRepo:
         exists = self.ref_exists(branch)
         if not exists:
             if not create_from:
-                raise GitHubError(404, f"branch '{branch}' does not exist")
+                raise GitLabError(404, f"branch '{branch}' does not exist")
             self.request("POST", "/repository/branches", {"branch": branch, "ref": create_from})
         current = self.head(branch)["commit"]
         if expected_head and current != expected_head:
-            raise GitHubError(409, "branch head changed before commit", path=branch)
+            raise GitLabError(409, "branch head changed before commit", path=branch)
         current_tree = self.tree(current)
         actions = []
         for change in changes:
@@ -194,7 +225,7 @@ class GitLabRepo:
                 metadata = self.request("GET", f"/repository/files/{encoded}?ref={urllib.parse.quote(current, safe='')}")
                 last_commit = metadata.get("last_commit_id")
                 if not last_commit:
-                    raise GitHubError(409, "Missing file concurrency proof; use native Git execution", path=change.path)
+                    raise GitLabError(409, "missing file concurrency proof; use native Git execution", path=change.path)
                 row["last_commit_id"] = last_commit
             if change.content is not None: row["content"] = change.content
             actions.append(row)
@@ -246,7 +277,7 @@ class GitLabRepo:
             current = self.head(branch)["commit"]
             if current == sha:
                 return
-            raise GitHubError(422, "GitLab ref updates are performed through branch commits, not detached SHA updates", path=branch)
+            raise GitLabError(422, "ref updates are performed through branch commits, not detached SHA updates", path=branch)
         self.request("POST", "/repository/branches", {"branch": branch, "ref": sha})
 
     def delete_branch(self, branch: str):
