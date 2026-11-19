@@ -132,4 +132,4 @@ ORDER BY total_spend DESC;
 - Billed qty > received qty is a real risk signal — surface it, don't auto-approve.
 - Multi-currency POs: `price_unit` is in `currency_id`, not company currency —
   convert before comparing across vendors.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

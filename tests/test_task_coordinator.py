@@ -40,7 +40,7 @@ def test_task_contract_idempotency_and_configuration_invalidation(task, monkeypa
     again = ledger.open(TaskOpen(client_name="Alpha", request_id="durable-task-001", description="Fix calculation", target="push", module_name="addon"))
     assert again["task_id"] == tid
     with pytest.raises(HTTPException):
-        ledger.open(TaskOpen(client_name="Alpha", request_id="durable-task-001", description="Other work"))
+        ledger.open(TaskOpen(client_name="Alpha", request_id="durable-task-001", description="Other work", target="coding"))
     row = ledger.read(tid)
     row["claims"]["push_verified"] = True
     ledger.save(row)

@@ -154,4 +154,4 @@ GROUP BY sq.product_id, pt.name, sl.complete_name;
   `inventory_quantity` + `action_apply_inventory()` so a move is generated.
 - Backorders: check `picking.backorder_ids` before assuming a transfer is fully closed.
 - Multi-warehouse: always scope by `warehouse_id` / `location_id`, not company alone.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

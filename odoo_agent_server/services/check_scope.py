@@ -24,13 +24,27 @@ def imports_odoo(path):
                for node in ast.walk(tree))
 
 
-def same_acceptance_command(old, new):
+def same_acceptance_command(old, new, workspace_root=None):
     """A runtime adapter may change Python, never the assertions or selectors."""
+    def trusted_original(value):
+        path = Path(value)
+        if not re.fullmatch(r"python(?:[23](?:\.\d+)?)?", path.name):
+            return False
+        if value == path.name:
+            return True
+        # Existing absolute system interpreters may be retained, but no path
+        # inside the task tree can masquerade as Python, even on exact reuse.
+        if not path.is_absolute():
+            return False
+        return not (workspace_root and path.resolve().is_relative_to(Path(workspace_root).resolve()))
+
+    if not old or not new or not trusted_original(old[0]):
+        return False
     if old == new:
         return True
-    def python(value):
-        return bool(re.fullmatch(r"python(?:[23](?:\.\d+)?)?", Path(value).name))
-    return python(old[0]) and python(new[0]) and old[1:] == new[1:]
+    # A replacement must resolve through PATH. Reject ./python, workspace
+    # scripts and arbitrary absolute shims while preserving every other arg.
+    return new[0] == Path(new[0]).name and trusted_original(new[0]) and old[1:] == new[1:]
 
 
 def test_targets(argv):

@@ -148,4 +148,4 @@ orderpoint = self.env['stock.warehouse.orderpoint'].create({
   quant updates, and reservation cleanup atomically.
 - Routing changes on a `confirmed`+ MO require `action_cancel()` +
   re-confirm, not direct field writes.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

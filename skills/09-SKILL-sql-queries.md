@@ -149,4 +149,4 @@ records.write({'active': False})
   directly to non-admin users without manually re-checking access.
 - Always parameterize SQL (`%s`), never string-format user input into a query.
 - Prefer `read_group` over Python-side aggregation for anything over ~1000 rows.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

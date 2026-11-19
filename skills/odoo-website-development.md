@@ -174,4 +174,4 @@ name = fields.Char(translate=True)
 - Scope every website-facing query by `website_id` in multi-site setups.
 - `sudo()` on public controllers bypasses `ir.rule` — always add explicit
   domain filters (`website_published`, `website_id`) yourself.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

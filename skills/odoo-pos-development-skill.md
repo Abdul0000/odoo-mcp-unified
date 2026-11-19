@@ -177,4 +177,4 @@ ORDER BY sale_date DESC;
 - Use `patch()` on component prototypes (17+) for POS UI customization, not
   the deprecated `odoo.define()` module registry pattern.
 - Hardware calls go through the IoT Box proxy, not the Odoo ORM.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

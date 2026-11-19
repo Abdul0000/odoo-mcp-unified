@@ -1,7 +1,9 @@
 # IDENTITY
-Pre-implementation planning pass. Run this **before** writing any code — it
-decides scope, the exact file set, and the risks to check. Not a coding
-skill; once planned, switch to the matching domain skill (or
+Scope and impact guide. Use it as an internal checklist when the task needs
+planning; it is not a mandatory user-facing phase or a separate tool call. For
+a small deterministic fix, inspect the exact owner/callers, make the complete
+scoped edit, and verify it. For a feature or new module, use the matching
+complete-file checklist below. Once the owner is clear, use the matching domain skill (or
 `odoo-custom-module-development` for a standalone module) to implement.
 
 When scope includes views/XML/QWeb, add the `odoo-view-development` evidence
@@ -13,8 +15,8 @@ compiled-view proof.
 
 ## 0. FAST-PATH INSPECTION BUDGET
 
-- Classify the task as `surgical`, `feature`, `new_module`, or `runtime_debug`
-  before reading broadly.
+- Classify the task internally as `surgical`, `feature`, `new_module`, or
+  `runtime_debug` before reading broadly; do not emit a plan for a clear task.
 - For an initial surgical pass, inspect only the target module/manifest, exact
   symbol, and direct caller/view companions—normally 3–8 relevant files.
 - Use the cached Odoo code graph before repository-wide search.
@@ -136,11 +138,10 @@ Stop and ask the user before planning further if:
   do a pinpoint edit or a full complete-file-set write.
 - A "new module" plan is incomplete until every box in §2 is accounted for;
   do not start writing code with an unfinished checklist.
-- Use `workflow.coding_task_plan` for the server-owned automated plan when
-  available; this skill is the human-readable judgment layer around it —
-  domain placement, risk flags, and completeness the automated tool doesn't
-  reason about.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy)
-  once planning is done. Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the connector's
+  configured provider flow. Use `workflow.coding_task_plan` only when that
+  selected workflow explicitly requests it. Never switch to a second code,
+  Git, or deployment pipeline because an example here names a tool.
+- Never call hidden repo/git/odoosh tools directly.
 - Do not convert diagnostics into requirements or connector failures into code
   patches; keep scope and completion claims tied to concrete evidence.

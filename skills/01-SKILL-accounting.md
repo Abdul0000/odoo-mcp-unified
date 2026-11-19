@@ -142,4 +142,4 @@ move._reverse_moves(default_values_list=[{
   reset, or reverse. Editing posted lines corrupts the audit trail.
 - Always filter `active = True` unless explicitly asked for archived records.
 - Multi-company: filter `company_id` on every account/journal/tax query.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

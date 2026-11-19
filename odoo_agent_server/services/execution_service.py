@@ -328,7 +328,7 @@ class ExecutionService:
                         or old[name]["layer"] != new[replacement]["layer"]):
                     raise HTTPException(409, "Only recorded runtime-unavailable checks may be replaced by a new check in the same layer")
                 from .check_scope import same_acceptance_command
-                if (not same_acceptance_command(old[name]["argv"], new[replacement]["argv"])
+                if (not same_acceptance_command(old[name]["argv"], new[replacement]["argv"], self.root(request.workspace_id))
                         or old[name]["cwd"] != new[replacement]["cwd"]
                         or new[replacement]["timeout_seconds"] < old[name]["timeout_seconds"]
                         or not set(old[name]["output_dirs"]).issubset(new[replacement]["output_dirs"])):

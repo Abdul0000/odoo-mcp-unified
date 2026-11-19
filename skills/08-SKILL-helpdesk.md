@@ -156,4 +156,4 @@ GROUP BY ht.team_id, tm.name;
 - SLA deadlines must use `resource.calendar` (working hours/holidays), never
   a naive `create_date + timedelta`.
 - Stage regression (moving backward) should be logged, not silently allowed.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

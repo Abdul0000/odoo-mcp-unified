@@ -132,4 +132,4 @@ GROUP BY ct.name, DATE_TRUNC('month', cl.date_closed);
   by probability or explicitly label it best-case.
 - Lost leads stay in the database (`active=False`) — don't delete, they're
   needed for loss-reason analytics.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

@@ -41,8 +41,12 @@ Live business-record mutations and functional scenario execution are routed to
 
 ## Durable task coordination
 
-For multi-step coding/debugging use task_open with explicit client, stable request_id
-and target=coding|push|deploy|functional. Follow top-level next_call and technical
+When the configured provider flow selects Oracle execution and lists the task
+coordinator, use task_open for coding/debugging with explicit client, stable request_id
+and target selected from the user's requested outcome: coding=edit/verify/local commit only,
+push=publish the verified commit, deploy=publish and deploy that commit,
+functional=live business-record work. Never default an explicit push/deploy to
+coding or promote a target. Follow top-level next_call and technical
 argument_request fields through task_run. tool_result retains the underlying
 workflow evidence. Use a unique stable step_id for each mutation; read-only polls
 may reuse one. Never turn a completed push into a deployment or verified-fix claim.
@@ -51,7 +55,9 @@ After edits task_test_plan proposes source-derived checks. Missing ORM/business/
 layers are blockers, not syntax successes. Existing acceptance checks cannot be
 removed. Execution evidence is bound to the exact tree and runtime.
 
-For a requested deployment after execution_publish, use task_deploy. It adopts the
+Use the single implementation lane selected by MCP_SYSTEM_PROMPT.md and the
+connector's configured provider flow; do not choose a pipeline based on a skill
+example. For a requested deployment after execution_publish, use task_deploy. It adopts the
 verified pushed commit, safely syncs a clean client checkout, checks exact branch,
 local/remote SHA and module scope, classifies upgrade impact and runs the existing
 safe-deploy gates. It cannot create another commit/push. Supply task-specific live

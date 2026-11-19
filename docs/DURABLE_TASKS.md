@@ -8,7 +8,11 @@ expose provider-hidden tools through an arbitrary tool tunnel.
 ## Tool flow
 
 1. `task_open(client_name, request_id, description, target, module_name?)` pins the
-   client profile and completion target: coding, push, deploy or functional.
+   client profile and completion target. Map intent exactly: implementation/fix
+   without publishing is `coding`; an explicit push is `push`; an explicit deploy
+   is `deploy`; live business-record work is `functional`. Never default an
+   explicitly requested push/deploy to `coding`, and never promote coding to push
+   or deploy without the user's request.
 2. Follow `next_call` or generate the technical fields in `argument_request`.
    `task_run(task_id, step_id, tool, arguments)` links ordinary tool results to the
    ledger. Mutations use stable unique step IDs; read-only polls may reuse one.
@@ -83,6 +87,10 @@ postconditions for custom/version-specific transitions.
 
 ## Guided workflow for models with limited reasoning
 
+Use this coordinator only when `workflow_agent_instructions.provider_flow` lists
+task tools and selects Oracle execution; otherwise follow its configured code
+lane directly. Always supply the required target that matches user intent.
+
 Call `task_run(task_id)` to follow one server-selected next step. The server first
 reconciles existing operations, then forwards the current scoped next call. It
 never repeats an uncertain mutation or invents code, business intent or approvals.
@@ -96,6 +104,12 @@ request IDs can be supplied by the coordinator. Conflicting explicit scope is
 rejected. Coding-only tasks default to local commits; push/deploy authority still
 comes from the pinned task target and normal approval policy. Model-selected tests
 cannot replace existing acceptance checks.
+
+Use one implementation lane for the whole task. The coordinator follows the
+connector's configured provider flow; without the coordinator, use the exact
+`provider_flow.code_change` or fallback returned by the connector. Skill examples
+do not select or override a lane. If that lane is unavailable, report the concrete
+capability blocker and use only the documented connector fallback.
 
 `step_id` is optional. Its default is deterministic for the same tool/arguments,
 so identical mutations replay their receipt. Use a new explicit step ID when the

@@ -132,4 +132,4 @@ wizard.with_context(active_ids=[so.id]).create_invoices()
   from stock.move/timesheet; write the source, not the derived field.
 - Confirmed orders (`state='sale'`) that need line changes: use amendment
   flow or explicit customer-approved change, never silent edits.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

@@ -207,5 +207,4 @@ name = fields.Char(default=lambda s: s.env['ir.sequence'].next_by_code('my.modul
   methods, no `# TODO: implement`, no "add the rest later" placeholders,
   no half-written XML records. If scope is genuinely too large for one pass,
   say so explicitly and propose the split instead of silently truncating.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy).
-  Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.

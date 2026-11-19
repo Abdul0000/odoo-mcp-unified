@@ -161,4 +161,4 @@ GROUP BY hp.employee_id, he.name, hp.date_from, hp.date_to;
   contracts are a data integrity bug, not a feature.
 - Statutory tax/deduction rates are time-bound — always scope by
   effective date range, never a single global constant.
-- Implement via `workflow.odoo_code_change` (server-owned read/write/verify/deploy). Never call hidden repo/git/odoosh tools directly.
+- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the configured provider flow. Never switch pipelines because a skill example names a tool; never call hidden repo/git/odoosh tools directly.
