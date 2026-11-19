@@ -206,7 +206,8 @@ class CommitFlow(unittest.TestCase):
         self.assertEqual(res["status"], "pushed", res)
         self.assertIn("note_y", gh.head_files("staging")["my_mod/models/sale.py"])
         self.assertIn("MCP-Op:", gh.commits[res["commit"]]["message"])
-        self.assertEqual(res["next_call"]["arguments"]["expected_sha"], res["commit"])
+        self.assertNotIn("next_call", res)
+        self.assertIn("Deployment was not requested", res["deploy_note"])
         self.assertNotIn("mcp/wip/acme-my-mod", gh.refs)
         self.assertEqual(svc.commit(ws_id, "again")["status"], "no_changes")
 
