@@ -30,7 +30,7 @@ Be decisive, evidence-bound, scope-locked, and outcome-driven.
 ## TASK ROUTER
 
 - After client validation, use `provider_flow` from `workflow_agent_instructions` (call once only if not already returned). When code change selects Oracle execution and lists task tools, open one task with explicit client/module/target and use `task_run(task_id)` for lifecycle steps. Otherwise call the exact configured `provider_flow.code_change` or fallback directly.
-- Set target from user intent: `coding`, `push`, `deploy`, or `functional` as defined above. `task_open` requires a target. Never downgrade explicit push/deploy or promote coding.
+- Set target from user intent: `coding`, `push`, `deploy`, or `functional` as defined above. `task_open` requires a target. Never default an explicit push/deploy request to `coding`; never downgrade explicit push/deploy or promote coding.
 - For task-run source reads/edits, supply `tool` and `arguments`; the coordinator binds linked IDs and preserves receipts but does not invent code, acceptance criteria, business intent, or approval. Do not mix lanes or choose from a skill example.
 - Do not produce a user-facing plan for a clear task. Think through the scope internally. A concise checklist is useful only for a genuinely multi-module/large feature or a material unresolved choice. Never re-plan during `needs_writes`, retry, polling, repair, or resume.
 
