@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 18074)
-Total output lines: 1402
-
 """Stateless-first coding workspace for Odoo addons.
 
 A workspace is an overlay of edits on top of one commit of a GitHub or GitLab branch.
@@ -725,7 +722,153 @@ class WorkspaceService:
         self.open(client, module, create=True, branch=branch)
         ws = self.registry.get(ws_id)
         if not ws:
-            raise WorkspaceError("ws_lost", "workspace could not be rebuilt; call ws_open again…2074 tokens truncated…verlay else (ws.load([path]).get(path) if ws.exists(path) else None)
+            raise WorkspaceError("ws_lost", "workspace could not be rebuilt; call ws_open again")
+        return ws
+
+    # ------------------------------------------------------------------ read / grep
+    def read(self, ws_id: str, paths: list[str], *, start_line: int = 1, max_lines: int = 300) -> dict[str, Any]:
+        ws = self.get(ws_id)
+        with ws.lock:
+            out, missing = [], []
+            resolved = [self._abs(ws, p) for p in paths[:10]]
+            ws.load([p for p in resolved if ws.exists(p) and ws._is_text(p)], strict=False)
+            for path in resolved:
+                if not ws.exists(path):
+                    missing.append({"path": path, "did_you_mean": difflib.get_close_matches(path, ws.module_paths(), n=3, cutoff=0.5)})
+                    continue
+                if not ws._is_text(path):
+                    missing.append({"path": path, "error": "binary or non-text file"})
+                    continue
+                text = ws.read_text(path)
+                lines = text.splitlines()
+                start = max(1, start_line)
+                chunk = lines[start - 1 : start - 1 + max_lines]
+                numbered = "\n".join(f"{start + i}|{row}" for i, row in enumerate(chunk))
+                item = {"path": path, "total_lines": len(lines), "from": start, "to": start + len(chunk) - 1 if chunk else start, "text": numbered}
+                if start - 1 + max_lines < len(lines):
+                    item["more"] = f"call again with start_line={start + max_lines}"
+                out.append(item)
+            res: dict[str, Any] = {"status": "ok" if out else "error", "files": out}
+            if missing:
+                res["missing"] = missing
+            return res
+
+    def grep(self, ws_id: str, pattern: str, *, glob: str | None = None, regex: bool = False, scope: str = "module", context: int = 0, max_matches: int = 40) -> dict[str, Any]:
+        ws = self.get(ws_id)
+        with ws.lock:
+            try:
+                rx = re.compile(pattern if regex else re.escape(pattern), re.I if pattern.islower() else 0)
+            except re.error as exc:
+                raise WorkspaceError("bad_regex", str(exc)) from exc
+            if scope == "repo":
+                candidates = [p for p in ws.tree if ws._is_text(p) and int(ws.tree[p].get("size", 0)) <= MAX_FILE_BYTES]
+            else:
+                candidates = ws.module_paths()
+            if glob:
+                candidates = [p for p in candidates if fnmatch.fnmatch(p, glob) or fnmatch.fnmatch(os.path.basename(p), glob)]
+            if scope == "repo" and len(candidates) > 250:
+                return {"status": "error", "error_code": "scope_too_wide", "error": f"{len(candidates)} files match; narrow with glob (e.g. 'sale_*/**/*.py')", "files": len(candidates)}
+            ws.load(candidates, strict=False)
+            view = ws.view()
+            hits, files_with = [], set()
+            for path in candidates:
+                text = view.get(path)
+                if text is None:
+                    continue
+                lines = text.splitlines()
+                for i, row in enumerate(lines, 1):
+                    if rx.search(row):
+                        files_with.add(path)
+                        entry: dict[str, Any] = {"path": path, "line": i, "text": row.strip()[:240]}
+                        if context:
+                            entry["ctx"] = "\n".join(lines[max(0, i - 1 - context) : i + context])
+                        hits.append(entry)
+                        if len(hits) >= max_matches:
+                            return {"status": "ok", "matches": hits, "truncated": True, "files_with_matches": len(files_with)}
+            return {"status": "ok", "matches": hits, "files_with_matches": len(files_with)}
+
+    # ------------------------------------------------------------------ edit
+    def _abs(self, ws: Workspace, path: str) -> str:
+        """Module-relative paths are expanded; ``repo:<path>`` addresses the repository root."""
+        if path.startswith("repo:"):
+            path = path[5:].lstrip("/")
+            explicit_repo = True
+        else:
+            path = path.lstrip("/")
+            explicit_repo = False
+        if ".." in path.split("/"):
+            raise WorkspaceError("path_invalid", "paths must not contain '..'")
+        if explicit_repo or not ws.root or path.startswith(ws.root + "/") or path in ws.tree or path in ws.overlay:
+            return path
+        return f"{ws.root}/{path}"
+
+    def _guard(self, ws: Workspace, edit: dict[str, Any], added_paths=()) -> dict[str, Any] | None:
+        op = edit.get("op") or ("write" if edit.get("content") is not None else "replace" if edit.get("search") is not None else None)
+        path = edit["path"]
+        if op == "delete":
+            return None
+        reason = source_artifact_reason(ws, path, added_paths)
+        if reason:
+            return {"code": "source_artifact_forbidden", "msg": reason}
+        if not ws._is_text(path):
+            return {"code": "binary_unsupported", "msg": f"{path} is not a text file type; ws_edit only handles text ({', '.join(TEXT_EXT[:6])}, ...). Add binary assets directly in git."}
+        for key in ("content", "replace"):
+            value = edit.get(key)
+            if isinstance(value, str) and len(value.encode("utf-8")) > MAX_FILE_BYTES:
+                return {"code": "too_large", "msg": f"{key} is larger than {MAX_FILE_BYTES} bytes; split the file"}
+        return None
+
+    def edit(self, ws_id: str, edits: list[dict[str, Any]], *, strict: bool = False, autofix: bool = True) -> dict[str, Any]:
+        ws = self.get(ws_id)
+        with ws.lock:
+            normalized = []
+            for raw in edits:
+                item = dict(raw)
+                item["path"] = self._abs(ws, item["path"])
+                normalized.append(item)
+            staged = dict(ws.overlay)
+            results, failed = [], False
+            healed_edits: list[dict[str, Any]] = []
+            applied: list[dict[str, Any]] = []
+            proposed_paths = {item["path"] for item in normalized}
+            for index, edit in enumerate(normalized):
+                path = edit["path"]
+                bad = self._guard(ws, edit, proposed_paths)
+                if bad:
+                    failed = True
+                    results.append({"i": index, "path": path, "ok": False, **bad})
+                    continue
+                if path in staged:
+                    current = staged[path]
+                elif ws.exists(path):
+                    current = ws.load([path]).get(path)
+                else:
+                    current = None
+                new_text, err, healed = apply_edit_ex(current, edit)
+                if err:
+                    failed = True
+                    results.append({"i": index, "path": path, "ok": False, **err})
+                    continue
+                staged[path] = new_text
+                applied.append({**edit, "op": infer_op(edit), **({"base_content": current} if infer_op(edit) in {"write", "delete"} else {})})  # journal entries always carry an explicit op
+                results.append({"i": index, "path": path, "ok": True, "op": infer_op(edit)})
+                if healed:
+                    healed_edits.append({"i": index, "path": path, "note": "search differed only by whitespace/indentation; matched the one place it fits and kept the file's indentation"})
+            if failed:
+                return {"status": "rejected", "reason": "edit_failed", "applied": 0, "results": results, "hint": "Nothing was changed. Fix only the failing edits and resend the whole batch."}
+            saved_overlay, saved_journal = dict(ws.overlay), list(ws.journal)
+            ws.overlay = staged
+            ws.journal.extend(applied)
+            touched = sorted({e["path"] for e in applied})
+            auto_ops: list[dict[str, Any]] = []
+            if autofix:
+                new_paths = [p for p in touched if p not in ws.tree and p not in saved_overlay and ws.overlay.get(p) is not None]
+                gone = [p for p in touched if ws.overlay.get(p) is None and p in ws.tree]
+                view = ws.view()
+                auto_ops = plan_autofix(view.get, ws.exists, new_paths, ws.root, gone)
+                for op in auto_ops:
+                    path = op["path"]
+                    cur = ws.overlay[path] if path in ws.overlay else (ws.load([path]).get(path) if ws.exists(path) else None)
                     new_text, err = apply_edit(cur, op)
                     if err:
                         continue
