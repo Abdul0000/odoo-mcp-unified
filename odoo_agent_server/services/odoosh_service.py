@@ -723,6 +723,18 @@ class OdooShService:
         payload = request.model_dump(mode="json")
         end = dt.datetime.now(dt.timezone.utc) if request.last_hours else request.until
         start = end - dt.timedelta(hours=request.last_hours) if request.last_hours else request.since
+        if request.last_hours is not None and request.cursor:
+            try:
+                token = request.cursor + "=" * ((4 - len(request.cursor) % 4) % 4)
+                cursor_data = json.loads(base64.urlsafe_b64decode(token))
+                cursor_start, cursor_end = (dt.datetime.fromisoformat(v) for v in cursor_data["range"])
+                if (cursor_start.tzinfo is None or cursor_end.tzinfo is None
+                        or sorted(cursor_data["levels"]) != sorted(request.levels)
+                        or abs((cursor_end - cursor_start).total_seconds() - request.last_hours * 3600) > 0.01):
+                    raise ValueError("cursor does not match requested range")
+                start, end = cursor_start, cursor_end
+            except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+                return {"status":"invalid_cursor","entries":[],"returned_count":0,"truncated":False,"next_cursor":None}
         payload["since"], payload["until"] = start.isoformat(), end.isoformat()
         code = '''import datetime as d,gzip,json,os,pathlib,re
 p=json.loads(__import__("base64").b64decode(PAYLOAD)); root=(pathlib.Path.home()/"logs").resolve(); out={"status":"inaccessible","entries":[],"returned_count":0,"truncated":False,"next_cursor":None}

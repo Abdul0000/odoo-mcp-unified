@@ -90,8 +90,6 @@ def test_generated_log_reader_parses_tracebacks_rotations_and_pages(tmp_path, mo
     assert result["entries"][0]["level"] == "INFO"
     assert result["truncated"] is True
     assert result["next_cursor"]
-    second = service.logs_read(OdooShLogsReadRequest(
-        since="2026-11-20T10:00:00+00:00", until="2026-11-20T10:03:00+00:00", limit=1, cursor=result["next_cursor"],
-    ))
+    second = service.logs_read(OdooShLogsReadRequest(last_hours=0.05, limit=1, cursor=result["next_cursor"]))
     assert second["entries"][0]["level"] == "ERROR"
     assert "Traceback" in second["entries"][0]["raw"]
