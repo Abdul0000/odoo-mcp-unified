@@ -24,7 +24,7 @@ Before writing, trace changed behavior through manifest/load order, models, fiel
 - Check inheritance/dependents before changing native or custom models/views; trace reports, automations and cross-addon callers before renaming/removing fields.
 - Existing data + new required field needs a valid default or migration. Check multi-company isolation, ACLs/rules and user-facing authorization.
 - Prefer batched ORM/`read_group`; flag per-record query/write loops. Edit custom addons; extend core/Enterprise, never vendor it.
-- Do not infer controllers, tests, symbols or files from exception text alone. Add only what the request, installed source and changed call graph require.
+- Diagnostic/error text is evidence, not automatic requirements. Do not infer controllers, tests, symbols or files from it alone; add only what the request, installed source and changed call graph require.
 - Preserve unrelated baseline warnings/debt. Fix task-caused, newly introduced and changed-scope failures; never patch addon code for a connector quoting/checkpoint error.
 
 ## Verification and recovery

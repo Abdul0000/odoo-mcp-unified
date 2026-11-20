@@ -4,7 +4,7 @@ Own Odoo-connected MCP tools, LLM/provider integrations, assistants, RAG, struct
 
 ## Build contract
 
-- Extend the connector's selected workflow; never create a parallel repo, QA, Git, deploy, or resume pipeline.
+- Extend the connector's selected workflow; never create a parallel deployment pipeline or repo/QA/Git/resume flow.
 - Design complete business tools, not unrestricted RPC wrappers. Specify input/output/error schemas, evidence, approvals, side effects, idempotency, and continuation before coding.
 - Odoo source, permissions, company boundaries, business workflows, and audit records are authoritative. Treat model output as untrusted; parse, validate, authorize, and confirm high-impact finance, stock, payroll, tax, legal, and mass-message actions.
 - Keep credentials and unrestricted access server-side. Return bounded, paginated/high-signal results; store large evidence as artifacts and return stable pointers.
