@@ -1275,6 +1275,44 @@ class OdooShLogRequest(BaseModel):
     tail_lines: int = Field(default=200, ge=20, le=2000)
 
 
+class OdooShLogsReadRequest(BaseModel):
+    """Bounded, read-only request for actual timestamped Odoo.sh application logs."""
+    client_name: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+    last_hours: float | None = Field(default=None, gt=0, le=168)
+    levels: list[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = Field(
+        default_factory=lambda: ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], min_length=1, max_length=5,
+    )
+    limit: int = Field(default=50, ge=1, le=50)
+    cursor: str | None = Field(default=None, max_length=512)
+    include_tracebacks: bool = True
+    output_format: Literal["structured", "text"] = "structured"
+
+    @model_validator(mode="after")
+    def validate_time_range(self):
+        if self.last_hours is not None:
+            if self.since is not None or self.until is not None:
+                raise ValueError("use last_hours or since+until, not both")
+        else:
+            if self.since is None or self.until is None:
+                raise ValueError("provide timezone-aware since and until, or last_hours")
+            for name, value in (("since", self.since), ("until", self.until)):
+                if value.tzinfo is None or value.utcoffset() is None:
+                    raise ValueError(f"{name} must include a timezone offset")
+            if self.until <= self.since:
+                raise ValueError("until must be later than since")
+            if (self.until.astimezone(timezone.utc) - self.since.astimezone(timezone.utc)).total_seconds() > 168 * 3600:
+                raise ValueError("time range cannot exceed 168 hours")
+        return self
+
+
+class OdooShShellDiagnosticsRequest(BaseModel):
+    """Allowlisted read-only Odoo.sh SSH, database and shell checks."""
+    client_name: str | None = None
+    timeout_seconds: int = Field(default=90, ge=20, le=180)
+
+
 class OdooShCommandRequest(BaseModel):
     client_name: str | None = Field(default=None, description="Client name from ODOO_CLIENTS. Required when more than one client exists.")
     tail_lines: int = Field(default=200, ge=20, le=2000)

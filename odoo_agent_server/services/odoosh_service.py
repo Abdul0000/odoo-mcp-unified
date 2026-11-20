@@ -16,7 +16,7 @@ from pathlib import Path
 from .deadline_service import remaining, read_deadline
 from ..config import get_odoo_clients, settings
 from .client_resolver_service import ClientResolverService, ResolvedClient
-from ..schemas import CommandResult, FileContent, OdooResult, OdooShLogName
+from ..schemas import CommandResult, FileContent, OdooResult, OdooShLogName, OdooShLogsReadRequest, OdooShShellDiagnosticsRequest
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ class OdooShService:
         command.append(f"{target.user}@{target.host}")
         return command
 
-    def run_shell(self, remote_script: str, timeout_seconds: int = 60) -> CommandResult:
+    def run_shell(self, remote_script: str, timeout_seconds: int = 60, output_limit_chars: int = 20000) -> CommandResult:
         started = time.monotonic()
         timeout_seconds = remaining(timeout_seconds)
         if timeout_seconds <= 0:
@@ -202,8 +202,8 @@ class OdooShService:
                 command=self._redacted_command(command),
                 cwd="odoosh:ssh",
                 exit_code=completed.returncode,
-                stdout=completed.stdout[-20000:],
-                stderr=completed.stderr[-20000:],
+                stdout=completed.stdout[-max(20000, min(output_limit_chars, 1_000_000)):],
+                stderr=completed.stderr[-max(20000, min(output_limit_chars, 1_000_000)):],
             )
         except subprocess.TimeoutExpired as exc:
             return CommandResult(
@@ -709,6 +709,104 @@ class OdooShService:
         if file_result.exit_code != 0 or not verify_manifest:
             return file_result
         return self.verify_module_manifest(module_name)
+
+    @staticmethod
+    def _redact_output(value: str) -> str:
+        value = str(value or "")
+        value = re.sub(r"(?i)(password|passwd|token|api[_-]?key|secret)(\s*[=:]\s*)[^\s,;]+", r"\1\2[REDACTED]", value)
+        value = re.sub(r"(?i)(postgres(?:ql)?://[^:/\s]+:)[^@\s]+@", r"\1[REDACTED]@", value)
+        return value[-20000:]
+
+    def logs_read(self, request: OdooShLogsReadRequest) -> dict:
+        """Read timestamped application records from verified ~/logs/odoo.log files."""
+        import datetime as dt
+        payload = request.model_dump(mode="json")
+        end = dt.datetime.now(dt.timezone.utc) if request.last_hours else request.until
+        start = end - dt.timedelta(hours=request.last_hours) if request.last_hours else request.since
+        payload["since"], payload["until"] = start.isoformat(), end.isoformat()
+        code = '''import datetime as d,gzip,json,os,pathlib,re
+p=json.loads(__import__("base64").b64decode(PAYLOAD)); root=(pathlib.Path.home()/"logs").resolve(); out={"status":"inaccessible","entries":[],"returned_count":0,"truncated":False,"next_cursor":None}
+if not root.is_dir(): print(json.dumps(out)); raise SystemExit
+fs=[f for f in root.glob("odoo.log*") if f.is_file() and f.resolve().parent==root and os.access(f,os.R_OK)]
+if not fs: print(json.dumps(out)); raise SystemExit
+out.update(status="no_matches",files=[f.name for f in fs]); a=d.datetime.fromisoformat(p["since"]).timestamp(); b=d.datetime.fromisoformat(p["until"]).timestamp(); pat=re.compile(r"^(\\d{4}-\\d\\d-\\d\\d[ T]\\d\\d:\\d\\d:\\d\\d(?:[,.]\\d+)?(?:Z|[+-]\\d\\d:?\\d\\d)?)\\s+(?:\\d+\\s+)?(DEBUG|INFO|WARNING|ERROR|CRITICAL)\\s+([^:]+):\\s?(.*)$"); rec=[]; cur=None; size=0; parsed=0
+def save():
+ if cur and cur["level"] in p["levels"] and a<=cur["epoch"]<b: rec.append(cur.copy())
+for f in fs:
+ try:
+  op=gzip.open if f.suffix==".gz" else open
+  with op(f,"rt",encoding="utf-8",errors="replace") as h:
+   for n,line in enumerate(h,1):
+    size+=len(line.encode("utf-8",errors="replace"))
+    if size>67108864: out["status"]="scan_limit_exceeded"; out["truncated"]=True; break
+    m=pat.match(line.rstrip("\\n"))
+    if m:
+     parsed+=1
+     save()
+     try:
+      t=d.datetime.fromisoformat(m[1].replace(",",".").replace("Z","+00:00")); t=t.astimezone() if t.tzinfo is None else t; cur={"timestamp":t.isoformat(),"epoch":t.timestamp(),"level":m[2],"logger":m[3],"message":m[4][:8000],"raw":line.rstrip()[:8000],"record_truncated":len(line)>8000,"file":f.name,"line":n}
+     except ValueError: cur=None
+    elif cur:
+     if len(cur["raw"])+len(line)<8000: cur["raw"]+="\\n"+line.rstrip(); cur["message"]+="\\n"+line.rstrip()
+     else: cur["record_truncated"]=True
+  save(); cur=None
+ except OSError: pass
+if parsed==0 and size>0: out["status"]="unsupported_format"
+rec.sort(key=lambda x:(x["epoch"],x["file"],x["line"])); off=0; c=p.get("cursor")
+if c:
+ try:
+  k=json.loads(__import__("base64").urlsafe_b64decode(c+"="*((4-len(c)%4)%4))); assert k["range"]==[p["since"],p["until"]] and sorted(k["levels"])==sorted(p["levels"]); off=next(i+1 for i,x in enumerate(rec) if [x["epoch"],x["file"],x["line"]]==k["key"])
+ except Exception: out["status"]="invalid_cursor"; print(json.dumps(out)); raise SystemExit
+page=rec[off:off+p["limit"]]; out["truncated"]=off+len(page)<len(rec)
+if out["truncated"] and page: out["next_cursor"]=__import__("base64").urlsafe_b64encode(json.dumps({"range":[p["since"],p["until"]],"levels":sorted(p["levels"]),"key":[page[-1]["epoch"],page[-1]["file"],page[-1]["line"]]}).encode()).decode().rstrip("=")
+for x in page:
+ x.pop("epoch",None)
+ if not p["include_tracebacks"]: x["raw"]=x["raw"].split("\\n",1)[0]; x["message"]=x["message"].split("\\n",1)[0]
+if out["status"] not in ("scan_limit_exceeded","unsupported_format"): out["status"]="success" if page else "no_matches"
+out.update(entries=page,returned_count=len(page));
+if p["output_format"]=="text": out["text"]="\\n".join(x["raw"] for x in page)
+print(json.dumps(out,ensure_ascii=False))'''.replace('PAYLOAD', repr(base64.b64encode(json.dumps(payload,separators=(",",":")).encode()).decode()))
+        result = self.run_shell("python3 -c " + shlex.quote(code), 60, 1_000_000)
+        if result.exit_code:
+            return {"status":"timeout" if result.timed_out else "command_failed","error":self._redact_output(result.stderr or result.stdout),"entries":[],"returned_count":0}
+        try: data=json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError,IndexError): return {"status":"command_failed","error":"Invalid remote log response","entries":[],"returned_count":0}
+        for e in data.get("entries",[]): e["raw"]=self._redact_output(e.get("raw","")); e["message"]=self._redact_output(e.get("message",""))
+        if "text" in data: data["text"]=self._redact_output(data["text"])
+        data.update(client_name=self.client.name if self.client else None,requested_range={"since":payload["since"],"until":payload["until"]})
+        return data
+
+    def shell_diagnostics(self, request: OdooShShellDiagnosticsRequest) -> dict:
+        """Report independent read-only SSH, executable, database, shell and log checks."""
+        db=(getattr(self.client,"odoosh_db_name",None) or getattr(self.client,"odoo_db",None)) if self.client else None
+        addons=str(self._user_addons_path())
+        code='''import json,os,pathlib,shutil,subprocess
+p=json.loads(PAYLOAD); c={"ssh_auth":{"status":"ok"}}; candidate=os.path.join(p["odoo_path"],"odoo-bin"); exe=shutil.which("odoo") or (candidate if os.path.isfile(candidate) else None)
+c["odoo_executable"]={"status":"ok" if exe else "unavailable","detail":exe}
+if exe:
+ try:
+  r=subprocess.run([exe,"--version"],capture_output=True,text=True,timeout=10); c["odoo_version"]={"status":"ok" if not r.returncode else "failed","detail":(r.stdout+r.stderr)[-500:]}
+ except Exception as e: c["odoo_version"]={"status":"failed","detail":str(e)[:200]}
+if p["db"] and shutil.which("psql"):
+ try:
+  r=subprocess.run(["psql","-d",p["db"],"-Atqc","SELECT 1"],capture_output=True,text=True,timeout=10); c["database_connectivity"]={"status":"ok" if r.returncode==0 and r.stdout.strip()=="1" else "failed","detail":r.stderr[-400:]}
+ except Exception as e: c["database_connectivity"]={"status":"failed","detail":str(e)[:200]}
+else: c["database_connectivity"]={"status":"not_configured" if not p["db"] else "unavailable"}
+c["odoo_shell_readiness"]={"status":"not_configured" if not p["db"] else "unavailable"}
+if p["db"] and exe:
+ try:
+  r=subprocess.run([exe,"shell","-d",p["db"],"--no-http","--log-level=error"],input="env.cr.execute('SELECT 1')\\nprint('ODOOSH_SHELL_READY')\\n",capture_output=True,text=True,timeout=18); c["odoo_shell_readiness"]={"status":"ok" if r.returncode==0 and "ODOOSH_SHELL_READY" in r.stdout else "failed","detail":(r.stdout+r.stderr)[-500:]}
+ except Exception as e: c["odoo_shell_readiness"]={"status":"failed","detail":str(e)[:200]}
+a=pathlib.Path(p["addons"]); c["custom_addons_directory"]={"status":"ok" if a.is_dir() and os.access(a,os.R_OK|os.X_OK) else "unavailable","detail":str(a)}; l=pathlib.Path.home()/"logs"; fs=[x.name for x in l.glob("odoo.log*") if x.is_file() and os.access(x,os.R_OK)] if l.is_dir() else []; c["application_logs"]={"status":"ok" if fs else "unavailable","detail":fs}; print(json.dumps({"checks":c}))'''.replace('PAYLOAD', repr(json.dumps({"db":db,"addons":addons,"odoo_path":self._odoo_path()})))
+        r=self.run_shell("python3 -c "+shlex.quote(code),request.timeout_seconds)
+        if r.exit_code: return {"status":"timeout" if r.timed_out else "command_failed","checks":{"ssh_auth":{"status":"failed","detail":self._redact_output(r.stderr or r.stdout)}}}
+        try:
+            data=json.loads(r.stdout.strip().splitlines()[-1])
+            for check in data.get("checks",{}).values():
+                if isinstance(check.get("detail"),str): check["detail"]=self._redact_output(check["detail"])
+            data["client_name"]=self.client.name if self.client else None
+            return data
+        except (ValueError,IndexError): return {"status":"command_failed","checks":{"ssh_auth":{"status":"failed","detail":"Invalid diagnostics response"}}}
 
     def tail_log(self, log_name: OdooShLogName, tail_lines: int = 200) -> CommandResult:
         safe_lines = max(20, min(tail_lines, 2000))

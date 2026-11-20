@@ -98,6 +98,8 @@ from ..schemas import (
     OdooResult,
     OdooSearchReadRequest,
     OdooShQueryRequest,
+    OdooShLogsReadRequest,
+    OdooShShellDiagnosticsRequest,
     OdooFunctionalQueryRequest,
     OdooShCheckCommitRequest,
     OdooShCommandRequest,
@@ -753,6 +755,8 @@ _TOOL_DESCRIPTORS = [
     ),
     ToolDescriptor(name="odoosh.log",
         title="Read Odoo.sh server log", description="Tail an Odoo.sh log", read_only=True),
+    ToolDescriptor(name="odoosh.logs_read", title="Read Odoo.sh logs by time range", description="Read Odoo.sh application logs across levels for a timezone aware range; preserves tracebacks and paginates.", read_only=True, idempotent=True),
+    ToolDescriptor(name="odoosh.shell_diagnostics", title="Diagnose Odoo.sh shell access", description="Check SSH, Odoo, database, shell, addons and logs independently.", read_only=True, idempotent=True),
     ToolDescriptor(name="odoosh.grep_errors",
         title="Search Odoo.sh error logs", description="Search Odoo.sh logs for errors", read_only=True),
     ToolDescriptor(name="odoosh.error_pack",
@@ -1111,6 +1115,8 @@ _TOOL_INPUT_MODELS = {
     "odoosh.read_user_file": OdooShUserFileReadRequest,
     "odoosh.list_user_files": OdooShUserFilesListRequest,
     "odoosh.log": OdooShLogRequest,
+    "odoosh.logs_read": OdooShLogsReadRequest,
+    "odoosh.shell_diagnostics": OdooShShellDiagnosticsRequest,
     "odoosh.grep_errors": OdooShCommandRequest,
     "odoosh.error_pack": OdooShCommandRequest,
     "odoosh.module_deploy_ssh": OdooShModuleUpdateRequest,
@@ -1156,6 +1162,13 @@ _TOOL_INPUT_MODELS = {
 
 @lru_cache(maxsize=None)
 def _cached_tool_input_schema(internal_name: str) -> dict:
+    if internal_name == "odoosh.logs_read":
+        return {"type":"object","additionalProperties":False,"properties":{
+            "client_name":{"type":"string"},"since":{"type":"string","format":"date-time"},"until":{"type":"string","format":"date-time"},
+            "last_hours":{"type":"number","exclusiveMinimum":0,"maximum":168},"levels":{"type":"array","items":{"type":"string","enum":["DEBUG","INFO","WARNING","ERROR","CRITICAL"]},"minItems":1,"maxItems":5},
+            "limit":{"type":"integer","minimum":1,"maximum":50,"default":50},"cursor":{"type":"string"},"include_tracebacks":{"type":"boolean","default":True},"output_format":{"type":"string","enum":["structured","text"],"default":"structured"}}}
+    if internal_name == "odoosh.shell_diagnostics":
+        return {"type":"object","additionalProperties":False,"properties":{"client_name":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":20,"maximum":180,"default":90}}}
     model = _TOOL_INPUT_MODELS.get(internal_name, EmptyRequest)
     schema = model.model_json_schema()
     schema.setdefault("type", "object")
@@ -9658,6 +9671,16 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         req = OdooShLogRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
         return OdooShService(client).tail_log(req.log_name, req.tail_lines)
+    if name == "odoosh.logs_read":
+        req = OdooShLogsReadRequest.model_validate(args)
+        ClientGateService().require_validated_client(req.client_name, name)
+        client = _resolve_query_client(req.client_name)
+        return OdooShService(client).logs_read(req)
+    if name == "odoosh.shell_diagnostics":
+        req = OdooShShellDiagnosticsRequest.model_validate(args)
+        ClientGateService().require_validated_client(req.client_name, name)
+        client = _resolve_query_client(req.client_name)
+        return OdooShService(client).shell_diagnostics(req)
     if name == "odoosh.grep_errors":
         req = OdooShCommandRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
@@ -10137,6 +10160,10 @@ def _dynamic_tool_output_schema(name: str) -> dict:
 
 def tool_output_schema(name: str) -> dict:
     internal = internal_tool_name(name)
+    if internal == "odoosh.logs_read":
+        return {"type":"object","properties":{"status":{"type":"string"},"entries":{"type":"array","items":{"type":"object"}},"returned_count":{"type":"integer"},"next_cursor":{"type":["string","null"]},"truncated":{"type":"boolean"}},"additionalProperties":True}
+    if internal == "odoosh.shell_diagnostics":
+        return {"type":"object","properties":{"checks":{"type":"object"}},"additionalProperties":True}
     return deepcopy(_tool_output_schemas().get(internal) or _dynamic_tool_output_schema(internal))
 
 

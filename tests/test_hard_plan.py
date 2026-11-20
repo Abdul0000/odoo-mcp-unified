@@ -188,6 +188,8 @@ def test_mcp_initialize_list_and_call(tmp_path, monkeypatch):
         "jobs_list",
         "jobs_get",
         "odoosh_error_pack",
+        "odoosh_logs_read",
+        "odoosh_shell_diagnostics",
     } | WS_TOOLS | TASK_TOOLS | {"browser_extension"}
 
     called = client.post(

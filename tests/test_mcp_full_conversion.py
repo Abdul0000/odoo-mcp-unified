@@ -50,6 +50,8 @@ _PROVIDER_TOOLS = {
     "jobs_list",
     "jobs_get",
     "odoosh_error_pack",
+    "odoosh_logs_read",
+    "odoosh_shell_diagnostics",
 } | WS_TOOLS | TASK_TOOLS
 
 

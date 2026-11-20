@@ -643,6 +643,8 @@ _PROVIDER_TOOL_NAMES = {
     "jobs.list",
     "jobs.get",
     "odoosh.error_pack",
+    "odoosh.logs_read",
+    "odoosh.shell_diagnostics",
 }
 
 # Lean manifest for clients with a tight planning-context budget (for example
@@ -689,6 +691,8 @@ _PROVIDER_TOOL_NAMES_MINIMAL = {
     "workflow.resume_job",
     "jobs.get",
     "odoosh.error_pack",
+    "odoosh.logs_read",
+    "odoosh.shell_diagnostics",
 }
 
 # Backward-compatible names retained for tests/imports; all provider routes use

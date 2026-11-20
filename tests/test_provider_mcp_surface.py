@@ -57,6 +57,8 @@ _PROVIDER_TOOLS = {
     "jobs_list",
     "jobs_get",
     "odoosh_error_pack",
+    "odoosh_logs_read",
+    "odoosh_shell_diagnostics",
 } | TASK_TOOLS
 
 
@@ -249,7 +251,9 @@ def test_provider_tool_contract_stays_within_context_budget(monkeypatch, executi
 
     tools = _mcp_tools_list()
     # Includes one scoped Chrome relay descriptor; action details are validated server-side.
-    assert len(json.dumps(tools, ensure_ascii=False)) < 82_000
+    # The read-only Odoo.sh log and diagnostics tools add a small bounded
+    # schema footprint to the MCP contract.
+    assert len(json.dumps(tools, ensure_ascii=False)) < 84_000
 
 
 def test_provider_tool_descriptions_are_complete_and_semantically_compact():
