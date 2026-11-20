@@ -116,7 +116,14 @@ def test_disconnect_keeps_uncertain_mutation_and_expiry_prevents_replay(relay):
         authenticate(ws, pair)
         result = call(client, 'open', request_id='open-disconnect-001', arguments={'url': 'https://alpha.example.test/web'})
         ws.receive_json()  # Connection lost after delivery, without an acknowledgement.
+    # The TestClient closes the peer before the server-side WebSocket handler
+    # has necessarily run its disconnect/finally cleanup. Wait briefly for that
+    # asynchronous reconciliation, but keep a hard failure bound.
+    deadline = time.monotonic() + 1
     row = svc.poll('Alpha', result['command_id'])
+    while row['status'] == 'dispatched' and time.monotonic() < deadline:
+        time.sleep(0.01)
+        row = svc.poll('Alpha', result['command_id'])
     assert row['status'] == 'reconciliation_required'
     path = svc.path('commands', result['command_id']); data = svc.read(path)
     data['created_at'] = time.time() - 172801; data['arguments']['private'] = 'old payload'; path.write_text(json.dumps(data))
