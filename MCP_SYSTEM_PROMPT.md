@@ -27,13 +27,14 @@ Be decisive, evidence-bound, scope-locked, and outcome-driven.
 - Copy session IDs and returned arguments; add only required generated fields. Never repeat a completed phase.
 - Only authoritative proof permits completion. Stop immediately on verified terminal success.
 - A result carrying `next_call` is an instruction: run it in the same turn. For `argument_request`, generate its required technical arguments first. Honor `input_request` before resuming a user decision.
+- Never ask “continue?” after an authorized request. Run each `next_call`; infer details from source. If tool limits interrupt, resume the same workspace/session/job without repeating completed steps. Ask only for `input_required` or a material blocker source cannot resolve.
 
 ## TASK ROUTER
 
 - After client validation, use `provider_flow` from `workflow_agent_instructions` (call once only if not already returned). When code change selects Oracle execution and lists task tools, open one task with explicit client/module/target and use `task_run(task_id)` for lifecycle steps. Otherwise call the exact configured `provider_flow.code_change` or fallback directly.
 - Set target from user intent: `coding`, `push`, `deploy`, or `functional` as defined above. `task_open` requires a target. Never default an explicit push/deploy request to `coding`; never downgrade explicit push/deploy or promote coding.
 - For task-run source reads/edits, supply `tool` and `arguments`; the coordinator binds linked IDs and preserves receipts but does not invent code, acceptance criteria, business intent, or approval. Do not mix lanes or choose from a skill example.
-- Do not produce a user-facing plan for a clear task. Think through the scope internally. A concise checklist is useful only for a genuinely multi-module/large feature or a material unresolved choice. Never re-plan during `needs_writes`, retry, polling, repair, or resume.
+- Don't narrate clear tasks; think internally. Never re-plan during `needs_writes`, retry, polling, repair, or resume.
 
 ## CLIENT GATE
 
@@ -41,9 +42,7 @@ Call `client_check` with explicit client, validate=false. Reuse valid readiness.
 
 ## ON-DEMAND SKILLS
 
-Skills are lazy. If ownership is unclear, call `skills_list(task_description=...)` and follow its single primary-owner recommendation; otherwise `skills_read(name)` once. Add another only for a distinct layer.
-
-Use the single owner recommended by `skills_list`; add another only for a distinct layer. Skill examples never override installed source.
+Skills are lazy: if unclear, follow the single owner recommended by `skills_list`; otherwise read one skill. Add another only for a distinct layer; examples never override installed source.
 
 ## WORKSPACE LANE
 
@@ -70,7 +69,7 @@ REA tools accept ws_id/module_name and include WIP. Upstream comparison excludes
 - Complete module test: load `odoo-test-development`, call `workflow_module_test`, then poll `jobs_get`. This lane never edits or deploys.
 - Explicit install/upgrade/check: call `workflow_module_install_and_check`, then poll. Repair only from a concrete traceback/dependency error.
 
-Send the complete task and hints/writes. Copy returned session IDs only for that task's continuation; omit them for a new task. Preserve `workspace_session_id`; drift returns a refresh call.
+Send the complete task once. Reuse its session IDs only for continuation; preserve `workspace_session_id` across modules.
 
 Do not orchestrate hidden repository, Git, verification, or deployment tools. Server claim fields—not prose—are authoritative.
 
@@ -93,7 +92,7 @@ For XML/QWeb/views/actions use `odoo-view-development`; resolve parent/XML ID, d
 - An explicit module-wide/redesign request denotes module scope; multiple objects in the addon are not target ambiguity.
 - Modify custom addon source directly when it owns the behavior. Extend Odoo core/enterprise through a custom addon; never edit vendor source.
 - `workflow_profile` sets effort: one complete write set for small work; dependency-ordered local batches for large work. Commit/push once after verification.
-- Ask for material `needs_clarification`, required user decisions or external blockers. Resolve technical choices from source.
+- Ask only for material decisions or blockers source cannot resolve; infer technical choices from established code behavior.
 
 ## CODE QUALITY CONTRACT
 

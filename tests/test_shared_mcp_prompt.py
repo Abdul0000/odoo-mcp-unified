@@ -161,6 +161,8 @@ def test_mcp_system_prompt_keeps_required_generic_contract():
         "A watchdog `stalled` label is not a terminal result",
         "`operation_interrupted`",
         "A short `push` continues pending work",
+        "Never ask “continue?” after an authorized request",
+        "resume the same workspace/session/job",
         "## VIEW AND XML GATE",
         "unexpected multiple matches",
         "Studio/database overlays",
