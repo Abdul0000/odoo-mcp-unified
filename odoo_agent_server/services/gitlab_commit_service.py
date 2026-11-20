@@ -4,12 +4,17 @@ from __future__ import annotations
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+import subprocess
+import tempfile
 import re
 import urllib.parse
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from .github_commit_service import FileChange, GitHubError, CommitOutcome, git_blob_sha
 
@@ -283,3 +288,162 @@ class GitLabRepo:
     def delete_branch(self, branch: str):
         encoded = urllib.parse.quote(branch, safe="")
         self.request("DELETE", f"/repository/branches/{encoded}", ok=(200, 202, 204))
+
+
+class GitLabNativeRepo(GitLabRepo):
+    """Git transport implementation used when GitLab REST PAT scopes are too narrow.
+
+    All reads and writes operate on Git objects/private refs. The configured
+    checkout's worktree, index, and checked-out branch are never changed.
+    """
+
+    def __init__(self, client, base_url: str, project_path: str):
+        super().__init__(base_url, project_path, client.token or "")
+        from .git_identity import same_repository
+        self.path = Path(client.path).resolve()
+        if not (self.path / ".git").exists():
+            raise GitLabError(409, "validated client checkout is unavailable for Git transport fallback")
+        origin = self._run("remote", "get-url", "origin").strip()
+        configured = client.repo or ""
+        if not same_repository(origin, configured):
+            raise GitLabError(409, "client checkout origin does not match the configured GitLab repository")
+        self.remote_url = client.authenticated_repo
+        if not self.remote_url:
+            raise GitLabError(403, "Git transport fallback requires configured repository credentials")
+
+    def _run(self, *args, env=None, input_bytes=None, check=True):
+        process_env = os.environ.copy()
+        process_env["GIT_TERMINAL_PROMPT"] = "0"
+        if env:
+            process_env.update(env)
+        result = subprocess.run(["git", "-C", str(self.path), *args], input=input_bytes,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=process_env)
+        if check and result.returncode:
+            # Never include remote URL or credential-bearing process arguments.
+            message = result.stderr.decode("utf-8", "replace")[-600:]
+            message = re.sub(r"https?://[^\s@]+:[^\s@]+@", "https://[redacted]@", message)
+            raise GitLabError(409 if "non-fast-forward" in message.lower() else 502,
+                              message or "Git transport operation failed")
+        return result.stdout.decode("utf-8", "replace")
+
+    @staticmethod
+    def _check_branch(branch):
+        valid = subprocess.run(["git", "check-ref-format", "--branch", branch or ""],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if not branch or branch.startswith("-") or valid.returncode:
+            raise GitLabError(400, "invalid branch name", path=branch or "")
+
+    def _fetch(self, branch):
+        self._check_branch(branch)
+        ref = f"refs/mcp/gitlab/{uuid4().hex}/head"
+        self._run("fetch", "--no-tags", self.remote_url, f"+refs/heads/{branch}:{ref}")
+        return ref, self._run("rev-parse", ref).strip()
+
+    def _drop_ref(self, ref):
+        self._run("update-ref", "-d", ref, check=False)
+
+    def default_branch(self):
+        if self._default_branch is None:
+            symbolic = self._run("ls-remote", "--symref", self.remote_url, "HEAD")
+            match = re.search(r"ref: refs/heads/(.+)\tHEAD", symbolic)
+            self._default_branch = match.group(1) if match else ""
+        return self._default_branch or None
+
+    def head(self, branch):
+        ref, sha = self._fetch(branch)
+        try:
+            tree = self._run("rev-parse", f"{sha}^{{tree}}").strip()
+            return {"commit": sha, "tree": tree, "message": self._run("show", "-s", "--format=%s", sha).strip()}
+        finally:
+            self._drop_ref(ref)
+
+    def ref_exists(self, branch):
+        ref = None
+        try:
+            ref, _ = self._fetch(branch)
+            return True
+        except GitLabError as exc:
+            if exc.status in (409, 502) and "couldn't find remote ref" in exc.message.lower():
+                return False
+            raise
+        finally:
+            if ref:
+                self._drop_ref(ref)
+
+    def tree(self, tree_sha):
+        output = self._run("ls-tree", "-r", "-z", "--full-tree", tree_sha)
+        rows = {}
+        for item in output.split("\0"):
+            if not item:
+                continue
+            metadata, path = item.split("\t", 1)
+            mode, kind, sha = metadata.split()
+            if kind == "blob":
+                size = self._run("cat-file", "-s", sha).strip()
+                rows[path] = {"sha": sha, "mode": mode, "size": size}
+        return rows
+
+    def blob_text(self, sha):
+        if not re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            raise GitLabError(400, "invalid blob id")
+        result = subprocess.run(["git", "-C", str(self.path), "cat-file", "blob", sha],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode:
+            raise GitLabError(404, "blob not found", path=sha)
+        if len(result.stdout) > 400_000:
+            raise GitLabError(413, "blob exceeds workspace file size limit; use native execution", path=sha)
+        return result.stdout.decode("utf-8", "replace")
+
+    def recent_commit_messages(self, branch, count=8):
+        ref, sha = self._fetch(branch)
+        try:
+            rows = self._run("log", f"-{max(1, min(count, 100))}", "--format=%H%x09%s", sha)
+            return [{"sha": line.split("\t", 1)[0], "message": line.split("\t", 1)[1] if "\t" in line else ""}
+                    for line in rows.splitlines()]
+        finally:
+            self._drop_ref(ref)
+
+    def commit_to_branch(self, branch, changes, message, *, expected_head=None, create_from=None):
+        ref, current = self._fetch(branch)
+        try:
+            if expected_head and current != expected_head:
+                raise GitLabError(409, "branch head changed before commit", path=branch)
+            if not changes:
+                return {"commit": current, "tree": current}
+            with tempfile.TemporaryDirectory(prefix="odoo-mcp-git-index-") as tmp:
+                index = str(Path(tmp) / "index")
+                env = {"GIT_INDEX_FILE": index}
+                self._run("read-tree", current, env=env)
+                current_tree = self.tree(current)
+                for change in changes:
+                    if change.content is None:
+                        self._run("update-index", "--force-remove", "--", change.path, env=env)
+                        continue
+                    content = change.content.encode("utf-8")
+                    blob = subprocess.run(["git", "-C", str(self.path), "hash-object", "-w", "--stdin"],
+                                          input=content, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if blob.returncode:
+                        raise GitLabError(502, "failed to create Git blob", path=change.path)
+                    old = current_tree.get(change.path, {})
+                    mode = old.get("mode", "100644")
+                    self._run("update-index", "--add", "--cacheinfo", mode,
+                              blob.stdout.decode().strip(), change.path, env=env)
+                tree_sha = self._run("write-tree", env=env).strip()
+                commit_env = {"GIT_AUTHOR_NAME": "Odoo MCP", "GIT_AUTHOR_EMAIL": "odoo-mcp@localhost",
+                              "GIT_COMMITTER_NAME": "Odoo MCP", "GIT_COMMITTER_EMAIL": "odoo-mcp@localhost"}
+                commit = subprocess.run(["git", "-C", str(self.path), "commit-tree", tree_sha, "-p", current],
+                                        input=message.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        env={**os.environ, **commit_env})
+                if commit.returncode:
+                    raise GitLabError(502, "failed to create Git commit")
+                sha = commit.stdout.decode().strip()
+            self._run("push", self.remote_url, f"{sha}:refs/heads/{branch}")
+            return {"commit": sha, "tree": sha}
+        finally:
+            self._drop_ref(ref)
+
+    def move_ref(self, branch, sha, *, create=False):
+        raise GitLabError(422, "detached ref updates are not supported", path=branch)
+
+    def delete_branch(self, branch):
+        self._run("push", self.remote_url, f":refs/heads/{branch}")

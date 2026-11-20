@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import functools
 from typing import Any, Callable
 
 from fastapi import HTTPException
@@ -9,7 +10,7 @@ from fastapi import HTTPException
 from ..config import settings
 from .client_resolver_service import ClientResolverService
 from .github_commit_service import GitHubError, GitHubRepo, parse_repo
-from .gitlab_commit_service import GitLabRepo, is_gitlab_repo_url, parse_gitlab_repo
+from .gitlab_commit_service import GitLabRepo, GitLabError, GitLabNativeRepo, is_gitlab_repo_url, parse_gitlab_repo
 from .workspace_service import ClientTarget, WorkspaceError, WorkspaceService
 
 
@@ -27,6 +28,11 @@ def _resolve(name: str | None) -> ClientTarget:
         except ValueError as exc:
             raise WorkspaceError("repo_url_invalid", str(exc), repo=client.public.get("repo")) from exc
         repository = _gitlab_repo(base_url, project_path, token)
+        # GitLab REST often requires broad `api`/`read_api` PAT scopes even when
+        # the same credential is allowed to fetch and push over Git transport.
+        # Keep REST as the normal route, but retry scope failures through the
+        # client's already validated checkout and authenticated Git URL.
+        repository = GitLabScopeFallbackRepo(repository, client, base_url, project_path)
     else:
         try:
             owner, repo_name = parse_repo(repo_url)
@@ -37,6 +43,30 @@ def _resolve(name: str | None) -> ClientTarget:
 
 
 _REPOS: dict[tuple[str, str, str, str], Any] = {}
+
+
+class GitLabScopeFallbackRepo:
+    def __init__(self, rest: GitLabRepo, client, base_url: str, project_path: str):
+        self.rest, self.client = rest, client
+        self.base_url, self.project_path = base_url, project_path
+        self.native = None
+
+    def __getattr__(self, name):
+        attr = getattr(self.rest, name)
+        if not callable(attr):
+            return attr
+        @functools.wraps(attr)
+        def call(*args, **kwargs):
+            try:
+                return attr(*args, **kwargs)
+            except GitLabError as exc:
+                detail = exc.message.lower()
+                if exc.status != 403 or not ("insufficient_scope" in detail or "requires higher privileges" in detail):
+                    raise
+                if self.native is None:
+                    self.native = GitLabNativeRepo(self.client, self.base_url, self.project_path)
+                return getattr(self.native, name)(*args, **kwargs)
+        return call
 
 
 def _cache_key(provider: str, host: str, path: str, token: str) -> tuple[str, str, str, str]:

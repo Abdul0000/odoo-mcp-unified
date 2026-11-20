@@ -75,3 +75,65 @@ def test_directory_lookup_does_not_fetch_recursive_repository_tree():
     repo = GitLabRepo('https://gitlab.invalid', 'group/repo', '', transport=transport)
     assert repo.tree_at('a' * 40, 'module')['a.py']['sha'] == 'blob'
     assert len(calls) == 1
+
+
+def test_gitlab_native_adapter_reads_and_pushes_without_touching_checkout(tmp_path):
+    import subprocess
+    from types import SimpleNamespace
+    from odoo_agent_server.services.gitlab_commit_service import GitLabNativeRepo
+    from odoo_agent_server.services.github_commit_service import FileChange
+
+    def git(*args, cwd=None):
+        return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+    bare = tmp_path / "origin.git"
+    checkout = tmp_path / "checkout"
+    git("init", "--bare", str(bare))
+    git("clone", str(bare), str(checkout))
+    git("config", "user.name", "Test", cwd=checkout)
+    git("config", "user.email", "test@example.invalid", cwd=checkout)
+    (checkout / "a.py").write_text("old = True\n")
+    git("add", "a.py", cwd=checkout)
+    git("commit", "-m", "initial", cwd=checkout)
+    git("branch", "-M", "17-nov-2026-stagging", cwd=checkout)
+    git("push", "origin", "17-nov-2026-stagging", cwd=checkout)
+    initial_head = git("rev-parse", "HEAD", cwd=checkout)
+    dirty_index = git("write-tree", cwd=checkout)
+
+    remote_url = bare.as_uri()
+    client = SimpleNamespace(path=str(checkout), repo=remote_url, token=None,
+                             authenticated_repo=remote_url)
+    repo = GitLabNativeRepo(client, "https://gitlab.invalid", "group/project")
+    assert repo.head("17-nov-2026-stagging")["commit"] == initial_head
+    tree = repo.tree(initial_head)
+    assert repo.blob_text(tree["a.py"]["sha"]) == "old = True\n"
+    pushed = repo.commit_to_branch("17-nov-2026-stagging", [FileChange("a.py", "new = True\n")],
+                                   "fix", expected_head=initial_head)
+
+    assert git("rev-parse", "refs/heads/17-nov-2026-stagging", cwd=bare) == pushed["commit"]
+    assert git("rev-parse", "HEAD", cwd=checkout) == initial_head
+    assert git("write-tree", cwd=checkout) == dirty_index
+
+
+def test_workspace_scope_fallback_only_handles_insufficient_scope():
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from odoo_agent_server.services.gitlab_commit_service import GitLabError
+    from odoo_agent_server.services.workspace_factory import GitLabScopeFallbackRepo
+
+    client = SimpleNamespace()
+    native = SimpleNamespace(head=lambda branch: {"commit": "native"})
+    rest = SimpleNamespace(head=lambda branch: (_ for _ in ()).throw(
+        GitLabError(403, "insufficient_scope: requires api read_api")))
+    with patch("odoo_agent_server.services.workspace_factory.GitLabNativeRepo", return_value=native):
+        assert GitLabScopeFallbackRepo(rest, client, "https://gitlab.invalid", "group/project").head("staging")["commit"] == "native"
+
+    rest = SimpleNamespace(head=lambda branch: (_ for _ in ()).throw(GitLabError(403, "access denied")))
+    with patch("odoo_agent_server.services.workspace_factory.GitLabNativeRepo") as native_factory:
+        try:
+            GitLabScopeFallbackRepo(rest, client, "https://gitlab.invalid", "group/project").head("staging")
+        except GitLabError as exc:
+            assert "access denied" in exc.message
+        else:
+            raise AssertionError("non-scope GitLab 403 must not be swallowed")
+        native_factory.assert_not_called()
