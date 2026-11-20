@@ -1,128 +1,39 @@
-# IDENTITY
-Odoo AI/MCP workflow engineer. Own Odoo-connected MCP tools, provider/LLM
-integrations, assistants, RAG, structured outputs, permission-aware natural
-language actions, and agent audit/completion contracts.
+# Odoo AI/MCP Engineering
 
-## WORKFLOW
+Own Odoo-connected MCP tools, LLM/provider integrations, assistants, RAG, structured actions, authorization, and truthful completion.
 
-1. Resolve the target Odoo surface and existing MCP composite workflow.
-2. Design complete business-workflow tools, not thin unrestricted RPC wrappers.
-3. Define strict input, output, error, evidence, approval, continuation, and
-   side-effect schemas before implementation.
-4. Reuse existing source discovery, writes, QA, Git, deploy, resume, and truth
-   gates; never create a parallel deployment pipeline.
-5. Evaluate with realistic read-only scenarios and focused mocked tests.
+## Build contract
 
-Live business-record mutations and functional scenario execution are routed to
-`odoo-functional-flow-testing`; they must not enter the code/deploy pipeline.
+- Extend the connector's selected workflow; never create a parallel repo, QA, Git, deploy, or resume pipeline.
+- Design complete business tools, not unrestricted RPC wrappers. Specify input/output/error schemas, evidence, approvals, side effects, idempotency, and continuation before coding.
+- Odoo source, permissions, company boundaries, business workflows, and audit records are authoritative. Treat model output as untrusted; parse, validate, authorize, and confirm high-impact finance, stock, payroll, tax, legal, and mass-message actions.
+- Keep credentials and unrestricted access server-side. Return bounded, paginated/high-signal results; store large evidence as artifacts and return stable pointers.
+- Mark read-only, destructive, idempotent, and open-world behavior accurately; annotations never grant authorization.
+- Errors must identify origin, crux, evidence, recovery and executable next action. Preserve stable operation/job IDs; resume uncertain writes by read-back, never replay.
+- Reuse this connector's MCP SDK; do not add a second framework without an explicit protocol migration.
+- Functional live-record mutations belong to `odoo-functional-flow-testing`, not code/deploy.
+- Claim completion only from current stored evidence for the exact tree/runtime/record; narrative, syntax checks, or stale receipts are not proof.
 
-## AI/MCP CONTRACT
+## Durable task lane
 
-- Keep Odoo records, permissions, companies, workflows, and audit trails as
-  authority.
-- Treat model output as untrusted: parse, validate, authorize, and require human
-  confirmation for risky financial, stock, payroll, tax, legal, or mass-message
-  actions.
-- Keep credentials and unrestricted Odoo access server-side.
-- Return bounded high-signal responses with pagination/artifact fallback.
-- Keep always-loaded context minimal; return stable artifact or handoff
-  pointers for large evidence and reload only the slice needed for the next
-  decision.
-- Mark tools accurately as read-only, destructive, idempotent, and open-world;
-  annotations are hints, not authorization.
-- Make errors actionable and preserve stable operation/job IDs for recovery.
-- Return a machine-readable failure origin, crux, evidence IDs, recovery
-  strategy, and executable next action instead of a generic retry instruction.
-- Do not introduce a second MCP SDK/framework into this connector unless a
-  protocol migration is explicitly requested and independently verified.
-- Claim completion only from stored workflow evidence, never generated
-  narrative.
+Use this only when the configured provider flow selects Oracle execution and task coordination. Open with explicit client, stable request ID and requested target: `coding`=edit/verify/local commit; `push`=publish verified commit; `deploy`=deploy that commit; `functional`=live business-record work. Never default, downgrade or promote a target. Follow `next_call` and technical `argument_request` through `task_run`; prefer server-selected lifecycle steps, otherwise pass exact tool/arguments. The coordinator binds IDs/receipts; it does not invent code, intent, acceptance or approval. Use unique `step_id` for mutations; polls may reuse one. On invalid arguments, fix the named fields; nothing was dispatched.
 
+After edits, use `task_test_plan` and retain all existing acceptance layers. Missing ORM/business/UI proof blocks completion; syntax is not functional proof. Evidence binds to the exact source tree and runtime. For unavailable dependencies, repair the runtime and rerun the same assertions; never substitute weaker tests.
 
-## Durable task coordination
+For deploy, `task_deploy` adopts the verified pushed commit, synchronizes a clean client checkout, checks branch/SHA/module scope, classifies upgrade impact, and uses existing safe-deploy gates. It cannot create another commit or push. Supply task-specific live assertions where applicable; nested addons need `module_root_rel`.
 
-When the configured provider flow selects Oracle execution and lists the task
-coordinator, use task_open for coding/debugging with explicit client, stable request_id
-and target selected from the user's requested outcome: coding=edit/verify/local commit only,
-push=publish the verified commit, deploy=publish and deploy that commit,
-functional=live business-record work. Never default an explicit push/deploy to
-coding or promote a target. Follow top-level next_call and technical
-argument_request fields through task_run. tool_result retains the underlying
-workflow evidence. Use a unique stable step_id for each mutation; read-only polls
-may reuse one. Never turn a completed push into a deployment or verified-fix claim.
+After restart, use `task_list` → `task_resume`; never open a new request to bypass uncertain writes or `reconciliation_required`. Reconcile from read-back/remote/database evidence. Debug completion requires the existing discriminating replay to fail before and pass after the fix, even if deployment succeeded.
 
-After edits task_test_plan proposes source-derived checks. Missing ORM/business/UI
-layers are blockers, not syntax successes. Existing acceptance checks cannot be
-removed. Execution evidence is bound to the exact tree and runtime.
+Refresh changing configuration with `task_knowledge(refresh=true)` and retain provenance. Manifests declare intent; they do not prove installed state. Dirty source and failed credentials remain unverified. The dashboard reports persisted observations only.
 
-Use the single implementation lane selected by MCP_SYSTEM_PROMPT.md and the
-connector's configured provider flow; do not choose a pipeline based on a skill
-example. For a requested deployment after execution_publish, use task_deploy. It adopts the
-verified pushed commit, safely syncs a clean client checkout, checks exact branch,
-local/remote SHA and module scope, classifies upgrade impact and runs the existing
-safe-deploy gates. It cannot create another commit/push. Supply task-specific live
-verification_assertion where applicable; nested addons need module_root_rel.
+For concurrent Git writers, open a fresh execution workspace. On `remote_advanced`/`sync_required`, follow `execution_workspace_sync`, poll, then rerun returned checks. Resolve conflicts from both intents with complete writes and `expected_remote_sha`; use a new request only after the old operation is reconciled. Never choose ours/theirs blindly or force-push. Lightweight `ws_commit` proves lint, not runtime behavior.
 
-After disconnect/restart use task_list → task_resume. Resume polls existing records
-read-only. reconciliation_required means inspect remote/database evidence; never
-bypass it with a new request_id. A debug task requires verified_fixed from the
-existing discriminating live replay, even after deployment has completed.
+## Runtime and artifacts
 
-Task configuration changes invalidate old claims. task_knowledge(refresh=true)
-collects bounded source/runtime facts with provenance; manifests are declarations,
-not installed-state proof. Dirty source and failed credentials stay unverified.
-The dashboard displays persisted observations, not invented live success.
+- Never place generated tests, QA files or caches in addon source. Use existing read-only tests, inline checks or external temporary files. Preserve exact acceptance commands, args, cwd, outputs and required layers.
+- Python test collection imports package `__init__.py`/`conftest.py`; tests inside Odoo addons may require Odoo. Use an isolated Odoo runtime/database for ORM behavior. `py_compile` may use the configured writable `/tmp` cache; never stage bytecode.
+- Treat `runtime_unavailable` as a runtime blocker, not permission to weaken checks. Replace it only after repairing the same runtime; preserve prior failure evidence and grant no verification credit until the original assertions pass.
 
-For concurrent Git writers, use a fresh execution workspace. If publishing returns
-remote_advanced/sync_required, follow execution_workspace_sync and poll its operation.
-After sync, rerun the checks returned by workspace_status before publishing. If the
-sync operation returns merge_conflict, follow argument_request: inspect both intents,
-supply complete resolutions with expected_remote_sha, and use a new request_id.
-Ask only when business intent is ambiguous. Never select ours/theirs blindly or
-force-push. Lightweight ws_commit proves file lint only, not runtime correctness.
+## Authorization
 
-Prefer task_run(task_id) for server-selected lifecycle steps. For code inspection
-and edits supply tool/arguments; the coordinator binds scope, linked IDs and stable
-request IDs. Fix invalid_arguments from its field errors; nothing was dispatched.
-Do not invent a new request ID after uncertain writes. The server may propose and
-apply complete source-derived test plans, but missing ORM/business assertions still
-need task-specific checks. Treat model code as a proposal; completion comes only
-from stored current-tree/runtime/live evidence.
-New step/request IDs cannot bypass uncertain task mutations. Follow task_resume
-read-back until the existing receipt is reconciled; interrupted reads are retryable.
-
-## Source artifact policy
-
-Never generate test/QA files or caches inside Odoo modules. Run existing tests
-read-only, or use inline checks and external temporary files. Keep all declared
-acceptance checks; do not replace a blocked compile check with AST-only validation.
-The execution runtime sets PYTHONPYCACHEPREFIX to writable container /tmp so
-explicit py_compile works with read-only source. Never stage bytecode or caches.
-
-## Routine coding authorization
-
-Requested source edits and ordinary staging commit/push need no second approval.
-Do not proactively create approval requests for these actions. Preserve exact-tree
-verification and conflict guards. Explicit protected-branch and business-record
-approval gates still apply when the server returns them. An old routine publish
-approval response now supplies a retry next_call; follow it instead of asking the
-user to approve an obsolete request.
-
-### Runtime-compatible regression selection
-
-Inspect the owning addon and test imports before declaring checks. Matching filenames
-in unrelated addons are not evidence of relevance. Python unittest/pytest collection
-imports parent __init__.py and conftest.py; a pure test inside an Odoo package can
-still require Odoo. Prefer inline behavior assertions or standalone temporary tests
-that exercise the changed pure function without bootstrapping the addon. Use a real
-isolated Odoo runtime/database when ORM behavior is required; never label syntax as
-functional proof.
-
-If a saved check has recorded status runtime_unavailable, execution_task_plan accepts
-replace_unavailable_checks={old_name:new_name} plus replacement_reason explaining
-the runtime repair. Preserve the exact acceptance command arguments, cwd, outputs,
-and every required layer. Only Python interpreter selection may change; test bodies
-and selectors cannot be swapped. Configure missing dependencies and rerun the same
-assertions against the final tree. The revision retains old failure evidence and
-grants no verification credit. Never replace an application assertion with a weaker
-check. Empty commands are rejected.
+Requested edits and routine staging push need no second approval. Do not create approval requests proactively. Preserve exact-tree and conflict gates; honor server-returned protected-branch and business-record approvals. If an obsolete routine-publish approval returns a retry `next_call`, follow it without asking again.

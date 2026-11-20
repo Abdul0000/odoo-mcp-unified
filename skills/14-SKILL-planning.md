@@ -1,147 +1,39 @@
-# IDENTITY
-Scope and impact guide. Use it as an internal checklist when the task needs
-planning; it is not a mandatory user-facing phase or a separate tool call. For
-a small deterministic fix, inspect the exact owner/callers, make the complete
-scoped edit, and verify it. For a feature or new module, use the matching
-complete-file checklist below. Once the owner is clear, use the matching domain skill (or
-`odoo-custom-module-development` for a standalone module) to implement.
+# Odoo Scope & Impact Checklist
 
-When scope includes views/XML/QWeb, add the `odoo-view-development` evidence
-gate: exact version and parent, owning dependencies, inheritance priority,
-XPath match count, security visibility, `noupdate`, Studio risk, and final
-compiled-view proof.
+Internal checklist, not a mandatory user-facing phase. Follow `MCP_SYSTEM_PROMPT.md` and the configured provider lane; examples never authorize a second pipeline.
 
----
+## Classify and inspect
 
-## 0. FAST-PATH INSPECTION BUDGET
+- Classify internally: `surgical` (one defect/object), `feature` (existing addon behavior), `new_module` (standalone models), or `runtime_debug`. Do not plan aloud for clear work.
+- Surgical: inspect the exact module/manifest, symbol, callers and view companions—normally 3–8 files. Use the cached code graph first; expand only on concrete references/dependencies.
+- Resolve owner, installed API/version and target from source. For a new module, check `odoo-all-modules-reference`; use the owning domain skill. Load debug/test/review/migration skills only when their work is requested or evidenced.
+- Separate facts, material assumptions and unknowns. Ask one concise question only for a product/scope decision code cannot settle. A single useful live lookup is enough when source needs runtime confirmation.
 
-- Classify the task internally as `surgical`, `feature`, `new_module`, or
-  `runtime_debug` before reading broadly; do not emit a plan for a clear task.
-- For an initial surgical pass, inspect only the target module/manifest, exact
-  symbol, and direct caller/view companions—normally 3–8 relevant files.
-- Use the cached Odoo code graph before repository-wide search.
-- Expand only from concrete call/reference/dependency evidence.
-- Identify the crux from first principles. Separate verified facts, material
-  assumptions, and unknowns; compare a strongest credible alternative and
-  second-order effects only when they can change scope, risk, or acceptance.
-- After the first focused pass, ask exactly one concise question only when a
-  material product/scope choice remains. Resolve technical choices from
-  installed source and project conventions.
-- Do not load runtime debugging, test, review, or migration skills speculatively.
+## Close the implementation set
 
-## 1. SCOPE CLASSIFICATION (decide first, changes everything downstream)
-```text
-SURGICAL      — one bug, one field, one method, one view tweak.
-                -> touch only the exact file(s)/lines. No rewrites.
+| Scope | Required coverage |
+|---|---|
+| Surgical | Exact owning files/callers; no unrelated rewrite. |
+| Existing-module feature | Model/logic + needed views + access/security changes, together. |
+| Standalone module | Models, access CSV, conditional groups/rules, needed views, action/menu, relevant data, manifest entries, imports, dependencies and assets. |
 
-NEW FEATURE   — adds fields/logic to an EXISTING model/module.
-                -> model change + matching view + matching access rule,
-                   as one complete set.
+Before writing, trace changed behavior through manifest/load order, models, fields, methods, controllers, views, actions/menus, security, data, tests and assets as applicable. Close every requested reference; no scaffolds, placeholders or deferred “later” files. For XML/QWeb, also verify exact version/parent, dependency, inheritance priority, XPath match count, visibility, `noupdate`, Studio risk and compiled-view proof.
 
-NEW MODULE    — standalone models that don't exist yet.
-                -> full skeleton: model(s) + ir.model.access.csv + views
-                   + actions + menu + (security groups/rules if multi-user)
-                   + data (sequence, defaults) — all in one complete pass.
-```
-Never treat a "new module" request as a series of surgical edits arriving
-later (model now, security "later", views "later"). Plan the full file set
-up front, then write it as one complete set — see CHANGE SCOPE in the
-system prompt.
+## Impact and risk
 
-## 2. FILE INVENTORY CHECKLIST (tick every box that applies before writing)
-- [ ] Model file(s) (`models/*.py`)
-- [ ] `security/ir.model.access.csv` — every new model needs a row or it's unusable
-- [ ] `security/*_security.xml` — only if groups or record rules are needed
-- [ ] View(s) (`views/*.xml`) — form/list/search as the feature needs
-- [ ] Action + menu — a model with no action/menu is unreachable in the UI
-- [ ] Data file — sequence, default categories, demo data if relevant
-- [ ] `__manifest__.py` `data` list updated with every new XML/CSV file
-- [ ] `__init__.py` (module and `models/`) updated to import new files
+- Check inheritance/dependents before changing native or custom models/views; trace reports, automations and cross-addon callers before renaming/removing fields.
+- Existing data + new required field needs a valid default or migration. Check multi-company isolation, ACLs/rules and user-facing authorization.
+- Prefer batched ORM/`read_group`; flag per-record query/write loops. Edit custom addons; extend core/Enterprise, never vendor it.
+- Do not infer controllers, tests, symbols or files from exception text alone. Add only what the request, installed source and changed call graph require.
+- Preserve unrelated baseline warnings/debt. Fix task-caused, newly introduced and changed-scope failures; never patch addon code for a connector quoting/checkpoint error.
 
-## 3. IMPACT / DEPENDENCY CHECK
-```python
-# What already depends on the model(s) you're about to touch?
-model = self.env['ir.model'].search([('model', '=', 'sale.order')])
-model.field_id.filtered(lambda f: f.state == 'manual')  # custom fields already there
-# What modules currently inherit/extend it?
-self.env['ir.model.data'].search([('model', '=', 'ir.ui.view'), ('name', 'like', 'sale_order')])
-```
-- Editing a **native** model/view: check who else inherits it — a field
-  rename or view xpath change can break other installed modules.
-- Editing a **custom** model: check `_inherits`/`_inherit` users and any
-  report/automation referencing it before renaming or removing a field.
+## Verification and recovery
 
-## 4. RISK FLAGS (call out explicitly in the plan, don't silently skip)
-- **Migration**: existing DB + new `required=True` field → needs `default=`
-  or a post-init hook, or install will fail on data present.
-- **Multi-company**: does the model need `company_id` + a record rule, or
-  will data leak across companies?
-- **Performance**: any loop over `search()`/`write()` per record instead of
-  batched ORM calls or `read_group`/raw SQL for reporting-scale data.
-- **Security**: every new model needs explicit `ir.model.access.csv`; every
-  user-facing action needs a group check if not meant for all internal users.
-- **Native source touch**: never edit core/enterprise files directly —
-  inherit instead.
+- Choose relevant existing tests/flows and a concrete acceptance assertion before editing; preserve all requested and existing checks. Upgrade when schema/views require it; restart alone is not upgrade proof.
+- Classify failures by evidence: `custom_code`, `preexisting_baseline`, or `connector_pipeline`. Keep source, QA, Git, deployment and live-flow evidence separate.
+- On connector command failure, retain successful commit/push/deploy checkpoints and resume the same job at the failed check. Require exact deployed SHA/file and upgrade evidence before claiming success.
+- Persist a compact handoff only for multi-phase/interrupted work: locked scope, decisions/reasons, targets, completed checkpoints, failure fingerprint, blocker and next action. Resume it; do not reconstruct or restart settled phases.
 
-## 5. VERIFICATION PLAN (decide before writing, not after)
-- Which existing tests/flows could this affect (list them)?
-- What manual check confirms success (e.g. "create record, confirm state
-  transitions draft→confirmed→done", "run report, check totals")?
-- Is a module upgrade required (new fields/views) vs just a restart?
+## Stop conditions
 
-## 6. WHEN TO STOP AND ASK
-Stop and ask the user before planning further if:
-- The task could be either a surgical fix or a new feature and the two
-  imply meaningfully different scope (e.g. "add a discount field" — one
-  field vs a full approval workflow).
-- Multiple existing modules could reasonably own this — confirm placement
-  before creating a new module that duplicates existing functionality
-  (check `odoo-all-modules-reference` first).
-
----
-
-## 7. EVIDENCE-BOUND SCOPE AND RECOVERY
-
-- Derive required files/symbols only from the user's contract, exact installed
-  source, manifest/load dependencies, and changed-code call graph. Words inside
-  an exception or task narrative are evidence, not automatic requirements.
-- Do not infer a `controllers/` or `tests/` package, a custom `optionPath`
-  symbol, or new JavaScript/Python implementation merely because those tokens
-  appear in an error. Add them only when the requested behavior or source
-  contract requires them.
-- Never bypass a false-positive contract with neutral wording, a fresh
-  operation ID, fake comments, empty files, or unrelated edits. Report the
-  mismatched inferred requirement and preserve the real task scope.
-- After the first focused inspection, ask one concise question only when a
-  material product/scope choice remains. Resolve technical choices from
-  installed source and existing project conventions.
-- Classify failures by evidence:
-  `custom_code` (trace points into changed module),
-  `preexisting_baseline` (unchanged before/after),
-  or `connector_pipeline` (generated command/checkpoint failed independently of
-  module code). Never modify module code to repair a connector quoting error.
-- For a connector command failure such as an unterminated quoted string,
-  preserve the successful commit/push/deploy checkpoints, resume the same job
-  at the failed verification step, and require exact deployed SHA/file plus
-  module-upgrade evidence before claiming success.
-- Keep unchanged Studio/view/deprecation/cache warnings as nonblocking baseline debt.
-  Escalate only newly introduced or changed-scope failures.
-- Persist a compact, self-contained operation handoff only for multi-phase or
-  interrupted work: locked scope, decisions with reasons, exact targets,
-  completed checkpoints, failed fingerprints, blocker, and next action.
-  Resume from it instead of reconstructing settled context or restarting work.
-
----
-
-## CRITICAL RULES
-- Classify scope (§1) before touching any file — it determines whether you
-  do a pinpoint edit or a full complete-file-set write.
-- A "new module" plan is incomplete until every box in §2 is accounted for;
-  do not start writing code with an unfinished checklist.
-- Follow the single lane selected by `MCP_SYSTEM_PROMPT.md` and the connector's
-  configured provider flow. Use `workflow.coding_task_plan` only when that
-  selected workflow explicitly requests it. Never switch to a second code,
-  Git, or deployment pipeline because an example here names a tool.
-- Never call hidden repo/git/odoosh tools directly.
-- Do not convert diagnostics into requirements or connector failures into code
-  patches; keep scope and completion claims tied to concrete evidence.
+Ask only when two plausible scopes have materially different outcomes, more than one addon could own the feature, or a required business rule is absent from source. Do not neutralize false-positive contracts with vague wording, new IDs, fake comments or unrelated edits. Report the mismatch and preserve real scope.

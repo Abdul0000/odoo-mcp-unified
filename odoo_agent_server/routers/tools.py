@@ -428,19 +428,16 @@ _TOOL_DESCRIPTORS = [
         name="workflow.odoo_code_change",
         title="Provider-safe Odoo code change",
         description=(
-            "Single high-level provider-safe coding workflow. Use this instead of manually calling repo.read/write, "
-            "scope_advice, verify, git.push, or module_deploy. It enforces the v15 flow internally: "
-            "read custom module, scope_advice, read /home/odoo/src/odoo/addons related source first with enterprise fallback, "
-            "apply provided edits, git.diff, qa.self_run, verify_against_core, then workflow.safe_deploy_module and jobs.get polling. "
+            "Single provider-safe edit/verify/commit/push/deploy workflow; never recreate its repo/Git/QA/deploy steps manually. "
+            "It reads custom and exact installed native source, applies the supplied complete writes, runs scoped QA and deployment proof. "
             "For a missing addon, set create_module=true with an exact lowercase technical name; it is created only at the checkout root. "
             "New files must use full content writes, not search/replace; missing parent directories are created automatically. "
             "A cached Odoo-aware index maps functional labels through menus/actions/views/models/fields/QWeb/JS relationships, then reads exact match-centered ranges. "
             "Task descriptions automatically supply quoted identifiers/selectors/XML IDs/methods for focused inspection. "
             "An exact quoted replacement that occurs once can complete in one call; complex work returns exact editable source units and an on-demand context artifact when needed. "
-            "A valid coding_session_id plus writes uses the server-owned target contract and skips repeated module discovery, semantic inspection, and target resolution. "
-            "The returned workspace_session_id keeps up to five module snapshots warm for separate tasks in the same checkout; modules load only on demand, use LRU eviction, revalidate independently, and refresh after writes/push. "
-            "Keep coding_session_id only for its exact task, but preserve workspace_session_id when switching modules in the same repository. "
-            "Existing-addon surgical changes use baseline-delta QA: unchanged unrelated legacy findings are reported but do not block commit/deploy; new, task-required, manifest/version, and changed-scope errors still block."
+            "Reuse valid `coding_session_id` plus `writes` to avoid repeating resolution; preserve `workspace_session_id` across modules in one checkout. "
+            "Follow every `next_call` through terminal; on interruption resume the same session/job. Never ask to continue after authorization. "
+            "Unchanged legacy findings do not block surgical fixes; new, required, manifest/version and changed-scope failures do."
         ),
         requires_approval=True,
     ),
@@ -459,16 +456,10 @@ _TOOL_DESCRIPTORS = [
         name="workflow.odoo_debug_and_fix",
         title="Diagnose, fix, deploy, and replay an Odoo runtime issue",
         description=(
-            "Source-first bounded debugger for tracebacks and silent wrong results. "
-            "It emits a three-line plan, inspects the owning custom code and exact installed Community/Enterprise implementation, "
-            "derives the real entry point without guessing, and persists a correlation-scoped session. "
-            "hands exact writes to workflow.odoo_code_change, reuses the existing QA/safe-deploy/jobs pipeline, "
-            "and permits verified_fixed only when the immutable scenario fails before the fix and passes after deploy. "
-            "For a public button/model method, runtime_replay executes the same record method through SSH/Odoo shell before and after deploy, "
-            "while report_replay renders and checks the actual PDF artifact. When source evidence is insufficient, temporary marker-scoped logging "
-            "is deployed for one replay and must be removed before completion. Only correlated lines plus ERROR/CRITICAL tracebacks are returned. "
-            "Manual text/booleans remain untrusted. Deterministic small edits are routed directly "
-            "to workflow.odoo_code_change. It never runs arbitrary console commands or duplicates Git/deploy logic."
+            "Diagnose tracebacks or silent wrong results from owning custom code and exact installed Community/Enterprise source. "
+            "Persist a correlated scenario; hand edits to `workflow.odoo_code_change` and reuse its QA/deploy pipeline. "
+            "Claim `verified_fixed` only when the same immutable replay fails before and passes after deployment; use runtime replay for methods and artifact replay for reports. "
+            "If needed, deploy temporary marker-scoped logs for one replay, then remove them. Manual text is untrusted; no arbitrary commands or duplicate Git/deploy logic."
         ),
         requires_approval=True,
     ),
@@ -532,11 +523,8 @@ _TOOL_DESCRIPTORS = [
         name="workflow.module_test",
         title="Test complete Odoo module",
         description=(
-            "Run one connector-owned background verification job for an existing addon: local static QA, "
-            "real Odoo-native addon tests, same-origin controller/API contracts, and bounded functional "
-            "create/action/read-back scenarios. Live layers run only on a selected client explicitly marked "
-            "environment=test. This workflow never edits, commits, pushes, upgrades, or deploys code; poll jobs.get "
-            "and claim success only when the terminal result has verified=true and success_allowed=true."
+            "Run background verification for an existing addon: static QA, Odoo tests, same-origin API contracts and bounded create/action/read-back flows. "
+            "Live checks require a selected `environment=test` client. Never edits or deploys. Follow `next_call`/`jobs.get` to terminal; success requires `verified=true` and `success_allowed=true`."
         ),
         destructive=True,
         idempotent=True,
@@ -545,13 +533,9 @@ _TOOL_DESCRIPTORS = [
         name="workflow.module_install_and_check",
         title="Install module and check errors",
         description=(
-            "DIRECT FAST PATH for an explicit install, upgrade, or install-and-fix request. "
-            "Immediately starts the guarded Odoo install/upgrade job without repo inspection, history lookup, "
-            "skill loading, module-status prechecks, or planning. Returns job_id/next_call for jobs.get. "
-            "On terminal failure, use its traceback (or odoosh.error_pack once) as evidence for "
-            "workflow.odoo_code_change; successful code repair redeploys through that composite workflow. "
-            "An uninstallable registry state triggers a direct read of the deployed manifest and dependency states; "
-            "when source_repair_allowed=false, do not edit the manifest without a concrete source error."
+            "Fast path for explicit install/upgrade: starts the guarded job without repo prechecks. Follow `next_call`/`jobs.get` to terminal. "
+            "On failure, repair only from its traceback (or one `odoosh.error_pack`) through `workflow.odoo_code_change`. "
+            "If registry says uninstallable, inspect deployed manifest/dependencies; obey `source_repair_allowed=false`."
         ),
         requires_approval=True,
     ),
@@ -586,7 +570,7 @@ _TOOL_DESCRIPTORS = [
     ToolDescriptor(name="workflow.full_verify",
         title="Run full verification", description="Run the full self-verification workflow for an Odoo module", read_only=True),
     ToolDescriptor(name="workflow.safe_deploy_module",
-        title="Deploy module (full pipeline)", description="Safely commit, push, poll Odoo.sh every 10s up to 10 minutes for the pushed SHA, reject recent Odoo.sh build/test failures, verify changed file hashes under /home/odoo/src/user, verify manifest, and upgrade an Odoo module. When Odoo.sh SSH is blocked only by public-key or transport availability and github_push_fallback is enabled, verified source may still be committed and pushed to GitHub with status=github_pushed_deploy_pending; this never means deployed or upgraded. For MCP clients this starts/resumes a background safe-deploy job and returns job_id/next_call immediately; status=running is not success and must be followed via jobs.get. Only treat the deployment as complete when response.deploy_confirmed == true. A finished job without this field set to true means the deploy did not fully complete — do not report success to the user. If git diff shows no changes for this module, safe_deploy_module automatically runs Odoo.sh source verification and returns verified_already_deployed/already_deployed_confirmed; read this field before telling the user anything is 'already added' or 'already live'. Do not make that claim from memory of a previous turn.", requires_approval=True),
+        title="Deploy module (full pipeline)", description="Guarded commit/push/deploy: poll Odoo.sh for the pushed SHA, reject failed builds, verify changed-file hashes and manifest, then upgrade. May return `github_pushed_deploy_pending` when SSH fallback succeeds; that is not deployment. MCP starts/resumes a job: follow `next_call`/`jobs.get` to terminal. Claim deployment only with `deploy_confirmed=true`. With no diff, require `already_deployed_confirmed=true` or source-verification evidence; memory is not proof.", requires_approval=True),
     ToolDescriptor(
         name="workflow.verify_deployed_module",
         title="Verify deployed source",
@@ -918,7 +902,7 @@ _TOOL_DESCRIPTORS = [
     ToolDescriptor(name="jobs.list",
         title="List background jobs", description="List recent connector jobs", read_only=True),
     ToolDescriptor(name="jobs.get",
-        title="Check background job status", description="Read one connector job by id; waits server-side by default until done or timeout to avoid fragile client polling. Only treat the deployment as complete when response.deploy_confirmed == true. A finished job without this field set to true means the deploy did not fully complete — do not report success to the user.", read_only=True),
+        title="Check background job status", description="Wait for one job to progress or return terminal state. Follow returned `next_call`; `running` is not success. A deploy is complete only with `deploy_confirmed=true`.", read_only=True),
     ToolDescriptor(name="audit.list",
         title="View audit log", description="List recent audit events", read_only=True),
     # Fix 3: Resume failed pipeline from last successful step
