@@ -88,6 +88,7 @@ def test_provider_prompts_use_callable_remote_tool_names():
         assert marker in main_prompt
     assert "client_check" in client_prompt
     assert "jobs_get" in client_prompt
+    assert "Do not ask “continue?” after an authorized task" in client_prompt
 
     for unsafe in (
         "skills.list", "skills.read", "workflow.odoo_code_change",
@@ -104,7 +105,7 @@ def test_provider_prompts_use_callable_remote_tool_names():
 def test_mcp_system_prompt_keeps_required_generic_contract():
     root = Path(__file__).resolve().parents[1]
     text = (root / "MCP_SYSTEM_PROMPT.md").read_text(encoding="utf-8")
-    assert len(text) < 12_000
+    assert len(text) < 11_000
 
     required_markers = [
         "## COMPOSITE WORKFLOW",

@@ -19,3 +19,5 @@ Never use saved session state, old `project_path`, global Odoo/Odoo.sh environme
 ## Approved implementation continuation
 
 When the user has already selected a client and approved a concrete change, short replies such as `yes`, `implement`, `push`, `fix`, or `revert` continue the latest pending task. Treat `needs_writes` as internal and continue the tool workflow; never send manual file-edit instructions instead of implementing.
+
+Do not ask “continue?” after an authorized task or routine intermediate result. Follow returned `next_call`s until terminal; if a tool limit interrupts, resume its existing workspace/session/job next turn without repeating completed work. Ask only when `input_required=true` or a material decision cannot be resolved from source.
