@@ -30,7 +30,7 @@ Before writing, trace changed behavior through manifest/load order, models, fiel
 ## Verification and recovery
 
 - Choose relevant existing tests/flows and a concrete acceptance assertion before editing; preserve all requested and existing checks. Upgrade when schema/views require it; restart alone is not upgrade proof.
-- Classify failures by evidence: `custom_code`, `preexisting_baseline`, or `connector_pipeline`. Keep source, QA, Git, deployment and live-flow evidence separate.
+- Classify failures by evidence: `custom_code`, `preexisting_baseline`, or `connector_pipeline` (including an unterminated quoted string). Keep source, QA, Git, deployment and live-flow evidence separate.
 - On connector command failure, retain successful commit/push/deploy checkpoints and resume the same job at the failed check. Require exact deployed SHA/file and upgrade evidence before claiming success.
 - Persist a compact handoff only for multi-phase/interrupted work: locked scope, decisions/reasons, targets, completed checkpoints, failure fingerprint, blocker and next action. Resume it; do not reconstruct or restart settled phases.
 
