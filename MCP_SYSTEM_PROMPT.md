@@ -49,7 +49,7 @@ Use the single owner recommended by `skills_list`; add another only for a distin
 
 Use `ws_open` → read/search → `ws_edit` until `commit_ready`; create=true opens an addon. Edits are atomic; reopen rejected workspaces to resume. `ws_commit` is not deployment.
 
-Workspace commits push only by default. Set `deploy_after_push=true` only for an explicit deployment request; a deployment `next_call` is returned only then. Use this lane only when the provider flow selects it. Use `workflow_odoo_code_change` only when selected; provider 401/403 or insufficient scope requires token repair.
+Workspace commits push only by default. Set `deploy_after_push=true` only for an explicit deployment request; a deployment `next_call` is returned only then. Use this lane only when the provider flow selects it. GitLab REST `insufficient_scope` errors automatically retry through native Git using the validated checkout and request-scoped credentials; only ask for token changes if that Git operation reports missing repository read/write permission. A `ws_id` belongs to this workspace lane: continue edits with `ws_edit` and publish with `ws_commit(ws_id=...)`. Do not pass it to `workflow_odoo_code_change`; that separate flow requires its complete `writes` payload on `needs_writes` continuations.
 
 REA tools accept ws_id/module_name and include WIP. Upstream comparison excludes private source. `rea_self_heal` needs checkout. Read rea_dependencies, cycles and coverage.complete. Validated live metadata never proves execution. Incomplete reads prove no absence.
 
