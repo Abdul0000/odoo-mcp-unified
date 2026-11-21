@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import csv
+from contextvars import ContextVar
 from fnmatch import fnmatch
 import re
 import subprocess
@@ -19,6 +20,7 @@ COMMON_ODOO_FIELDS = {
     "active", "sequence", "company_id",
 }
 FIELD_TYPES_WITH_COMODEL = {"Many2one", "One2many", "Many2many"}
+_VALIDATION_FILE_SNAPSHOT: ContextVar[tuple[Path, Path, tuple[Path, ...], dict[str, tuple[Path, ...]], dict[tuple[str, str], tuple[Path, ...]]] | None] = ContextVar("odoo_validation_file_snapshot", default=None)
 INHERIT_DEPENDS = {
     "account.": "account",
     "sale.": "sale",
@@ -72,26 +74,33 @@ class OdooModuleValidator:
         findings = self._validate_basic_structure(module_path)
         if any(finding.code in {"MODULE_NOT_FOUND", "MODULE_NOT_DIRECTORY"} for finding in findings):
             return findings
-        manifest, manifest_findings = self._read_manifest(module_path)
-        findings.extend(manifest_findings)
-        findings.extend(self._validate_manifest_version_unchanged(module_path, manifest))
-        findings.extend(self._validate_manifest_files(module_path, manifest))
-        findings.extend(self._validate_python_package_inits(module_path))
-        findings.extend(self._validate_import_closure(module_path))
-        findings.extend(self._validate_manifest_registration(module_path, manifest))
-        findings.extend(self._validate_implementation_completeness(module_path))
-        findings.extend(self._validate_odoo_controllers(module_path))
-        findings.extend(self._validate_python_files(module_path))
-        findings.extend(self._validate_xml_files(module_path))
-        findings.extend(self._validate_security_csv(module_path))
-        findings.extend(self._detect_pyc(module_path))
-        parsed_models = self._parse_custom_models(module_path)
-        findings.extend(self._validate_missing_access(module_path, parsed_models))
-        findings.extend(self._validate_manifest_dependency_hints(module_path, manifest, parsed_models))
-        findings.extend(self._validate_xml_references_and_order(module_path, manifest, parsed_models))
-        findings.extend(self._validate_custom_view_fields(module_path, parsed_models))
-        findings.extend(self._validate_requested_features(module_path, manifest, parsed_models, task_description, create_module, module_contract))
-        return findings
+        origin_root = module_path
+        root = module_path.resolve()
+        snapshot = tuple(origin_root.rglob("*"))
+        token = _VALIDATION_FILE_SNAPSHOT.set((root, origin_root, snapshot, {str(root): snapshot}, {}))
+        try:
+            manifest, manifest_findings = self._read_manifest(module_path)
+            findings.extend(manifest_findings)
+            findings.extend(self._validate_manifest_version_unchanged(module_path, manifest))
+            findings.extend(self._validate_manifest_files(module_path, manifest))
+            findings.extend(self._validate_python_package_inits(module_path))
+            findings.extend(self._validate_import_closure(module_path))
+            findings.extend(self._validate_manifest_registration(module_path, manifest))
+            findings.extend(self._validate_implementation_completeness(module_path))
+            findings.extend(self._validate_odoo_controllers(module_path))
+            findings.extend(self._validate_python_files(module_path))
+            findings.extend(self._validate_xml_files(module_path))
+            findings.extend(self._validate_security_csv(module_path))
+            findings.extend(self._detect_pyc(module_path))
+            parsed_models = self._parse_custom_models(module_path)
+            findings.extend(self._validate_missing_access(module_path, parsed_models))
+            findings.extend(self._validate_manifest_dependency_hints(module_path, manifest, parsed_models))
+            findings.extend(self._validate_xml_references_and_order(module_path, manifest, parsed_models))
+            findings.extend(self._validate_custom_view_fields(module_path, parsed_models))
+            findings.extend(self._validate_requested_features(module_path, manifest, parsed_models, task_description, create_module, module_contract))
+            return findings
+        finally:
+            _VALIDATION_FILE_SNAPSHOT.reset(token)
 
     def _validate_basic_structure(self, module_path: Path) -> list[Finding]:
         findings: list[Finding] = []
@@ -230,7 +239,7 @@ class OdooModuleValidator:
         excluded = {"tests", "test", "migrations", "static", "__pycache__"}
         directories = [module_path]
         directories.extend(
-            path for path in module_path.rglob("*")
+            path for path in self._walk_entries(module_path)
             if path.is_dir() and not any(part in excluded or part.startswith(".") for part in path.relative_to(module_path).parts)
         )
         for directory in directories:
@@ -238,7 +247,7 @@ class OdooModuleValidator:
             child_packages = sorted(
                 child.name for child in directory.iterdir()
                 if child.is_dir() and child.name not in excluded and not child.name.startswith(".")
-                and any(path.is_file() and path.suffix == ".py" for path in child.rglob("*.py"))
+                and any(path.is_file() and path.suffix == ".py" for path in self._cached_iter_files(child, "*.py"))
             )
             expected = set(py_modules + child_packages)
             if not expected:
@@ -277,7 +286,7 @@ class OdooModuleValidator:
         findings: list[Finding] = []
         exempt_parts = {"migrations", "static", "__pycache__"}
         directories: set[Path] = set()
-        for py_file in module_path.rglob("*.py"):
+        for py_file in self._cached_iter_files(module_path, "*.py"):
             try:
                 relative_parts = py_file.relative_to(module_path).parts
             except ValueError:
@@ -545,7 +554,7 @@ class OdooModuleValidator:
 
         collect_assets(manifest.get("assets") or {})
         excluded_dirs = {"tests", "test", "migrations", "upgrades", "i18n", "__pycache__"}
-        for path in module_path.rglob("*"):
+        for path in self._walk_entries(module_path):
             if not path.is_file():
                 continue
             relative = path.relative_to(module_path)
@@ -611,9 +620,9 @@ class OdooModuleValidator:
             ),
             "views": (any(item.startswith(("views/", "wizard/", "wizards/")) for item in entries), "views registered in manifest"),
             "report": (any(item.startswith(("report/", "reports/")) for item in entries), "report files registered in manifest"),
-            "dashboard": (any("dashboard" in item.lower() for item in entries) or any("dashboard" in path.name.lower() for path in module_path.rglob("*")), "dashboard implementation"),
+            "dashboard": (any("dashboard" in item.lower() for item in entries) or any("dashboard" in path.name.lower() for path in self._walk_entries(module_path)), "dashboard implementation"),
             "demo": (bool(manifest.get("demo")), "demo files registered in manifest demo"),
-            "automation": (any("ir.cron" in path.read_text(encoding="utf-8", errors="ignore") for path in module_path.rglob("*.xml")), "automation/ir.cron data"),
+            "automation": (any("ir.cron" in path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml")), "automation/ir.cron data"),
             "controllers": (
                 (module_path / "controllers" / "__init__.py").is_file()
                 and any(path.name != "__init__.py" for path in (module_path / "controllers").glob("*.py")),
@@ -674,7 +683,7 @@ class OdooModuleValidator:
                     file=str(module_path / "models"),
                 ))
 
-        xml_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in module_path.rglob("*.xml"))
+        xml_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml"))
         view_markers = {
             "list": ("<list", "<tree"), "form": ("<form",), "search": ("<search",),
             "kanban": ("<kanban",), "menu": ("<menuitem",), "action": ("ir.actions.act_window",),
@@ -693,7 +702,7 @@ class OdooModuleValidator:
         per_model_types = {view_type for view_type in contract["required_view_types"] if view_type in {"list", "form", "search"}}
         model_view_types: dict[str, set[str]] = {model: set() for model in contract["required_models"]}
         action_models: set[str] = set()
-        for xml_path in module_path.rglob("*.xml"):
+        for xml_path in self._cached_iter_files(module_path, "*.xml"):
             try:
                 root = ET.parse(xml_path).getroot()
             except ET.ParseError:
@@ -728,10 +737,10 @@ class OdooModuleValidator:
                     file=str(module_path / "views"),
                 ))
 
-        python_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in module_path.rglob("*.py"))
+        python_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.py"))
         source_text = "\n".join(
             path.read_text(encoding="utf-8", errors="ignore")
-            for path in module_path.rglob("*")
+            for path in self._walk_entries(module_path)
             if path.is_file() and path.suffix.lower() in {".py", ".js", ".xml", ".csv"}
         )
         for route in contract["required_routes"]:
@@ -764,7 +773,7 @@ class OdooModuleValidator:
                     hint="Add a focused test that mocks or asserts this named integration step.",
                 ))
 
-        functional_files = [path for path in module_path.rglob("*") if path.is_file() and path.name not in {"__init__.py", "__manifest__.py"}]
+        functional_files = [path for path in self._walk_entries(module_path) if path.is_file() and path.name not in {"__init__.py", "__manifest__.py"}]
         if contract["full_module_requested"] and not functional_files:
             findings.append(Finding(
                 severity=Severity.error,
@@ -815,7 +824,7 @@ class OdooModuleValidator:
 
     def _validate_python_files(self, module_path: Path) -> list[Finding]:
         findings: list[Finding] = []
-        for py_file in self._iter_files(module_path, "*.py"):
+        for py_file in self._cached_iter_files(module_path, "*.py"):
             if "__pycache__" in py_file.parts:
                 continue
             try:
@@ -852,7 +861,7 @@ class OdooModuleValidator:
         """Reject empty shells and placeholder implementations before deploy."""
         findings: list[Finding] = []
         excluded_parts = {"migrations", "static", "__pycache__"}
-        for py_file in module_path.rglob("*.py"):
+        for py_file in self._cached_iter_files(module_path, "*.py"):
             relative = py_file.relative_to(module_path)
             if any(part in excluded_parts or part.startswith(".") for part in relative.parts[:-1]):
                 continue
@@ -892,7 +901,7 @@ class OdooModuleValidator:
                         hint="Replace pass/ellipsis with the requested functional implementation.",
                     ))
 
-        for xml_file in module_path.rglob("*.xml"):
+        for xml_file in self._cached_iter_files(module_path, "*.xml"):
             try:
                 root = ET.parse(xml_file).getroot()
             except ET.ParseError:
@@ -906,7 +915,7 @@ class OdooModuleValidator:
                     file=str(xml_file),
                 ))
 
-        for csv_file in module_path.rglob("*.csv"):
+        for csv_file in self._cached_iter_files(module_path, "*.csv"):
             rows = [line for line in csv_file.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
             if len(rows) <= 1:
                 findings.append(Finding(
@@ -917,7 +926,7 @@ class OdooModuleValidator:
                 ))
 
         for pattern in ("*.js", "*.scss", "*.css"):
-            for asset_file in module_path.rglob(pattern):
+            for asset_file in self._cached_iter_files(module_path, pattern):
                 source = asset_file.read_text(encoding="utf-8", errors="ignore")
                 without_comments = re.sub(r"/\*.*?\*/|//[^\r\n]*", "", source, flags=re.DOTALL).strip()
                 if without_comments:
@@ -935,7 +944,7 @@ class OdooModuleValidator:
         findings: list[Finding] = []
         controller_files = [
             path for folder in ("controllers", "controller")
-            for path in (module_path / folder).rglob("*.py")
+            for path in self._cached_iter_files(module_path / folder, "*.py")
             if (module_path / folder).is_dir() and path.name != "__init__.py"
         ]
         if not controller_files:
@@ -1007,7 +1016,7 @@ class OdooModuleValidator:
 
     def _validate_xml_files(self, module_path: Path) -> list[Finding]:
         findings: list[Finding] = []
-        for xml_file in self._iter_files(module_path, "*.xml"):
+        for xml_file in self._cached_iter_files(module_path, "*.xml"):
             try:
                 ET.parse(xml_file)
             except ET.ParseError as exc:
@@ -1020,7 +1029,7 @@ class OdooModuleValidator:
     def _validate_security_csv(self, module_path: Path) -> list[Finding]:
         findings: list[Finding] = []
         expected_header = ["id", "name", "model_id:id", "group_id:id", "perm_read", "perm_write", "perm_create", "perm_unlink"]
-        for csv_file in self._iter_files(module_path, "*.csv"):
+        for csv_file in self._cached_iter_files(module_path, "*.csv"):
             if csv_file.name != "ir.model.access.csv":
                 continue
             try:
@@ -1038,7 +1047,7 @@ class OdooModuleValidator:
 
     def _detect_pyc(self, module_path: Path) -> list[Finding]:
         findings: list[Finding] = []
-        for path in module_path.rglob("*"):
+        for path in self._walk_entries(module_path):
             if path.name == "__pycache__" and path.is_dir():
                 findings.append(Finding(severity=Severity.warning, code="PYCACHE_FOUND", message="__pycache__ directory should not be committed.", file=str(path), hint="Delete __pycache__ before commit/push."))
             elif path.suffix == ".pyc":
@@ -1047,7 +1056,7 @@ class OdooModuleValidator:
 
     def _validate_missing_access(self, module_path: Path, parsed_models: dict[str, ParsedModel]) -> list[Finding]:
         access_model_refs: set[str] = set()
-        for csv_file in self._iter_files(module_path, "ir.model.access.csv"):
+        for csv_file in self._cached_iter_files(module_path, "ir.model.access.csv"):
             with csv_file.open(newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
                     model_ref = row.get("model_id:id") or ""
@@ -1115,7 +1124,7 @@ class OdooModuleValidator:
         if not parsed_models:
             return []
         findings: list[Finding] = []
-        for xml_file in self._iter_files(module_path, "*.xml"):
+        for xml_file in self._cached_iter_files(module_path, "*.xml"):
             try:
                 root = ET.parse(xml_file).getroot()
             except ET.ParseError:
@@ -1151,7 +1160,7 @@ class OdooModuleValidator:
     def _parse_custom_models(self, module_path: Path) -> dict[str, ParsedModel]:
         models: dict[str, ParsedModel] = {}
         pending_inherits: list[ParsedModel] = []
-        for py_file in self._iter_files(module_path, "*.py"):
+        for py_file in self._cached_iter_files(module_path, "*.py"):
             if "__pycache__" in py_file.parts:
                 continue
             try:
@@ -1239,6 +1248,48 @@ class OdooModuleValidator:
             if node.attrib.get("name") == field_name:
                 return node
         return None
+
+    @staticmethod
+    def _walk_entries(root: Path) -> tuple[Path, ...]:
+        """Reuse one filesystem traversal throughout a single validation call."""
+        snapshot = _VALIDATION_FILE_SNAPSHOT.get()
+        if snapshot is None:
+            return tuple(root.rglob("*"))
+        snapshot_root, origin_root, entries, walk_cache, _ = snapshot
+        try:
+            resolved_root = root.resolve()
+            resolved_root.relative_to(snapshot_root)
+            relative = root.relative_to(origin_root)
+        except (OSError, ValueError):
+            return tuple(root.rglob("*"))
+        cache_key = str(resolved_root)
+        cached = walk_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if not relative.parts:
+            return entries
+        depth = len(relative.parts)
+        result = tuple(
+            path for path in entries
+            if path.relative_to(origin_root).parts[:depth] == relative.parts
+        )
+        walk_cache[cache_key] = result
+        return result
+
+    def _cached_iter_files(self, module_path: Path, pattern: str) -> Iterable[Path]:
+        snapshot = _VALIDATION_FILE_SNAPSHOT.get()
+        cache_key = (str(module_path.resolve()), pattern)
+        if snapshot is not None:
+            cached = snapshot[4].get(cache_key)
+            if cached is not None:
+                return cached
+        result = tuple(sorted(
+            path for path in self._walk_entries(module_path)
+            if path.is_file() and ".git" not in path.parts and fnmatch(path.name, pattern)
+        ))
+        if snapshot is not None:
+            snapshot[4][cache_key] = result
+        return result
 
     @staticmethod
     def _iter_files(module_path: Path, pattern: str) -> Iterable[Path]:
