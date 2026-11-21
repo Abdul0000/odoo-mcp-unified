@@ -21,6 +21,7 @@ from fastapi import HTTPException, status
 from ..config import settings
 from ..schemas import RepoIndexModule, RepoIndexResult
 from .path_service import resolve_allowed_path
+from .source_snapshot_service import content_digest
 
 _TEMPLATE_RE = re.compile(r't-name=["\']([^"\']+)["\']')
 _SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache", "dist", "build"}
@@ -190,15 +191,14 @@ class RepoIndexService:
             digest.update(head.stdout)
         except (OSError, subprocess.TimeoutExpired):
             pass
-        # Hash the indexed content, including already-dirty and untracked files.
-        # Status letters and directory mtimes cannot identify a second edit.
+        # Fingerprint indexed content, including dirty and untracked files. Reuse
+        # stat-validated per-file digests so cache hits do not reread whole files;
+        # content_digest still detects same-size edits with preserved mtime.
         for path in sorted(self._walk(project)):
             digest.update(str(path.relative_to(project)).encode())
             try:
                 digest.update(str(path.lstat().st_mode).encode())
-                with path.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(65536), b""):
-                        digest.update(chunk)
+                digest.update(content_digest(path))
             except OSError:
                 digest.update(b"unreadable")
         return digest.hexdigest()
