@@ -21,6 +21,27 @@ COMMON_ODOO_FIELDS = {
 }
 FIELD_TYPES_WITH_COMODEL = {"Many2one", "One2many", "Many2many"}
 _VALIDATION_FILE_SNAPSHOT: ContextVar[tuple[Path, Path, tuple[Path, ...], dict[str, tuple[Path, ...]], dict[tuple[str, str], tuple[Path, ...]]] | None] = ContextVar("odoo_validation_file_snapshot", default=None)
+_VALIDATION_TEXT_CACHE: ContextVar[tuple[dict[tuple[str, str, str | None], str], list[int]] | None] = ContextVar("odoo_validation_text_cache", default=None)
+_VALIDATION_TEXT_CACHE_MAX_CHARS = 8_000_000
+_VALIDATION_TEXT_CACHE_MAX_FILE_CHARS = 1_000_000
+
+def _read_validation_text(path: Path, *, encoding: str = "utf-8", errors: str | None = None) -> str:
+    """Share bounded file reads across checks in one validator invocation."""
+    cache_state = _VALIDATION_TEXT_CACHE.get()
+    key = (str(path), encoding, errors)
+    if cache_state is not None:
+        cached = cache_state[0].get(key)
+        if cached is not None:
+            return cached
+    text = path.read_text(encoding=encoding, errors=errors)
+    if cache_state is not None and len(text) <= _VALIDATION_TEXT_CACHE_MAX_FILE_CHARS:
+        cache, used = cache_state
+        if used[0] + len(text) <= _VALIDATION_TEXT_CACHE_MAX_CHARS:
+            cache[key] = text
+            used[0] += len(text)
+    return text
+
+
 INHERIT_DEPENDS = {
     "account.": "account",
     "sale.": "sale",
@@ -78,6 +99,7 @@ class OdooModuleValidator:
         root = module_path.resolve()
         snapshot = tuple(origin_root.rglob("*"))
         token = _VALIDATION_FILE_SNAPSHOT.set((root, origin_root, snapshot, {str(root): snapshot}, {}))
+        text_cache_token = _VALIDATION_TEXT_CACHE.set(({}, [0]))
         try:
             manifest, manifest_findings = self._read_manifest(module_path)
             findings.extend(manifest_findings)
@@ -100,6 +122,7 @@ class OdooModuleValidator:
             findings.extend(self._validate_requested_features(module_path, manifest, parsed_models, task_description, create_module, module_contract))
             return findings
         finally:
+            _VALIDATION_TEXT_CACHE.reset(text_cache_token)
             _VALIDATION_FILE_SNAPSHOT.reset(token)
 
     def _validate_basic_structure(self, module_path: Path) -> list[Finding]:
@@ -121,7 +144,7 @@ class OdooModuleValidator:
         if not manifest_path.exists():
             return {}, []
         try:
-            manifest = ast.literal_eval(manifest_path.read_text(encoding="utf-8"))
+            manifest = ast.literal_eval(_read_validation_text(manifest_path, encoding="utf-8"))
         except SyntaxError as exc:
             return {}, [Finding(severity=Severity.error, code="MANIFEST_SYNTAX_ERROR", message=str(exc), file=str(manifest_path), line=exc.lineno)]
         except Exception as exc:  # noqa: BLE001
@@ -204,7 +227,7 @@ class OdooModuleValidator:
     @staticmethod
     def _relative_imports(init_path: Path) -> set[str]:
         try:
-            tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+            tree = ast.parse(_read_validation_text(init_path, encoding="utf-8"), filename=str(init_path))
         except Exception:
             return set()
         imported: set[str] = set()
@@ -220,7 +243,7 @@ class OdooModuleValidator:
     @staticmethod
     def _relative_import_targets(init_path: Path) -> set[str]:
         try:
-            tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+            tree = ast.parse(_read_validation_text(init_path, encoding="utf-8"), filename=str(init_path))
         except Exception:
             return set()
         targets: set[str] = set()
@@ -622,7 +645,7 @@ class OdooModuleValidator:
             "report": (any(item.startswith(("report/", "reports/")) for item in entries), "report files registered in manifest"),
             "dashboard": (any("dashboard" in item.lower() for item in entries) or any("dashboard" in path.name.lower() for path in self._walk_entries(module_path)), "dashboard implementation"),
             "demo": (bool(manifest.get("demo")), "demo files registered in manifest demo"),
-            "automation": (any("ir.cron" in path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml")), "automation/ir.cron data"),
+            "automation": (any("ir.cron" in _read_validation_text(path, encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml")), "automation/ir.cron data"),
             "controllers": (
                 (module_path / "controllers" / "__init__.py").is_file()
                 and any(path.name != "__init__.py" for path in (module_path / "controllers").glob("*.py")),
@@ -683,7 +706,7 @@ class OdooModuleValidator:
                     file=str(module_path / "models"),
                 ))
 
-        xml_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml"))
+        xml_text = "\n".join(_read_validation_text(path, encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.xml"))
         view_markers = {
             "list": ("<list", "<tree"), "form": ("<form",), "search": ("<search",),
             "kanban": ("<kanban",), "menu": ("<menuitem",), "action": ("ir.actions.act_window",),
@@ -737,9 +760,9 @@ class OdooModuleValidator:
                     file=str(module_path / "views"),
                 ))
 
-        python_text = "\n".join(path.read_text(encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.py"))
+        python_text = "\n".join(_read_validation_text(path, encoding="utf-8", errors="ignore") for path in self._cached_iter_files(module_path, "*.py"))
         source_text = "\n".join(
-            path.read_text(encoding="utf-8", errors="ignore")
+            _read_validation_text(path, encoding="utf-8", errors="ignore")
             for path in self._walk_entries(module_path)
             if path.is_file() and path.suffix.lower() in {".py", ".js", ".xml", ".csv"}
         )
@@ -760,7 +783,7 @@ class OdooModuleValidator:
                 ))
 
         test_text = "\n".join(
-            path.read_text(encoding="utf-8", errors="ignore")
+            _read_validation_text(path, encoding="utf-8", errors="ignore")
             for path in (module_path / "tests").glob("test_*.py")
         ) if (module_path / "tests").is_dir() else ""
         for symbol in contract["required_test_symbols"]:
@@ -828,7 +851,7 @@ class OdooModuleValidator:
             if "__pycache__" in py_file.parts:
                 continue
             try:
-                source = py_file.read_text(encoding="utf-8")
+                source = _read_validation_text(py_file, encoding="utf-8")
                 ast.parse(source, filename=str(py_file))
             except SyntaxError as exc:
                 findings.append(Finding(severity=Severity.error, code="PYTHON_SYNTAX_ERROR", message=str(exc), file=str(py_file), line=exc.lineno))
@@ -867,7 +890,7 @@ class OdooModuleValidator:
                 continue
             if py_file.name in {"__init__.py", "__manifest__.py", "__openerp__.py"}:
                 continue
-            source = py_file.read_text(encoding="utf-8", errors="ignore")
+            source = _read_validation_text(py_file, encoding="utf-8", errors="ignore")
             try:
                 tree = ast.parse(source, filename=str(py_file))
             except SyntaxError:
@@ -916,7 +939,7 @@ class OdooModuleValidator:
                 ))
 
         for csv_file in self._cached_iter_files(module_path, "*.csv"):
-            rows = [line for line in csv_file.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()]
+            rows = [line for line in _read_validation_text(csv_file, encoding="utf-8", errors="ignore").splitlines() if line.strip()]
             if len(rows) <= 1:
                 findings.append(Finding(
                     severity=Severity.error,
@@ -927,7 +950,7 @@ class OdooModuleValidator:
 
         for pattern in ("*.js", "*.scss", "*.css"):
             for asset_file in self._cached_iter_files(module_path, pattern):
-                source = asset_file.read_text(encoding="utf-8", errors="ignore")
+                source = _read_validation_text(asset_file, encoding="utf-8", errors="ignore")
                 without_comments = re.sub(r"/\*.*?\*/|//[^\r\n]*", "", source, flags=re.DOTALL).strip()
                 if without_comments:
                     continue
@@ -953,7 +976,7 @@ class OdooModuleValidator:
         has_controller_class = False
         has_route = False
         for py_file in controller_files:
-            source = py_file.read_text(encoding="utf-8", errors="ignore")
+            source = _read_validation_text(py_file, encoding="utf-8", errors="ignore")
             try:
                 tree = ast.parse(source, filename=str(py_file))
             except SyntaxError:
@@ -1164,7 +1187,7 @@ class OdooModuleValidator:
             if "__pycache__" in py_file.parts:
                 continue
             try:
-                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+                tree = ast.parse(_read_validation_text(py_file, encoding="utf-8"), filename=str(py_file))
             except Exception:
                 continue
             for cls in [node for node in tree.body if isinstance(node, ast.ClassDef)]:

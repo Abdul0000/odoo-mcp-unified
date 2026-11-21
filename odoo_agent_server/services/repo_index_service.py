@@ -194,7 +194,10 @@ class RepoIndexService:
         # Fingerprint indexed content, including dirty and untracked files. Reuse
         # stat-validated per-file digests so cache hits do not reread whole files;
         # content_digest still detects same-size edits with preserved mtime.
-        for path in sorted(self._walk(project)):
+        # _walk already sorts each directory and its children. Avoid first
+        # materializing and globally sorting the entire repository path set;
+        # this fingerprint runs before the index walk on every lookup.
+        for path in self._walk(project):
             digest.update(str(path.relative_to(project)).encode())
             try:
                 digest.update(str(path.lstat().st_mode).encode())

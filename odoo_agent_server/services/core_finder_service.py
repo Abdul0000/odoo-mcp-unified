@@ -429,6 +429,20 @@ class CoreFinderService:
         related_modules: set[str] = set()
         related_xmlids: set[tuple[str, str]] = set()
         added_instruction_paths: set[str] = set()
+        core_lookup_cache: dict[tuple[str, str, str], FindCoreFileResult] = {}
+
+        def find_core(module_name: str, file_type: str, keyword: str) -> FindCoreFileResult:
+            # Related-module and cross-comodel discovery often ask for the same
+            # manifest. Reuse only within this invocation so source freshness
+            # and client-specific roots are never obscured across requests.
+            key = (module_name, file_type, keyword)
+            result = core_lookup_cache.get(key)
+            if result is None:
+                result = self.find_core_file(
+                    module_name, file_type, keyword, search_roots, client_name=client_name
+                )
+                core_lookup_cache[key] = result
+            return result
 
         def add_instruction(item: ScopeReadInstruction) -> None:
             key = item.path
@@ -508,7 +522,7 @@ class CoreFinderService:
         # current custom module manifest and XML refs.  Search priority is core
         # /home/odoo/src/odoo/addons first, then enterprise fallback, then user.
         for dep_module in sorted(related_modules):
-            result = self.find_core_file(dep_module, "manifest", dep_module, search_roots, client_name=client_name)
+            result = find_core(dep_module, "manifest", dep_module)
             if result.best_match:
                 add_instruction(ScopeReadInstruction(
                     level=ScopeLevel.L0,
@@ -536,7 +550,7 @@ class CoreFinderService:
             for model in sorted(set(inherit_models)):
                 core_module = model.split(".")[0]
                 keyword = model.split(".")[-1] if "." in model else model
-                result = self.find_core_file(core_module, "model", keyword, search_roots, client_name=client_name)
+                result = find_core(core_module, "model", keyword)
                 if result.best_match:
                     add_instruction(ScopeReadInstruction(
                         level=ScopeLevel.L1,
@@ -560,7 +574,7 @@ class CoreFinderService:
             for mixin_module, mixin_type, mixin_kw in _KNOWN_MIXINS:
                 if not any(model.startswith(mixin_module + ".") for model in inherit_models):
                     continue
-                result = self.find_core_file(mixin_module, mixin_type, mixin_kw, search_roots, client_name=client_name)
+                result = find_core(mixin_module, mixin_type, mixin_kw)
                 if result.best_match:
                     add_instruction(ScopeReadInstruction(
                         level=ScopeLevel.L2,
@@ -595,7 +609,7 @@ class CoreFinderService:
         if cross_modules:
             reached_level = ScopeLevel.L4
             for dep_module in sorted(cross_modules):
-                result = self.find_core_file(dep_module, "manifest", dep_module, search_roots, client_name=client_name)
+                result = find_core(dep_module, "manifest", dep_module)
                 if result.best_match:
                     add_instruction(ScopeReadInstruction(
                         level=ScopeLevel.L4,
