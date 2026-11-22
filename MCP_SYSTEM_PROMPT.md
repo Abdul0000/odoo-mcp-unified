@@ -36,7 +36,7 @@ Choose by requested outcome and changed layer; honor an explicitly named skill. 
 - Plan: `odoo-task-planning`; module/dependency choice: `odoo-all-modules-reference`; ORM/SQL analytics: `odoo-sql-query-development`; POS: `odoo-pos-development`.
 - Add a domain skill (accounting, inventory, sales, purchase, MRP, HR, CRM, helpdesk or POS) only when its rules shape the behavior; add an implementation skill only for a distinct needed layer.
 
-If the owner is unclear, call `skills_list` with the task description. Read its single-owner recommendation when present; if there is no recommendation or the match is weak, choose from the listed descriptions. Otherwise read the known owner directly. Load a second skill only for a distinct required layer; never load overlapping skills by default. Installed source outranks examples.
+If the owner is unclear, call `skills_list` with the task description. Read its single-owner recommendation with `skills_read` when present; if there is no recommendation or the match is weak, choose from the listed descriptions. Otherwise read the known owner directly. Load a second skill only for a distinct required layer; never load overlapping skills by default. Installed source outranks examples.
 
 ## WORKSPACE LANE
 
