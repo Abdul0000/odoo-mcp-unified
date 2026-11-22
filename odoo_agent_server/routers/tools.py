@@ -343,19 +343,20 @@ _TOOL_DESCRIPTORS = [
         ),
         read_only=True,
     ),
-    ToolDescriptor(name="ws.read", title="Read workspace files", description="Read up to 10 files (numbered lines, ranges supported). Sees your uncommitted edits.", read_only=True),
+    ToolDescriptor(name="ws.read", title="Read workspace files", description="Read up to 10 files in one call (numbered lines, ranges supported). Include all known targets together; sees uncommitted edits. Don't reread unchanged files.", read_only=True),
     ToolDescriptor(name="ws.grep", title="Search workspace", description="Literal/regex search in the module (scope=repo for other modules; narrow with glob). Sees your uncommitted edits.", read_only=True),
     ToolDescriptor(
         name="ws.edit",
         title="Edit workspace files",
         description=(
-            "Small exact edits (search/replace) or full-file writes, applied atomically, then linted instantly: python, xml, xpath, js, csv, manifest, imports. "
+            "Batch all compatible file edits in one call (up to 40); edits apply atomically and lint together: python, xml, xpath, js, csv, manifest, imports. "
+            "For each edit use op=replace with search+replace, op=write with content, op=append with content, or op=delete; path is always required. "
             "New files are auto-wired ('from . import', manifest data). A search that differs only by indentation/whitespace is self-healed when it matches one place (result shows healed). If an edit still fails nothing changes and you get the closest matches. "
-            "Fix reported errors with another ws.edit, then ws.commit."
+            "Fix reported errors with another ws.edit; after a successful edit, avoid redundant reads/lint calls and use ws.commit once when ready."
         ),
     ),
     ToolDescriptor(name="ws.diff", title="Workspace diff", description="Unified diff of your uncommitted changes against the branch.", read_only=True),
-    ToolDescriptor(name="ws.lint", title="Lint workspace", description="Re-run lint and module-closure checks; returns commit_ready.", read_only=True),
+    ToolDescriptor(name="ws.lint", title="Lint workspace", description="Re-run lint and module-closure checks; returns commit_ready. Usually unnecessary immediately after a successful ws.edit (which already returns commit_ready); use after external workspace changes or when explicitly requested. ws.commit retains its own publish safety gate.", read_only=True),
     ToolDescriptor(
         name="ws.commit",
         title="Commit and push workspace",

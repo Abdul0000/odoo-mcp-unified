@@ -927,7 +927,7 @@ def _remote_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 "OdooDebugReportReplay",
                 "OdooDebugRuntimeReplay",
                 "OdooDynamicFlowStep",
-                "TaskCheck", "FileEdit",
+                "TaskCheck", "FileEdit", "WsEditItem",
             }:
                 target = definitions.get(definition_name)
                 if isinstance(target, dict):

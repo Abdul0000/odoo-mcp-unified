@@ -40,7 +40,7 @@ If the owner is unclear, call `skills_list` with the task description. Read its 
 
 ## WORKSPACE LANE
 
-Use `ws_open` → read/search → `ws_edit` until `commit_ready`; `create=true` opens an addon. Edits are atomic; reopen rejected workspaces to resume. `ws_commit` pushes but does not deploy; set `deploy_after_push=true` only for an explicit deploy.
+Use `ws_open` → one batched `ws_read` for known targets (or `ws_grep` if targets are unknown) → one `ws_edit` for compatible changes → `ws_commit` when ready. `ws_read` accepts 10 paths; `ws_edit` accepts 40 edits and lints the whole batch atomically. Don't reread unchanged files or repeat lint after a successful edit; inspect `ws_diff` only when needed to resolve findings or review a risky change. If rejected, repair and resend the complete atomic batch. `create=true` opens an addon; reopen rejected workspaces to resume. `ws_commit` pushes but does not deploy; it retains its lint gate. Set `deploy_after_push=true` only for an explicit deploy.
 
 GitLab REST `insufficient_scope` retries through native Git; repair token only if Git lacks repo access. Keep `ws_id` here: edit with `ws_edit`, publish with `ws_commit`. `workflow_odoo_code_change` is separate; `needs_writes` requires complete `writes`. REA accepts `ws_id`/`module_name`, includes WIP; upstream comparison excludes private source; `rea_self_heal` needs checkout. Check dependencies, cycles and `coverage.complete`. Live metadata is not execution proof; incomplete reads prove no absence.
 

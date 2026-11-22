@@ -220,7 +220,7 @@ def _apply_edit(current: str | None, edit: dict[str, Any]) -> tuple[str | None, 
             base += "\n"
         return base + text, None
     if op != "replace":
-        return None, {"code": "bad_op", "msg": f"unknown op '{op}' (use replace, write, append, delete)"}
+        return None, {"code": "bad_op", "msg": f"unknown or missing op '{op}'. Each edit needs op='replace' with search+replace, op='write' or 'append' with content, or op='delete'."}
     if current is None:
         return None, {"code": "not_found", "msg": f"{path} does not exist; use op=write to create it"}
     search = edit.get("search")
