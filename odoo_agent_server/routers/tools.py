@@ -343,14 +343,14 @@ _TOOL_DESCRIPTORS = [
         ),
         read_only=True,
     ),
-    ToolDescriptor(name="ws.read", title="Read workspace files", description="Read up to 10 files (numbered lines, ranges supported). Sees your uncommitted edits.", read_only=True),
-    ToolDescriptor(name="ws.grep", title="Search workspace", description="Literal/regex search in the module (scope=repo for other modules; narrow with glob). Sees your uncommitted edits.", read_only=True),
+    ToolDescriptor(name="ws.read", title="Read workspace files", description="Read up to 10 files with numbered lines/ranges; sees WIP edits.", read_only=True),
+    ToolDescriptor(name="ws.grep", title="Search workspace", description="Search module text; use scope=repo across modules and glob to narrow. Sees WIP.", read_only=True),
     ToolDescriptor(
         name="ws.edit",
         title="Edit workspace files",
         description=(
-            "Batch up to 40 file edits (replace uses search+replace; write/append use content; delete uses path). Atomic lint covers Python/XML/XPath/JS/CSV/manifest/imports. "
-            "New files auto-wire imports/manifest. Unique whitespace-only mismatches self-heal. Rejected batches change nothing and return closest matches; repair, then commit."
+            "Batch up to 40 edits: replace=search+replace; write=full content; append=content; delete=path. Atomic lint covers Python/XML/XPath/JS/CSV/manifest/imports. "
+            "New files auto-wire; unique whitespace matches self-heal. Rejections change nothing and return closest matches; repair, then commit."
         ),
     ),
     ToolDescriptor(name="ws.diff", title="Workspace diff", description="Unified diff of your uncommitted changes against the branch.", read_only=True),
