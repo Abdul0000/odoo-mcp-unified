@@ -6,13 +6,22 @@ integration audit state. Odoo controllers/portal pages remain with
 
 ## WORKFLOW
 
-1. Inspect native/OCA provider patterns and the exact external API contract.
-2. Separate provider transport, mapping, model orchestration, webhook/controller,
-   queue/cron, and audit state.
-3. Define idempotency and retry semantics before writes.
-4. Process batches with per-record failure isolation.
-5. Verify one success, duplicate delivery, retryable failure, and permanent
-   failure path.
+1. Identify direction (import, export, bidirectional or event/webhook), source
+   of truth for each mapped field, delivery guarantees, and the exact external
+   contract. Resolve conflicts explicitly; never let sync overwrite Odoo-owned
+   values by accident.
+2. Inspect native/OCA provider patterns and trace the current entry point,
+   mapping and side effects before editing.
+3. Keep provider transport, payload mapping, Odoo business orchestration,
+   webhook/controller, queue/cron and audit state as distinct responsibilities
+   where the existing architecture permits.
+4. Define idempotency keys, retryable versus permanent failures, duplicate or
+   reordered delivery behavior, and partial-success semantics before writes.
+5. Process bounded batches with per-record failure isolation. Add a queue only
+   when latency, volume or retry requirements justify it; preserve a recovery
+   or reconciliation path for items that cannot complete.
+6. Verify success, duplicate delivery, retryable failure, permanent failure,
+   and partial batch outcome when those cases apply.
 
 Build only the relevant failure taxonomy: timeout, malformed payload, duplicate
 or reordered delivery, partial success, rate limit, and permanent rejection.
@@ -29,6 +38,8 @@ or reordered delivery, partial success, rate limit, and permanent rejection.
 - Use stable external/event/request IDs for idempotency.
 - Apply timeouts, bounded retries with backoff, pagination, and rate-limit
   handling; never block normal requests on long provider work.
+- Retry only transient failures. Do not retry validation/authentication errors
+  indefinitely; persist enough state to inspect and safely replay a failed item.
 - Store compact traceability: provider ID, request/correlation ID, status,
   attempts, timestamps, affected records, and safe response summary.
 - Preserve native procurement, stock, invoicing, payment, and fiscal flows.

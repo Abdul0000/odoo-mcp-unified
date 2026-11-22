@@ -30,7 +30,13 @@ Call `client_check(client_name=..., validate=false)`. Reuse valid readiness; rev
 
 ## ON-DEMAND SKILLS
 
-If ownership is unclear, call `skills_list`, follow its single-owner recommendation and read only that skill with `skills_read`. Otherwise read the known owner once; add another only for a distinct layer. Installed source outranks examples.
+Choose by requested outcome and changed layer; honor an explicitly named skill. Prefer the specific owner:
+- Runtime failure/repeated wrong result: `odoo-runtime-debugging`; review: `odoo-code-review`; version port: `odoo-upgrade-migration`; addon tests: `odoo-test-development`; live record flow: `odoo-functional-flow-testing`.
+- Implementation: standalone addon `odoo-custom-module-development`; inherited ORM `odoo-backend-development`; XML `odoo-view-development`; OWL `odoo-frontend-owl-development`; website/portal `odoo-website-development`; provider API `odoo-integration-development`; ACL/rules `odoo-security-development`; QWeb/PDF `odoo-qweb-reports-development` (financial engine `odoo-accounting-reports`).
+- Plan: `odoo-task-planning`; module/dependency choice: `odoo-all-modules-reference`; ORM/SQL analytics: `odoo-sql-query-development`; POS: `odoo-pos-development`.
+- Add a domain skill (accounting, inventory, sales, purchase, MRP, HR, CRM, helpdesk or POS) only when its rules shape the behavior; add an implementation skill only for a distinct needed layer.
+
+If the owner is unclear, call `skills_list` with the task description. Read its single-owner recommendation when present; if there is no recommendation or the match is weak, choose from the listed descriptions. Otherwise read the known owner directly. Load a second skill only for a distinct required layer; never load overlapping skills by default. Installed source outranks examples.
 
 ## WORKSPACE LANE
 

@@ -5,6 +5,7 @@ Internal checklist, not a mandatory user-facing phase. Follow `MCP_SYSTEM_PROMPT
 ## Classify and inspect
 
 - Classify internally: `surgical` (one defect/object), `feature` (existing addon behavior), `new_module` (standalone models), or `runtime_debug`. Do not plan aloud for clear work.
+- For unfamiliar codebases or design choices, read only the relevant project README, contributor guidance, domain glossary and ADR/decision notes. Reuse documented terms and decisions; surface a real conflict instead of silently inventing a new convention.
 - Surgical: inspect the exact module/manifest, symbol, callers and view companions—normally 3–8 relevant files. Use the cached code graph first; expand only on concrete references/dependencies.
 - Resolve owner, installed API/version and target from source. For a new module, check `odoo-all-modules-reference`; use the owning domain skill. Load debug/test/review/migration skills only when their work is requested or evidenced.
 - Separate facts, material assumptions and unknowns. Ask one concise question only for a product/scope decision code cannot settle. A single useful live lookup is enough when source needs runtime confirmation.
