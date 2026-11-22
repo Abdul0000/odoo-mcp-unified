@@ -349,9 +349,8 @@ _TOOL_DESCRIPTORS = [
         name="ws.edit",
         title="Edit workspace files",
         description=(
-            "Batch up to 40 exact edits (search/replace or full-file writes), applied atomically and linted: python, xml, xpath, js, csv, manifest, imports. "
-            "New files are auto-wired ('from . import', manifest data). A search that differs only by indentation/whitespace is self-healed when it matches one place (result shows healed). If an edit still fails nothing changes and you get the closest matches. "
-            "Fix reported errors with another ws.edit, then ws.commit."
+            "Batch up to 40 file edits (replace uses search+replace; write/append use content; delete uses path). Atomic lint covers Python/XML/XPath/JS/CSV/manifest/imports. "
+            "New files auto-wire imports/manifest. Unique whitespace-only mismatches self-heal. Rejected batches change nothing and return closest matches; repair, then commit."
         ),
     ),
     ToolDescriptor(name="ws.diff", title="Workspace diff", description="Unified diff of your uncommitted changes against the branch.", read_only=True),
