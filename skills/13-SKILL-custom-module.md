@@ -8,6 +8,11 @@ models/tables** — not `_inherit` on native models (`sale.order`,
 security, own views, own menu. Only touch native models via explicit
 `Many2one` reference, never by inheriting them.
 
+Examples below are illustrative, not version-neutral boilerplate. Confirm every
+API, XML syntax, manifest convention and dependency against the selected
+client's exact installed Odoo source; do not copy a version-specific example
+mechanically. Keep the scaffold minimal for the requested workflow.
+
 For every view/action/menu, follow the `odoo-view-development` contract:
 version-correct syntax, explicit owning-addon dependencies, resolved XML IDs,
 stable XPath, security visibility, manifest load order, and final view proof.
@@ -15,6 +20,14 @@ stable XPath, security visibility, manifest load order, and final view proof.
 ---
 
 ## 1. MODULE SKELETON (minimum required files)
+Treat this as a menu-driven example, not a mandatory file list. Before
+scaffolding, confirm whether this is truly a standalone addon, its Community or
+Enterprise target, the installed Odoo version, the minimal dependencies, and
+the requested user entry points. Include only required models, security, views,
+actions, menus, data and tests; add a menu, sequence, chatter or demo data only
+when the requested workflow needs it. Keep required security and imports
+complete even for a minimal addon.
+
 ```text
 custom_module/
 ├── __init__.py                # from . import models

@@ -7,11 +7,14 @@ scaffolding, frontend/OWL, or external-provider transport.
 ## WORKFLOW
 
 1. Detect the selected client and exact installed Odoo version.
-2. Resolve the target model, method signature, owning addon, direct callers,
-   inherited implementations, and manifest dependency before writing.
+2. Resolve the target model, method signature, owning addon, manifest
+   dependency, direct callers and inherited implementations before writing.
+   If the entry point is unclear, trace only the relevant path: route/button/
+   cron/queue/action -> model method -> overrides and `super()` -> ORM or
+   provider side effects -> returned or user-visible result.
 3. Prefer the narrowest `_inherit` extension and preserve `super()` behavior.
 4. Implement recordset-safe, batch-safe, idempotent logic.
-5. Verify the changed method and its direct business workflow.
+5. Verify the changed method and the business workflow that exercises it.
 
 ## BACKEND CONTRACT
 
@@ -40,6 +43,10 @@ scaffolding, frontend/OWL, or external-provider transport.
   instead of directly forcing protected totals or states.
 - Identify the business invariant before changing logic; reject anti-patterns
   that bypass source fields, `super()`, batch semantics, or native state transitions.
+- When unfamiliar with the addon layout, make a compact map of the owning addon,
+  its manifest, model/view/controller entry points and relevant tests. Expand
+  only when a concrete import, caller, dependency or runtime result points to
+  another module; do not survey the whole repository by default.
 
 ## CHATTER HTML
 

@@ -183,8 +183,9 @@ def agent_instructions() -> dict:
                 "list_tool": "skills_list",
                 "read_tool": "skills_read",
                 "selection": (
-                    "For an unclear domain, call skills_list with task_description and load only its "
-                    "single primary recommendation. Do not load overlapping skills."
+                    "For an unclear domain, call skills_list with task_description and load its "
+                    "single primary recommendation. Read one additional skill only when the request "
+                    "clearly includes a distinct layer the primary skill does not cover; do not load overlaps."
                 ),
             },
             "multi_client": {

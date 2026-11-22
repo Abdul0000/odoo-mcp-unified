@@ -383,7 +383,8 @@ _TOOL_DESCRIPTORS = [
         name="skills.read",
         title="Load an Odoo skill",
         description=(
-            "Load one exact Odoo skill on demand. Use the narrowest owner; do not load overlapping skills. "
+            "Load one exact Odoo skill on demand. Use the narrowest owner; load a second only for a distinct "
+            "layer the primary skill does not cover, and do not load overlapping skills. "
             "Examples: 'backend' for inherited ORM logic, 'view' for XML/XPath, 'debug' for actual runtime "
             "failures, 'reporting' for ORM/SQL analytics, 'qweb-report' for general PDF/HTML templates, "
             "and 'accounting-report' for financial reports."

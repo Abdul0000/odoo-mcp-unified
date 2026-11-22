@@ -181,7 +181,9 @@ _ROUTING_TERMS = {
     ),
     "odoo-security-development": (
         "access control", "access rights", "ir.model.access", "record rule",
-        "ir.rule", "cross company", "portal token", "permission denied",
+        "ir.rule", "cross company", "portal token", "portal ownership",
+        "public route", "public endpoint", "csrf", "sudo boundary",
+        "access leak", "security leak", "permission denied",
     ),
     "odoo-backend-development": (
         "computed field", "onchange", "python constraint", "model constraint",
@@ -198,8 +200,8 @@ _ROUTING_TERMS = {
     "odoo-crm-pipeline-development": ("crm", "lead", "opportunity", "pipeline", "sales team"),
     "odoo-helpdesk-development": ("helpdesk", "ticket", "sla", "support team", "escalation"),
     "odoo-accounting-development": ("invoice", "journal", "payment", "tax", "reconciliation", "fiscal position", "account.move"),
-    "odoo-all-modules-reference": ("which module", "module dependency", "depends", "module selection", "implementation roadmap"),
-    "odoo-custom-module-development": ("custom module", "new module", "standalone module", "own model", "own table", "scratch module", "_name =", "not inherit"),
+    "odoo-all-modules-reference": ("which module", "module dependency", "module selection", "choose module", "available addons", "implementation roadmap"),
+    "odoo-custom-module-development": ("custom module", "new module", "new addon", "standalone addon", "create addon", "scaffold addon", "module scaffold", "standalone module", "own model", "own table", "scratch module", "_name =", "not inherit"),
     "odoo-task-planning": ("plan", "planning", "scope this", "before implementing", "file checklist", "what files are needed", "break down the task"),
 }
 
