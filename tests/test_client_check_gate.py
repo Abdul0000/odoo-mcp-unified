@@ -380,6 +380,33 @@ def test_remote_validation_timeout_is_reported_as_unverified_transport(branch_ch
     assert f"http.connectTimeout={ClientGateService.GIT_REMOTE_CONNECT_TIMEOUT_SECONDS}" in calls[0][0]
 
 
+def test_unreachable_git_host_fails_before_git_process(branch_change_checkout, monkeypatch):
+    import socket
+    from dataclasses import replace
+    from odoo_agent_server.services.repo_service import RepoService
+
+    client, _, _, _ = branch_change_checkout
+    client = replace(client, branch="old", repo="https://gitlab.internal/acme/a.git")
+    attempts = []
+
+    def connect(address, timeout):
+        attempts.append((address, timeout))
+        raise TimeoutError("network unavailable")
+
+    def git_process(*args, **kwargs):
+        raise AssertionError("Git subprocess must not start when TCP preflight fails")
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    monkeypatch.setattr(RepoService, "_run", git_process)
+    result = ClientGateService()._check_checkout(client)
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "git_remote_timeout"
+    assert "TCP connection timed out after 5s" in result["log"][0]
+    assert "authentication and branch availability were not verified" in result["log"][0]
+    assert attempts == [(('gitlab.internal', 443), 5)]
+
+
 def test_validation_safely_syncs_changed_branch_in_single_branch_checkout(branch_change_checkout):
     client, checkout, old_sha, git = branch_change_checkout
     result = ClientGateService()._check_checkout(client)

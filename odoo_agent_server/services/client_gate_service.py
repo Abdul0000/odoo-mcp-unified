@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from urllib.request import getproxies
 
 from fastapi import HTTPException, status
 
@@ -665,6 +667,10 @@ class ClientGateService:
                             "log": [f"Clean checkout synchronized from {branch.stdout.strip()} to configured branch {synced['branch']}; old branch and local commits preserved."]}
                 local_check = GitService().validate_target(str(existing), client.branch, "origin")
                 if local_check.exit_code == 0:
+                    transport_error = self._git_remote_transport_error(client.repo)
+                    if transport_error:
+                        error_type, message = transport_error
+                        return {"status": "failed", "network_verified": True, "error_type": error_type, "log": [message]}
                     repo = RepoService()
                     remote_check = repo._run(
                         [
@@ -754,6 +760,35 @@ class ClientGateService:
         import shlex
 
         return shlex.quote(value)
+
+    @classmethod
+    def _git_remote_transport_error(cls, repo_url: str) -> tuple[str, str] | None:
+        parsed = urlsplit(repo_url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname
+        if scheme not in {"https", "http", "ssh"} or not host:
+            return None
+        # Git can use an explicitly configured HTTP proxy. In that case the
+        # proxy owns the network route, so let ls-remote verify the connection.
+        if scheme in getproxies():
+            return None
+        port = parsed.port or {"https": 443, "http": 80, "ssh": 22}[scheme]
+        try:
+            with socket.create_connection((host, port), timeout=cls.GIT_REMOTE_CONNECT_TIMEOUT_SECONDS):
+                return None
+        except socket.gaierror:
+            reason = "DNS resolution failed"
+            error_type = "git_remote_dns_error"
+        except TimeoutError:
+            reason = f"TCP connection timed out after {cls.GIT_REMOTE_CONNECT_TIMEOUT_SECONDS}s"
+            error_type = "git_remote_timeout"
+        except OSError:
+            reason = "TCP connection failed"
+            error_type = "git_remote_transport_error"
+        return error_type, (
+            f"{reason} to Git host {host}:{port}; authentication and branch availability were not verified. "
+            "Check Git host reachability, VPN, or firewall."
+        )
 
     @staticmethod
     def _redact(text: str) -> str:
