@@ -2832,7 +2832,7 @@ def verify_against_core(payload: SyntaxVerifyRequest) -> SyntaxVerifyResult:
     Python model files (.py):
       - _inherit model name exists in core (warns if not found)
       - depends=[] field names exist in the inherited core model (CRITICAL if not)
-      - comodel_name module exists in /home/odoo/src/* (CRITICAL if not)
+      - comodel resolves in addon source or through a manifest dependency in source or the selected model registry
       - related= first field exists in core model (CRITICAL if not)
       - compute= method is defined in the same file (CRITICAL if missing)
 

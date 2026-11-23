@@ -11,6 +11,7 @@ import ast
 import copy
 import glob
 import re
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -18,8 +19,10 @@ from lxml import etree
 
 from . import core_sync_service
 from .client_resolver_service import ClientResolverService
+from .odoo_service import OdooService
 from ..config import settings
 from .repo_index_service import RepoIndexService
+from .source_snapshot_service import source_files
 from ..schemas import (
     SyntaxVerifyRequest,
     SyntaxVerifyResult,
@@ -361,6 +364,103 @@ def _manifest_context(file_path: str) -> tuple[str | None, set[str], int | None]
     return root.name, depends, int(major_match.group(1)) if major_match else None
 
 
+def _declared_addon_models(root: Path) -> set[str]:
+    """Collect literal model declarations without importing customer code."""
+    ignored = {".git", "__pycache__", "tests", "test", "migrations", "upgrades", "static", "node_modules"}
+    models = set()
+    for path in source_files(root, ignored):
+        if path.suffix != ".py":
+            continue
+        content = _read_file(str(path))
+        if "_name" in content:
+            for unit in _python_model_class_units(content):
+                if unit["model_name"] and unit["model_name"] not in unit["inherit_models"]:
+                    models.add(unit["model_name"])
+    return models
+
+
+class _ComodelSources:
+    def __init__(self, client_name: str | None, project_path: str | None, candidates: tuple[str, ...] = ()):
+        self.client_name = client_name
+        self.project_path = project_path
+        self.candidates = candidates
+        self.models = cache(_declared_addon_models)
+        self.manifest = cache(_manifest_context)
+        self.dependencies = cache(self._dependency_roots)
+        self.local_addons = cache(self._local_addons)
+        self.registry = cache(self._registry_modules)
+
+    def _registry_modules(self) -> dict[str, set[str]]:
+        if not self.client_name or not self.candidates:
+            return {}
+        try:
+            client = ClientResolverService().resolve_client(client_name=self.client_name, require_complete=False)
+            if client is None:
+                return {}
+            result = OdooService(client).search_read(
+                "ir.model", [["model", "in", list(self.candidates)]], ["model", "modules"],
+                limit=len(self.candidates), timeout_seconds=8,
+            )
+        except Exception:
+            return {}
+        if result.status != "ok" or not isinstance(result.result, list):
+            return {}
+        return {
+            row["model"]: {name.strip() for name in row["modules"].split(",")}
+            for row in result.result
+            if isinstance(row, dict) and row.get("model") in self.candidates and isinstance(row.get("modules"), str)
+        }
+
+    def _local_addons(self) -> dict[str, list[Path]]:
+        if not self.project_path:
+            return {}
+        try:
+            index = RepoIndexService().index(self.project_path)
+        except Exception:
+            return {}
+        addons: dict[str, list[Path]] = {}
+        for module in index.modules:
+            addons.setdefault(module.name, []).append(Path(index.project_path) / module.path)
+        return addons
+
+    def _checkout_roots(self, addon: Path, name: str) -> list[Path]:
+        local = self.local_addons().get(name, [])
+        sibling = addon.parent / name
+        if not local and (sibling / "__manifest__.py").is_file():
+            local = [sibling]
+        return local
+
+    def _dependency_roots(self, addon: Path, name: str) -> tuple[Path, ...]:
+        local = self._checkout_roots(addon, name)
+        if local:
+            return tuple(local) if len(local) == 1 else ()
+        return tuple(_iter_module_dirs(name, client_name=self.client_name))
+
+    def resolves(self, addon: Path, comodel: str) -> bool:
+        if comodel in self.models(addon):
+            return True
+        prefix = comodel.split(".", 1)[0]
+        visited = {addon.name}
+        pending = [addon]
+        for parent in pending:
+            _, depends, _ = self.manifest(str(parent / "__manifest__.py"))
+            for name in sorted(depends, key=lambda name: (name != prefix, name != "base", name)):
+                if name in visited or not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                    continue
+                visited.add(name)
+                for root in self.dependencies(addon, name):
+                    if comodel in self.models(root):
+                        return True
+                    pending.append(root)
+        # Confirm an exact model in the selected database when the available
+        # source doesn't resolve it. Checkout source takes precedence over
+        # the deployed registry for dependencies being edited in this repo.
+        return any(
+            not self._checkout_roots(addon, name)
+            for name in (visited - {addon.name}) & self.registry().get(comodel, set())
+        )
+
+
 def _safe_xml_root(content: str) -> etree._Element | None:
     try:
         parser = etree.XMLParser(resolve_entities=False, no_network=True, recover=False)
@@ -584,13 +684,19 @@ class SyntaxVerifierService:
 
         template_names = _extract_all_template_names(xml_contents)
         findings.extend(self._verify_duplicate_template_names(xml_contents))
+        candidates = tuple(dict.fromkeys(
+            match.group(1) or match.group(2)
+            for path, content in file_contents.items() if path.endswith(".py")
+            for match in _COMODEL_RE.finditer(content)
+        ))[:200]
+        comodel_sources = _ComodelSources(request.client_name, request.project_path, candidates)
 
         for file_path, content in file_contents.items():
             path = Path(file_path)
             if path.name == "__manifest__.py":
                 findings.extend(self._verify_manifest(file_path, content, request.client_name))
             elif path.suffix == ".py":
-                findings.extend(self._verify_python_model(file_path, content, request.client_name))
+                findings.extend(self._verify_python_model(file_path, content, request.client_name, comodel_sources))
             elif path.suffix == ".xml":
                 findings.extend(self._verify_xml_view(file_path, content, request.client_name))
                 findings.extend(self._verify_xml_contract(
@@ -731,10 +837,16 @@ class SyntaxVerifierService:
     # Python model verification
     # ------------------------------------------------------------------
 
-    def _verify_python_model(self, file_path: str, content: str, client_name: str | None = None) -> list[VerifyFinding]:
+    def _verify_python_model(
+        self, file_path: str, content: str, client_name: str | None = None,
+        comodel_sources: _ComodelSources | None = None,
+    ) -> list[VerifyFinding]:
         findings: list[VerifyFinding] = []
         model_units = _python_model_class_units(content)
         inherit_detected = False
+        addon = _addon_root(file_path)
+        sources = comodel_sources or _ComodelSources(client_name, None)
+        seen_comodels: set[str] = set()
 
         for unit in model_units:
             class_source = str(unit["source"])
@@ -791,25 +903,26 @@ class SyntaxVerifierService:
 
             for cm_m in _COMODEL_RE.finditer(class_source):
                 comodel = cm_m.group(1) or cm_m.group(2) or ""
-                if "." in comodel:
-                    comodel_module = comodel.split(".")[0]
-                    if not _module_exists_in_src(comodel_module, client_name=client_name):
-                        source_available = _core_source_available()
-                        findings.append(VerifyFinding(
-                            file=file_path,
-                            severity=VerifySeverity.CRITICAL if source_available else VerifySeverity.WARNING,
-                            check="comodel_module_exists",
-                            message=(
-                                f"comodel_name='{comodel}' — module '{comodel_module}' not found in src roots."
-                                if source_available else
-                                f"comodel_name='{comodel}' — could not verify: Odoo core/enterprise source is not reachable in this environment (no local /home/odoo/src/* tree and no Odoo.sh SSH sync configured)."
-                            ),
-                            fix_hint=(
-                                f"Run workflow.find_core_file('{comodel_module}', 'model', '{comodel.split('.')[-1]}') to verify."
-                                if source_available else
-                                "Set ODOOSH_SSH_HOST/ODOOSH_SSH_KEY_PATH to enable core sync, or verify this comodel manually before pushing."
-                            ),
-                        ))
+                if "." not in comodel or comodel in seen_comodels:
+                    continue
+                seen_comodels.add(comodel)
+                if addon and sources.resolves(addon, comodel):
+                    continue
+                if not addon:
+                    prefix = comodel.split(".", 1)[0]
+                    if re.fullmatch(r"[A-Za-z0-9_]+", prefix) and _module_exists_in_src(prefix, client_name=client_name):
+                        continue
+                source_available = _core_source_available(client_name)
+                findings.append(VerifyFinding(
+                    file=file_path,
+                    severity=VerifySeverity.CRITICAL if source_available else VerifySeverity.WARNING,
+                    check="comodel_module_exists",
+                    message=(
+                        f"No declaration for comodel {comodel!r} was found in the available addon and dependency source."
+                        + ("" if source_available else " Odoo source is unavailable for this client.")
+                    ),
+                    fix_hint="Check the exact model name, its Python imports, and the selected Odoo model registry. If another addon defines it, declare that addon in the manifest depends.",
+                ))
 
             for rel_m in _RELATED_RE.finditer(class_source):
                 chain = rel_m.group(1)

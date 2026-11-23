@@ -2854,7 +2854,7 @@ class SyntaxVerifyRequest(BaseModel):
       Python (.py):
         - _inherit model exists in core
         - depends=[] field names exist in core model
-        - comodel_name module exists in src roots
+        - comodel resolves in the addon, its dependencies, or the selected model registry
         - related= first field exists in core model
         - compute= method defined in the same file
 
