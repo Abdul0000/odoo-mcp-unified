@@ -357,6 +357,29 @@ def branch_change_checkout(tmp_path, monkeypatch):
     return client, checkout, old_sha, lambda *args: git(*args,cwd=checkout)
 
 
+def test_remote_validation_timeout_is_reported_as_unverified_transport(branch_change_checkout, monkeypatch):
+    from odoo_agent_server.services.repo_service import RepoService
+
+    client, _, _, _ = branch_change_checkout
+    from dataclasses import replace
+
+    client = replace(client, branch="old")
+    calls = []
+
+    def timed_out(self, command, cwd, timeout_seconds, env=None):
+        calls.append((command, timeout_seconds))
+        return SimpleNamespace(exit_code=124, stdout="", stderr="", timed_out=True)
+
+    monkeypatch.setattr(RepoService, "_run", timed_out)
+    result = ClientGateService()._check_checkout(client)
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "git_remote_timeout"
+    assert "Authentication and branch availability were not verified" in result["log"][0]
+    assert calls[0][1] == ClientGateService.GIT_REMOTE_CHECK_TIMEOUT_SECONDS
+    assert f"http.connectTimeout={ClientGateService.GIT_REMOTE_CONNECT_TIMEOUT_SECONDS}" in calls[0][0]
+
+
 def test_validation_safely_syncs_changed_branch_in_single_branch_checkout(branch_change_checkout):
     client, checkout, old_sha, git = branch_change_checkout
     result = ClientGateService()._check_checkout(client)

@@ -26,6 +26,8 @@ class ClientGateService:
     """Client selection and validation gate for multi-client MCP deployments."""
 
     VALIDATION_TTL_SECONDS = 1800
+    GIT_REMOTE_CONNECT_TIMEOUT_SECONDS = 5
+    GIT_REMOTE_CHECK_TIMEOUT_SECONDS = 15
     SESSION_VALIDATED_KEY = "client_validated"
     SESSION_ACTIVE_KEY = "active_client_name"
 
@@ -664,10 +666,34 @@ class ClientGateService:
                 local_check = GitService().validate_target(str(existing), client.branch, "origin")
                 if local_check.exit_code == 0:
                     repo = RepoService()
-                    remote_check = repo._run(["git", "ls-remote", "--heads", client.authenticated_repo, f"refs/heads/{client.branch}"], existing, 15, env=repo._git_env())
+                    remote_check = repo._run(
+                        [
+                            "git",
+                            "-c",
+                            f"http.connectTimeout={self.GIT_REMOTE_CONNECT_TIMEOUT_SECONDS}",
+                            "ls-remote",
+                            "--heads",
+                            client.authenticated_repo,
+                            f"refs/heads/{client.branch}",
+                        ],
+                        existing,
+                        self.GIT_REMOTE_CHECK_TIMEOUT_SECONDS,
+                        env=repo._git_env(),
+                    )
                     if remote_check.exit_code != 0 or not remote_check.stdout.strip():
-                        return {"status": "failed", "network_verified": True, "error_type": "git_remote_error",
-                                "log": [self._redact(remote_check.stderr or "Configured branch was not advertised by the remote.")]}
+                        detail = self._redact(remote_check.stderr or "Configured branch was not advertised by the remote.")
+                        if remote_check.timed_out:
+                            host = urlsplit(client.repo).hostname or "configured Git host"
+                            return {
+                                "status": "failed",
+                                "network_verified": True,
+                                "error_type": "git_remote_timeout",
+                                "log": [
+                                    f"Git remote check for {host} exceeded {self.GIT_REMOTE_CHECK_TIMEOUT_SECONDS}s. "
+                                    "Authentication and branch availability were not verified; check Git host reachability, VPN, or firewall."
+                                ],
+                            }
+                        return {"status": "failed", "network_verified": True, "error_type": "git_remote_error", "log": [detail]}
                     return {"status": "ok", "network_verified": True, "log": [f"Existing checkout target and native Git remote/branch verified without fetch/pull: {existing} on branch {client.branch}."]}
                 return {"status": "failed", "error_type": "checkout_target_error", "log": [self._redact(local_check.stderr or local_check.stdout or "Existing checkout target validation failed.")]}
 
