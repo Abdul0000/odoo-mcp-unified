@@ -26,6 +26,10 @@ class WorkspaceId(ExecutionRequest):
     workspace_id: str = Field(pattern=r"^[a-f0-9]{32}$")
 
 
+class WorkspaceStatus(WorkspaceId):
+    detail: Literal["full", "progress"] = Field(default="full", description="full verifies source; progress reads metadata and grants no completion proof.")
+
+
 class TaskCheck(ExecutionRequest):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
     argv: list[str] = Field(min_length=1, max_length=100)

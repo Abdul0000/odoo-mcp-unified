@@ -56,6 +56,8 @@ class Settings(BaseSettings):
 
     # OAuth 2.1 / MCP App authentication for generic and compatibility MCP clients.
     public_base_url: str | None = Field(default=None, alias="ODOO_AGENT_PUBLIC_BASE_URL")
+    mcp_allowed_hosts: list[str] = Field(default_factory=list, alias="ODOO_AGENT_MCP_ALLOWED_HOSTS")
+    mcp_allowed_origins: list[str] = Field(default_factory=list, alias="ODOO_AGENT_MCP_ALLOWED_ORIGINS")
     oauth_issuer: str | None = Field(default=None, alias="ODOO_AGENT_OAUTH_ISSUER")
     oauth_default_scope: str = Field(default="odoo.agent", alias="ODOO_AGENT_OAUTH_DEFAULT_SCOPE")
     oauth_auto_approve: bool = Field(default=False, alias="ODOO_AGENT_OAUTH_AUTO_APPROVE")
@@ -138,6 +140,7 @@ class Settings(BaseSettings):
     # Two workers are the safe minimum: safe-deploy can wait for a nested
     # module-deploy job submitted to the same bounded executor.
     background_max_workers: int = Field(default=2, ge=1, le=4, alias="ODOO_AGENT_BACKGROUND_MAX_WORKERS")
+    task_poll_concurrency: int = Field(default=4, ge=1, le=8, alias="ODOO_AGENT_TASK_POLL_CONCURRENCY")
     coding_workflow_max_workers: int = Field(default=2, ge=1, le=8, alias="ODOO_AGENT_CODING_WORKFLOW_MAX_WORKERS")
     coding_workflow_max_queue: int = Field(default=2, ge=0, le=16, alias="ODOO_AGENT_CODING_WORKFLOW_MAX_QUEUE")
     mcp_operation_guard_enabled: bool = Field(default=False, alias="ODOO_AGENT_OPERATION_GUARD_ENABLED")

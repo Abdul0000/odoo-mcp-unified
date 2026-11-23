@@ -10,6 +10,23 @@ The CI workflow runs these against Python 3.12 and Node 20, matching the image.
 job lookup/update/listing and concurrent health responsiveness during simulated
 log I/O. It uses temporary state and makes no live Odoo or SSH requests.
 
+For the task-coordinator lane, connect to `/mcp?profile=task` (or send
+`X-MCP-Profile: task`) for a smaller manifest with task tools, client validation,
+job polling, approvals and artifact recovery. Nested source/edit/test tools run
+through `task_run`; the default manifest and authentication remain unchanged.
+Resume polls up to four independent receipts concurrently, applies observations
+in order and skips settled successful receipts. `ODOO_AGENT_TASK_POLL_CONCURRENCY`
+can tune this bounded read concurrency independently of command worker capacity.
+Active-work polling uses `execution_workspace_status(detail="progress")`, which
+does no Git verification and cannot authorize completion. Idle reconciliation and
+publishing still verify current source and runtime evidence.
+
+`python -m tests.benchmarks.orchestration --tasks 4 --workers 2` exercises real,
+concurrent clone/edit/syntax/unit-test/local-commit tasks in disposable repositories.
+Add `--docker` on an execution host to use the installed isolated command image;
+each test container is limited to 128 MB. The report includes task/command latency,
+queue wait and memory measurements. It never pushes, deploys or queries Odoo.
+
 Oracle task execution: see [Execution worker setup](docs/EXECUTION_WORKER.md).
 The optional execution lane adds isolated task clones, file tools, Docker commands
 with polling/stdin/cancellation, and verified Git publishing. ChatGPT supplies
@@ -21,7 +38,7 @@ This package implements the backend-only connector from the final plan:
 ```text
 Any MCP-capable agent = AI brain
         ↓
-OpenAPI Actions / lightweight MCP JSON-RPC bridge
+OpenAPI Actions / official MCP SDK Streamable HTTP
         ↓
 FastAPI Odoo Agent Server = tools only
         ↓
@@ -187,7 +204,28 @@ https://your-domain.com/openapi.json
 
 Use Bearer token auth with `ODOO_AGENT_API_TOKEN`.
 
-### Option B: Lightweight MCP JSON-RPC bridge
+### Option B: Official MCP SDK (recommended)
+
+Connect an MCP client or MCP Inspector to `https://your-domain.com/mcp`.
+The official Python SDK handles standard Streamable HTTP requests, protocol
+negotiation, request validation and notifications. Tools reuse the existing Odoo
+dispatcher, result envelopes and verification gates. Bearer token, `X-API-Key`
+and existing OAuth access tokens continue to work.
+
+Set `ODOO_AGENT_PUBLIC_BASE_URL` to the deployment URL; SDK transport validation
+automatically trusts that hostname and localhost. Additional hostnames and browser
+origins can be configured as JSON arrays with `ODOO_AGENT_MCP_ALLOWED_HOSTS` and
+`ODOO_AGENT_MCP_ALLOWED_ORIGINS`. These settings do not introduce new auth scopes.
+
+The SDK also exposes the two instruction prompts as read-only resources:
+`odoo-mcp://instructions/client-check` and `odoo-mcp://instructions/workflow`.
+See [SDK integration and compatibility](docs/MCP_SDK.md) for the implementation
+mapping, transport choices and validation.
+
+### Headerless JSON-RPC compatibility
+
+Existing integrations that send JSON without standard MCP transport headers
+continue to use the compatibility bridge at the same URL:
 
 Use:
 
@@ -246,7 +284,9 @@ Example:
 }
 ```
 
-This package includes both OpenAPI/Actions and a lightweight MCP JSON-RPC bridge. The standard endpoint is `/mcp`; compatibility profiles also exist for clients with stricter transport or auth behavior.
+This package includes OpenAPI/Actions, official SDK Streamable HTTP, and the
+headerless JSON-RPC compatibility bridge. The standard endpoint is `/mcp`;
+provider aliases support the same SDK transport and existing compatibility calls.
 
 ## Example full verify
 

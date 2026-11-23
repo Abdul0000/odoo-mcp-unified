@@ -36,6 +36,7 @@ from .routers.workflow import router as workflow_router
 from .services.prompt_service import load_mcp_system_prompt, load_client_check_system_prompt
 from .services.runtime_identity_service import SERVICE_VERSION, runtime_identity
 from .services.workflow_progress_service import WorkflowProgressService
+from .mcp_sdk import MCPTransportMiddleware, create_sdk_app
 
 _HOSTED_MARKERS = ("RENDER", "KOYEB_APP_NAME", "FLY_APP_NAME", "DYNO", "K_SERVICE", "ODOO_AGENT_REQUIRE_STRONG_TOKEN")
 if any(os.getenv(name, "").lower() not in {"", "0", "false", "no"} for name in _HOSTED_MARKERS) and settings.api_token == "change-me":
@@ -44,9 +45,13 @@ if any(os.getenv(name, "").lower() not in {"", "0", "false", "no"} for name in _
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     validate_required_tool_registry()
+    sdk_app = create_sdk_app()
     try:
-        yield
+        async with sdk_app.router.lifespan_context(sdk_app):
+            _app.state.mcp_sdk_app = sdk_app
+            yield
     finally:
+        _app.state.mcp_sdk_app = None
         from .services.http_client_pool import odoo_http_clients
         odoo_http_clients.close()
 
@@ -240,6 +245,9 @@ app.include_router(browser_extension_router)
 app.include_router(approvals_router)
 app.include_router(jobs_router)
 app.include_router(tools_router)
+
+
+app.add_middleware(MCPTransportMiddleware)
 
 
 @app.middleware("http")

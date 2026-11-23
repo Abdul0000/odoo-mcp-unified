@@ -1,7 +1,7 @@
 """Execution tool registry shared by MCP and the autonomous worker."""
 import time
 
-from .execution_schemas import AgentId, AgentStart, ExecutionStatus, ProcessId, ProcessInput, ProcessPoll, ProcessStart, TaskPlan, WorkspaceFiles, WorkspaceId, WorkspaceOpen, WorkspacePublish, WorkspaceSync
+from .execution_schemas import AgentId, AgentStart, ExecutionStatus, ProcessId, ProcessInput, ProcessPoll, ProcessStart, TaskPlan, WorkspaceFiles, WorkspaceId, WorkspaceStatus, WorkspaceOpen, WorkspacePublish, WorkspaceSync
 from .services.execution_service import ExecutionService
 
 
@@ -10,7 +10,7 @@ EXECUTION_TOOLS = {
     "execution.workspace_open": (WorkspaceOpen, "Start isolated task initialization; poll workspace_status until ready. Default same branch with fresh fetch; scope_paths narrows checkout to module directories.", False),
     "execution.workspace_sync": (WorkspaceSync, "Queue latest remote three-way merge while preserving local code. Poll execution_status. Conflicts return both-side diffs; resolve with expected_remote_sha and resolutions. Successful sync invalidates tests; rerun checks before push.", False),
     "execution.task_plan": (TaskPlan, "Declare typed verification layers/commands and optional skills. Plans may be strengthened; current-tree checks prove only their declared scope. ORM requires a configured runtime.", False),
-    "execution.workspace_status": (WorkspaceId, "Read task branch, changes and requested commit/push completion. Deployment requires separate Odoo evidence.", True),
+    "execution.workspace_status": (WorkspaceStatus, "Read source verification (full) or metadata only (progress). Deployment needs separate Odoo proof.", True),
     "execution.files": (WorkspaceFiles, "List/read/search/diff or edit task files. Batch edits support exact replace/write/rename/delete with prevalidation and rollback. Existing edits require expected_sha256.", False),
     "execution.publish": (WorkspacePublish, "Queue verified commit/push; poll execution_status(operation_id). push=false completes local commit without a follow-up push; push=true confirms remote SHA. Deployment is separate. May require approval.", False),
     "execution.process_start": (ProcessStart, "Queue argv in the task container: no network or credentials. Returns process_id, not a completed result.", False),
@@ -52,7 +52,7 @@ def dispatch_execution(name, args, *, service=None):
     if name == "execution.task_plan":
         return svc.plan(req)
     if name == "execution.workspace_status":
-        return svc.status(req.workspace_id)
+        return svc.status(req.workspace_id, detail=req.detail) if req.detail != "full" else svc.status(req.workspace_id)
     if name == "execution.files":
         return svc.files(req)
     if name == "execution.process_start":

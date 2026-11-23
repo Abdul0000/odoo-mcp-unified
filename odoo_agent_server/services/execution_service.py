@@ -195,7 +195,9 @@ class ExecutionService:
     def public(record):
         return {k: v for k, v in record.items() if k not in {"request", "source_path", "conversation", "pending_response"}}
 
-    def status(self, workspace_id):
+    def status(self, workspace_id, *, detail="full"):
+        if detail not in {"full", "progress"}:
+            raise HTTPException(422, "Unknown workspace status detail")
         record = self.store.get(workspace_id, "workspace")
         if record["status"] != "ready":
             pending = record["status"] in {"queued", "initializing"}
@@ -215,6 +217,14 @@ class ExecutionService:
             return {**self.public(record), "workspace_id": workspace_id, "success_allowed": False,
                     "completion_required": True, "state_class": "running",
                     "next_call": {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id}}}
+        if detail == "progress":
+            pending = [p for p in self.store.pending("process") if p["request"]["workspace_id"] == workspace_id]
+            return {**self.public(record), "workspace_id": workspace_id,
+                    "last_known_phase": record.get("phase", "inspect"), "phase": "running" if pending else "verify",
+                    "verification": {"ready": False, "reason": "progress_only"}, "fresh_verification": False,
+                    "success_allowed": False, "completion_required": True, "deployment": "not_deployed",
+                    "next_call": {"tool": "execution_process_poll", "arguments": {"process_id": pending[0]["id"]}}
+                    if pending else {"tool": "execution_workspace_status", "arguments": {"workspace_id": workspace_id, "detail": "full"}}}
         try:
             with self.store.workspace_lock(workspace_id, blocking=False):
                 return self._status(workspace_id)
@@ -274,7 +284,7 @@ class ExecutionService:
         elif phase == "done":
             next_call = None
         return {**self.public(record), "workspace_id": record["id"], "changes": dirty,
-                "phase": phase, "verification": verification, "changes_truncated": len(dirty) >= 32000,
+                "phase": phase, "verification": verification, "fresh_verification": not busy, "changes_truncated": len(dirty) >= 32000,
                 "argument_request": argument_request,
                 "success_allowed": phase == "done",
                 "input_required": phase in {"needs_review", "needs_input", "configuration_required"},

@@ -20,3 +20,4 @@ jobs:
       - run: python -m pytest -o addopts='' --durations=20 -q
       - run: node tests/browser_extension.test.mjs
       - run: python -m tests.benchmarks.run --samples 20 --history 450
+      - run: python -m tests.benchmarks.orchestration --tasks 4 --workers 2

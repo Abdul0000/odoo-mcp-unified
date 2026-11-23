@@ -700,6 +700,10 @@ _PROVIDER_TOOL_NAMES_MINIMAL = {
 _PROVIDER_TOOL_NAMES_MINIMAL.add('browser.extension')
 _PROVIDER_TOOL_NAMES_MINIMAL.update(EXECUTION_TOOLS)
 _PROVIDER_TOOL_NAMES_MINIMAL.update(_TASK_TOOLS)
+_TASK_PROFILE_TOOL_NAMES = set(_TASK_TOOLS) | {
+    "connector.health", "client.check", "workflow.agent_instructions",
+    "skills.list", "skills.read", "artifacts.read", "approvals.approve", "browser.extension", "jobs.get",
+}
 _CLAUDE_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _CHATGPT_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
 _GROK_TOOL_NAMES = set(_PROVIDER_TOOL_NAMES)
@@ -736,8 +740,8 @@ _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
     'execution.workspace_open': 'Open isolated task from fresh remote code; poll workspace_status.',
     'execution.workspace_sync': 'Merge latest remote without losing edits; poll operation_id. Resolve conflicts with expected_remote_sha/resolutions. Rerun tests.',
     'execution.task_plan': 'Declare checks and required layers; proof binds to current tree/runtime.',
-    'execution.workspace_status': 'Read task changes, verification and next_call; push is separate from deployment.',
-    'execution.files': 'Read/edit isolated files; existing writes require expected_sha256. Supports batch edits.',
+    'execution.workspace_status': 'Full verifies source; progress grants no proof.',
+    'execution.files': 'Read/edit task files with expected_sha256; supports batches.',
     'execution.publish': 'Queue verified commit/push; poll operation_id. push=false commits only. Remote changes require sync and fresh tests.',
     'execution.process_start': 'Queue container command; no network or host credentials.',
     'execution.process_poll': 'Read bounded command output and exit status.',
@@ -889,6 +893,8 @@ def _tools_for_profile(profile: str | None = None, *, minimal: bool = False) -> 
         allowed = set(EXECUTION_TOOLS) | {"connector.health", "client.check", "workflow.agent_instructions",
                                         "skills.list", "skills.read", "workflow.module_test",
                                         "workflow.module_install_and_check", "jobs.get", "artifacts.read"}
+    elif profile == "task":
+        allowed = _TASK_PROFILE_TOOL_NAMES
     return [tool for tool in tools if tool.name in allowed]
 
 
@@ -949,8 +955,12 @@ def _remote_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
                 # prose inflates the manifest; full field docs remain in REST schemas.
                 continue
             if key == "additionalProperties":
-                # Keep strict false, but drop complex schemas under additionalProperties.
-                out[key] = child if isinstance(child, bool) else True
+                # JSON Schema permits extra keys by default. Pydantic >=2.11
+                # emits explicit true for dicts; omit that redundant metadata.
+                # Preserve strict false. Complex map schemas retain the existing
+                # permissive provider representation.
+                if child is False:
+                    out[key] = False
                 continue
             out[key] = clean(child)
         return out
@@ -972,7 +982,7 @@ _claude_schema = _remote_compatible_schema
 def _tool_to_mcp(tool, profile: str | None = None) -> dict[str, Any]:
     title = getattr(tool, "title", None) or _humanize_tool_name(tool.name)
     output_schema = tool_output_schema(tool.name)
-    if profile in {"provider", "claude", "chatgpt", "grok", "qwen", "execution"}:
+    if profile in {"provider", "claude", "chatgpt", "grok", "qwen", "execution", "task"}:
         # Some remote-MCP builds are strict and can fail while
         # validating the initial tool list. For ChatGPT, keep initialize/tools/list
         # anonymous but mark every tool call as OAuth-protected so the client can
@@ -1102,7 +1112,12 @@ async def _handle_shell(
                     "prompts": {"listChanged": False},
                 },
                 "serverInfo": {"name": "odoo-mcp-agent-connector", "version": "1.8.0"},
-                "instructions": load_client_check_system_prompt(),
+                "instructions": load_client_check_system_prompt() + (
+                    "\nTask profile: after client validation, call task_open then task_run(task_id). "
+                    "Supply nested inspection/edit/test tools in task_run arguments; use task_resume to reconcile. "
+                    "Only explicit deploy tasks may use task_deploy."
+                    if request is not None and (request.query_params.get("profile") or request.headers.get("x-mcp-profile") or "").lower() == "task" else ""
+                ),
                 "prompt_source": "CLIENT_CHECK_SYSTEM_PROMPT.md",
                 "next_prompt_source_after_client_validation": "MCP_SYSTEM_PROMPT.md",
             },
@@ -1161,7 +1176,9 @@ async def _handle_shell(
             },
         )
     if method == "tools/list":
-        manifest_profile = "execution" if request is not None and request.query_params.get("profile") == "execution" else profile
+        requested = ((request.query_params.get("profile") or request.headers.get("x-mcp-profile") or "").lower()
+                     if request is not None else "")
+        manifest_profile = requested if requested in {"execution", "task"} else profile
         return _shell_response(request_id, {"tools": _cached_tools_list(manifest_profile, minimal=minimal)})
     if method == "tools/call":
         name = params.get("name")
@@ -1170,148 +1187,143 @@ async def _handle_shell(
             return _shell_response(request_id, error={"code": -32602, "message": "tools/call requires params.name"})
         if not isinstance(arguments, dict):
             return _shell_response(request_id, error={"code": -32602, "message": "arguments must be an object"})
-        internal_name = _mcp_name_to_internal(name)
-        try:
-            if profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and internal_name not in _PROVIDER_TOOL_NAMES:
-                guard_structured = McpOperationGuardService().tool_profile_block(internal_name, arguments if isinstance(arguments, dict) else {})
-                guard_structured = _provider_safe_next_calls(_ensure_provider_control_envelope(guard_structured))
-                text = json.dumps(guard_structured, ensure_ascii=False, default=str)
-                return _shell_response(
-                    request_id,
-                    {
-                        "content": [{"type": "text", "text": text}],
-                        "structuredContent": guard_structured,
-                        "isError": False,
-                    },
-                )
-            arguments = _arguments_for_profile(internal_name, arguments, profile)
-            if settings.mcp_operation_guard_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and isinstance(arguments, dict):
-                op_guard = McpOperationGuardService()
-                arguments = op_guard.canonicalize_arguments(internal_name, arguments)
-                guarded = op_guard.before_tool_call(internal_name, arguments)
-                if guarded:
-                    guarded = _provider_safe_next_calls(_ensure_provider_control_envelope(guarded))
-                    text = json.dumps(guarded, ensure_ascii=False, default=str)
-                    return _shell_response(
-                        request_id,
-                        {
-                            "content": [{"type": "text", "text": text}],
-                            "structuredContent": guarded,
-                            "isError": False,
-                        },
-                    )
-            if settings.workflow_watchdog_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
-                result = await WorkflowWatchdogService().run_tool_call(
-                    internal_name,
-                    lambda: _dispatch(internal_name, arguments),
-                )
-            else:
-                result = await _dispatch(internal_name, arguments)
-            image_content = None
-            if internal_name == 'browser.extension' and isinstance(result, dict) and isinstance(result.get('result'), dict):
-                media = result['result'].pop('image', None)
-                if media:
-                    image_content = {'type': 'image', 'mimeType': media['mimeType'], 'data': media['data']}
-            structured = _to_structured_content(result, tool_name=internal_name)
-            if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
-                structured = _provider_safe_next_calls(structured)
-            if settings.mcp_operation_guard_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and isinstance(arguments, dict):
-                op_guard = McpOperationGuardService()
-                op_guard.after_tool_call(internal_name, arguments, structured if isinstance(structured, dict) else {"result": structured})
-                structured = op_guard.annotate_result(internal_name, arguments, structured if isinstance(structured, dict) else {"result": structured})
-            if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
-                if internal_name.startswith("ws."):
-                    # Workspace tools return small, bounded, self-describing results: no lifecycle envelope.
-                    structured = _provider_safe_next_calls(structured if isinstance(structured, dict) else {"result": structured})
-                else:
-                    structured = _ensure_provider_control_envelope(structured)
-                    if internal_name != "artifacts.read":
-                        structured = _normalize_remote_structured(structured, internal_name)
-                    structured = _provider_safe_next_calls(_ensure_provider_control_envelope(structured))
-                    structured = _ensure_callable_continuations(structured)
-            text = _render_result_text(structured, internal_name)
-            # Context-bloat guard: in long sessions, oversized tool outputs (large diffs,
-            # logs, file reads) compound across many calls and slow down/derail the model.
-            # Compatibility profiles also receive bounded structuredContent with artifact refs.
-            text = _cap_text(text, max_chars=(30000 if internal_name.startswith("ws.") else 12000) if profile in {"provider", "claude", "chatgpt", "grok", "qwen"} else 24000)
-            return _shell_response(
-                request_id,
-                {
-                    "content": [{"type": "text", "text": text}] + ([image_content] if image_content else []),
-                    "structuredContent": structured,
-                    "isError": False,
-                },
-            )
-        except ValidationError as exc:
-            message = format_tool_validation_error(exc)
-            structured_error = _provider_safe_next_calls(
-                _ensure_provider_control_envelope(
-                    {
-                        "status": "failed",
-                        "error": message,
-                        "error_type": "tool_input_invalid",
-                        "error_code": "tool_input_invalid",
-                        "retryable": False,
-                        # Give the model one concrete, callable recovery step
-                        # instead of a raw Pydantic dump it cannot act on.
-                        "next_call": {
-                            "tool": "workflow.agent_instructions",
-                            "arguments": {},
-                        },
-                    },
-                    is_error=True,
-                )
-            )
-            return _shell_response(
-                request_id,
-                {
-                    "content": [{"type": "text", "text": message}],
-                    "structuredContent": structured_error,
-                    "isError": True,
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            message = str(exc)
-            error_payload = {"status": "failed", "error": message,
-                             "error_code": type(exc).__name__, "retryable": None}
-            if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
-                error_payload["details"] = exc.detail
-                error_payload["error_code"] = exc.detail.get("error_code", type(exc).__name__)
-                if exc.detail.get("error_code") == "runtime_unavailable":
-                    error_payload.update(status="configuration_required", state_class="blocked", success_allowed=False,
-                                         required_runtime=exc.detail.get("required_runtime"))
-            if (isinstance(exc, HTTPException) and isinstance(exc.detail, dict)
-                    and exc.detail.get("approval_required") and exc.detail.get("approval_id")):
-                # Keep the gate machine-readable. A stringified HTTPException hides
-                # the approval ID and makes clients treat authorization as a failure.
-                detail = exc.detail
-                resume_args = {**arguments, "approval_id": detail["approval_id"]}
-                error_payload.update(
-                    status="approval_required", approval_required=True,
-                    approval_id=detail["approval_id"], action=detail.get("action"),
-                    message=detail.get("message"), error_code="approval_required",
-                    completion_required=True, success_allowed=False, retryable=False,
-                    input_request={"kind": "approval", "approval_id": detail["approval_id"],
-                                   "action": detail.get("action"), "prompt": detail.get("message"),
-                                   "requires_explicit_user_consent": True,
-                                   "resume_call": {"tool": name, "arguments": resume_args}},
-                )
-            structured_error = _provider_safe_next_calls(
-                _ensure_provider_control_envelope(
-                    error_payload,
-                    is_error=True,
-                )
-            )
-            return _shell_response(
-                request_id,
-                {
-                    "content": [{"type": "text", "text": message}],
-                    "structuredContent": structured_error,
-                    "isError": True,
-                },
-            )
+        return _shell_response(request_id, await call_tool_result(name, arguments, profile))
     return _shell_response(request_id, error={"code": -32601, "message": f"Unknown method: {method}"})
 
+
+async def call_tool_result(name: str, arguments: dict[str, Any], profile: str | None = "provider") -> dict[str, Any]:
+    """Shared domain dispatch and result policy for SDK and compatibility transports."""
+    internal_name = _mcp_name_to_internal(name)
+    try:
+        if profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and internal_name not in _PROVIDER_TOOL_NAMES:
+            guard_structured = McpOperationGuardService().tool_profile_block(internal_name, arguments if isinstance(arguments, dict) else {})
+            guard_structured = _provider_safe_next_calls(_ensure_provider_control_envelope(guard_structured))
+            text = json.dumps(guard_structured, ensure_ascii=False, default=str)
+            return {
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": guard_structured,
+                "isError": False,
+            }
+        arguments = _arguments_for_profile(internal_name, arguments, profile)
+        if settings.mcp_operation_guard_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and isinstance(arguments, dict):
+            op_guard = McpOperationGuardService()
+            arguments = op_guard.canonicalize_arguments(internal_name, arguments)
+            guarded = op_guard.before_tool_call(internal_name, arguments)
+            if guarded:
+                guarded = _provider_safe_next_calls(_ensure_provider_control_envelope(guarded))
+                text = json.dumps(guarded, ensure_ascii=False, default=str)
+                return {
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": guarded,
+                    "isError": False,
+                }
+        if settings.workflow_watchdog_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
+            result = await WorkflowWatchdogService().run_tool_call(
+                internal_name,
+                lambda: _dispatch(internal_name, arguments),
+            )
+        else:
+            result = await _dispatch(internal_name, arguments)
+        image_content = None
+        if internal_name == "browser.extension" and isinstance(result, dict) and isinstance(result.get("result"), dict):
+            media = result["result"].pop("image", None)
+            if media:
+                image_content = {"type": "image", "mimeType": media["mimeType"], "data": media["data"]}
+        structured = _to_structured_content(result, tool_name=internal_name)
+        if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
+            structured = _provider_safe_next_calls(structured)
+        if settings.mcp_operation_guard_enabled and profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and isinstance(arguments, dict):
+            op_guard = McpOperationGuardService()
+            op_guard.after_tool_call(internal_name, arguments, structured if isinstance(structured, dict) else {"result": structured})
+            structured = op_guard.annotate_result(internal_name, arguments, structured if isinstance(structured, dict) else {"result": structured})
+        if profile in {"provider", "claude", "chatgpt", "grok", "qwen"}:
+            if internal_name.startswith("ws."):
+                # Workspace tools return small, bounded, self-describing results: no lifecycle envelope.
+                structured = _provider_safe_next_calls(structured if isinstance(structured, dict) else {"result": structured})
+            else:
+                structured = _ensure_provider_control_envelope(structured)
+                if internal_name != "artifacts.read":
+                    structured = _normalize_remote_structured(structured, internal_name)
+                structured = _provider_safe_next_calls(_ensure_provider_control_envelope(structured))
+                structured = _ensure_callable_continuations(structured)
+        text = _render_result_text(structured, internal_name)
+        # Context-bloat guard: in long sessions, oversized tool outputs (large diffs,
+        # logs, file reads) compound across many calls and slow down/derail the model.
+        # Compatibility profiles also receive bounded structuredContent with artifact refs.
+        text = _cap_text(text, max_chars=(30000 if internal_name.startswith("ws.") else 12000) if profile in {"provider", "claude", "chatgpt", "grok", "qwen"} else 24000)
+        return {
+            "content": [{"type": "text", "text": text}] + ([image_content] if image_content else []),
+            "structuredContent": structured,
+            "isError": False,
+        }
+    except ValidationError as exc:
+        message = format_tool_validation_error(exc)
+        structured_error = _provider_safe_next_calls(
+            _ensure_provider_control_envelope(
+                {
+                    "status": "failed",
+                    "error": message,
+                    "error_type": "tool_input_invalid",
+                    "error_code": "tool_input_invalid",
+                    "retryable": False,
+                    # Give the model one concrete, callable recovery step
+                    # instead of a raw Pydantic dump it cannot act on.
+                    "next_call": {
+                        "tool": "workflow.agent_instructions",
+                        "arguments": {},
+                    },
+                },
+                is_error=True,
+            )
+        )
+        return {
+            "content": [{"type": "text", "text": message}],
+            "structuredContent": structured_error,
+            "isError": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        error_payload = {"status": "failed", "error": message, "error_code": type(exc).__name__, "retryable": None}
+        if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+            error_payload["details"] = exc.detail
+            error_payload["error_code"] = exc.detail.get("error_code", type(exc).__name__)
+            if exc.detail.get("error_code") == "runtime_unavailable":
+                error_payload.update(status="configuration_required", state_class="blocked", success_allowed=False, required_runtime=exc.detail.get("required_runtime"))
+        if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) and exc.detail.get("approval_required") and exc.detail.get("approval_id"):
+            # Keep the gate machine-readable. A stringified HTTPException hides
+            # the approval ID and makes clients treat authorization as a failure.
+            detail = exc.detail
+            resume_args = {**arguments, "approval_id": detail["approval_id"]}
+            error_payload.update(
+                status="approval_required",
+                approval_required=True,
+                approval_id=detail["approval_id"],
+                action=detail.get("action"),
+                message=detail.get("message"),
+                error_code="approval_required",
+                completion_required=True,
+                success_allowed=False,
+                retryable=False,
+                input_request={
+                    "kind": "approval",
+                    "approval_id": detail["approval_id"],
+                    "action": detail.get("action"),
+                    "prompt": detail.get("message"),
+                    "requires_explicit_user_consent": True,
+                    "resume_call": {"tool": name, "arguments": resume_args},
+                },
+            )
+        structured_error = _provider_safe_next_calls(
+            _ensure_provider_control_envelope(
+                error_payload,
+                is_error=True,
+            )
+        )
+        return {
+            "content": [{"type": "text", "text": message}],
+            "structuredContent": structured_error,
+            "isError": True,
+        }
 
 @claude_router.get("/mcp")
 def claude_mcp_health() -> dict[str, Any]:

@@ -5,6 +5,7 @@ A dispatched mutation is never replayed from this ledger after an uncertain exit
 """
 
 from contextlib import contextmanager
+import asyncio
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -99,14 +100,22 @@ class TaskService:
     def lock(self, task_id):
         path = self.path(task_id).with_suffix(".lock")
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
+        acquired = False
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise TaskBusy(409, "Task is already processing a step; poll task_status.") from None
-            yield
+            acquired = True
+            yield fd
         finally:
-            os.close(fd)
+            try:
+                if acquired:
+                    # Close alone can retain a flock through an inherited or
+                    # duplicated descriptor in another subprocess/thread.
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
     def read(self, task_id):
         if (settings.state_path / 'task-tombstones' / self.path(task_id).name).exists():
@@ -121,6 +130,21 @@ class TaskService:
     def save(self, task):
         task["updated_at"] = now()
         atomic_json(self.path(task["task_id"]), task)
+
+    async def checkpoint(self, task):
+        """Keep disk I/O off the loop without releasing ownership mid-write."""
+        writer = asyncio.create_task(asyncio.to_thread(self.save, task))
+        cancelled = None
+        while not writer.done():
+            try:
+                await asyncio.shield(writer)
+            except asyncio.CancelledError as exc:
+                # A cancelled HTTP request must drain its durable write before
+                # the task lock is released or another request can change state.
+                cancelled = exc
+        writer.result()
+        if cancelled is not None:
+            raise cancelled
 
     def open(self, request):
         client = ClientAdminService()._client(request.client_name)
@@ -305,6 +329,15 @@ class TaskService:
                     },
                 },
             )
+            return out
+        last_tool = (task.get("events") or [{}])[-1].get("tool")
+        if (last_tool in {"execution.process_poll", "execution.status", "jobs.get", "execution.process_start",
+                          "execution.publish", "execution.workspace_sync"}
+                and body.get("status") in {"succeeded", "passed", "up_to_date"}):
+            # A command receipt is not the next source-level decision. Reconcile
+            # the workspace before asking the model to invent another step.
+            out.update(state_class="action_required", terminal=False,
+                       next_call={"tool":"task_resume", "arguments":{"task_id":task["task_id"]}})
             return out
         out.update(
             state_class="action_required",
@@ -568,7 +601,7 @@ class TaskService:
             task["phase"] = "running"
             if not readonly:
                 task["claims"] = {}
-            self.save(task)  # Before the side effect. A lost response cannot cause replay.
+            await self.checkpoint(task)  # Before the side effect. A lost response cannot cause replay.
             try:
                 result = await dispatch(name, args)
                 result = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
@@ -582,12 +615,12 @@ class TaskService:
                     }
                 self.observe(task, name, result, args)
                 step.update(status="observed", finished_at=now())
-                self.save(task)
+                await self.checkpoint(task)
                 return self.envelope(task, result)
             except BaseException as exc:
                 step.update(status="read_failed" if readonly else "reconciliation_required", finished_at=now(), error=scrub(getattr(exc, "detail", type(exc).__name__)))
                 task["phase"] = step["status"]
-                self.save(task)
+                await self.checkpoint(task)
                 raise
 
     def observe(self, task, name, result, args=None):
@@ -641,10 +674,11 @@ class TaskService:
             # Only a fresh workspace_status may grant push verification.
             task["phase"] = str(result.get("status") or "publish")
         elif name == "execution.workspace_status":
-            claims["coding_verified"] = result.get("verification", {}).get("ready") is True
+            fresh = result.get("fresh_verification") is not False
+            claims["coding_verified"] = fresh and result.get("verification", {}).get("ready") is True
             if not claims["coding_verified"]:
                 claims["deployment_verified"] = False
-            claims["push_verified"] = result.get("pushed") is True and result.get("success_allowed") is True
+            claims["push_verified"] = fresh and result.get("pushed") is True and result.get("success_allowed") is True
             task["phase"] = result.get("phase", "inspect")
         elif name in {"workflow.odoo_code_change", "workflow.odoo_debug_and_fix", "workflow.frontend_visual_implement"}:
             claims["deployment_verified"] = result.get("deploy_confirmed") is True and result.get("success_allowed") is True
@@ -668,7 +702,7 @@ class TaskService:
             task["refs"]["mutation_request_id"] = args.get("request_id")
         else:
             task["phase"] = str(result.get("phase") or result.get("status") or "inspect")[:80]
-        if name == "execution.workspace_status" and result.get("pushed") is True and result.get("success_allowed") is True:
+        if name == "execution.workspace_status" and result.get("fresh_verification") is not False and result.get("pushed") is True and result.get("success_allowed") is True:
             published = result.get("commit") or result.get("published_commit")
             if isinstance(published, str) and re.fullmatch("[0-9a-f]{40}", published):
                 task["published_commit_sha"] = published
@@ -727,21 +761,56 @@ class TaskService:
                 calls.append(("jobs.get", {"job_id": job_id, "wait_for_result": False}))
             for operation_id in refs.get("operation_ids", [])[-1:]:
                 calls.append(("execution.status", {"operation_id": operation_id}))
-            if refs.get("workspace_id"):
-                calls.append(("execution.workspace_status", {"workspace_id": refs["workspace_id"]}))
+            # Only immutable successful receipts are settled. Failed/warning
+            # jobs may resume under the same ID and must continue to be read.
+            settled = set(refs.get("settled_poll_ids", []))
+            def identity(name, args):
+                record_id = args.get("job_id") or args.get("operation_id") or args.get("process_id")
+                return name + ":" + str(record_id) if record_id else None
+            calls = [(name, args) for name, args in calls if identity(name, args) not in settled]
+            limit = asyncio.Semaphore(settings.task_poll_concurrency)
+            async def poll(name, args):
+                async with limit:
+                    try:
+                        return await dispatch(name, args)
+                    except HTTPException as exc:
+                        return exc
+            # Fetch independent observations concurrently, then apply them in
+            # their original order. Workspace verification follows these reads.
+            results = await asyncio.gather(*(poll(name, args) for name, args in calls))
             observations = []
-            for name, args in calls:
-                try:
-                    result = await dispatch(name, args)
-                    result = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
-                    self.observe(task, name, result, args)
-                    for step in task["steps"].values():
-                        expected = {"execution.workspace_open": "workspace_id", "execution.process_start": "process_id", "execution.publish": "operation_id", "execution.workspace_sync": "operation_id"}.get(step["tool"])
-                        if expected and step.get("record_id") == args.get(expected) and step["status"] in {"dispatched", "reconciliation_required"}:
-                            step.update(status="reconciled", finished_at=now())
-                    observations.append({"tool": name, "result": result})
-                except HTTPException as exc:
-                    observations.append({"tool": name, "error": scrub(exc.detail)})
+            def apply(name, args, result):
+                if isinstance(result, HTTPException):
+                    observations.append({"tool": name, "error": scrub(result.detail)})
+                    return
+                result = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+                self.observe(task, name, result, args)
+                for step in task["steps"].values():
+                    expected = {"execution.workspace_open": "workspace_id", "execution.process_start": "process_id", "execution.publish": "operation_id", "execution.workspace_sync": "operation_id"}.get(step["tool"])
+                    if expected and step.get("record_id") == args.get(expected) and step["status"] in {"dispatched", "reconciliation_required"}:
+                        step.update(status="reconciled", finished_at=now())
+                observations.append({"tool": name, "result": result})
+                if isinstance(result, dict) and not result.get("error"):
+                    terminal = {"jobs.get": {"passed"}, "execution.status": {"succeeded"},
+                                "execution.process_poll": {"succeeded", "failed", "cancelled", "timed_out", "interrupted"}}
+                    if result.get("status") in terminal.get(name, set()):
+                        key = identity(name, args)
+                        if key:
+                            settled.add(key)
+            for (name, args), result in zip(calls, results):
+                apply(name, args, result)
+            refs["settled_poll_ids"] = sorted(settled)[-150:]
+            if refs.get("workspace_id"):
+                active = bool(refs.get("pending_job_ids") or refs.get("pending_operation_ids")) or any(
+                    (item.get("result") or {}).get("status") in {"queued", "running", "initializing", "pending"}
+                    for item in observations
+                )
+                args = {"workspace_id": refs["workspace_id"]}
+                if active:
+                    args["detail"] = "progress"
+                name = "execution.workspace_status"
+                calls.append((name, args))
+                apply(name, args, await poll(name, args))
             uncertain = [key for key, s in task["steps"].items() if s["status"] in {"dispatched", "reconciliation_required"} and not s.get("read_only", False)]
             if (uncertain and not calls) or (uncertain_deploy and not refs.get("deploy_job_id")):
                 task["phase"] = "reconciliation_required"
@@ -775,7 +844,7 @@ class TaskService:
                     self.observe(task, "workflow.odoo_debug_and_fix", latest)
                 except HTTPException:
                     pass
-            self.save(task)
+            await self.checkpoint(task)
             return self.envelope(
                 task,
                 latest,
@@ -853,20 +922,20 @@ class TaskService:
             task["steps"][request.step_id] = step
             task["phase"] = "deploy"
             task["claims"].pop("deployment_verified", None)
-            self.save(task)
+            await self.checkpoint(task)
             try:
                 report = await safe_deploy_module(payload)
                 result = report.model_dump(mode="json")
                 self.observe(task, "workflow.safe_deploy_module", result)
                 step.update(status="observed", finished_at=now())
-                self.save(task)
+                await self.checkpoint(task)
                 return self.envelope(task, result)
             except BaseException as exc:
                 detail = getattr(exc, "detail", None)
                 if isinstance(exc, HTTPException) and isinstance(detail, dict) and detail.get("approval_required"):
                     step.update(status="awaiting_approval", approval_id=detail.get("approval_id"))
                     task["phase"] = "awaiting_approval"
-                    self.save(task)
+                    await self.checkpoint(task)
                     resume = {"tool": "task_deploy", "arguments": {**request.model_dump(), "approval_id": detail.get("approval_id")}}
                     return self.envelope(
                         task,
@@ -883,7 +952,7 @@ class TaskService:
                     )
                 step.update(status="reconciliation_required", error=scrub(getattr(exc, "detail", type(exc).__name__)))
                 task["phase"] = "reconciliation_required"
-                self.save(task)
+                await self.checkpoint(task)
                 raise
 
     def knowledge(self, client_name, refresh=False):
