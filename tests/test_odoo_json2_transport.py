@@ -129,7 +129,10 @@ def test_json2_request_uses_bearer_key_and_database_header(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def post(self, url, headers, json):
+        def close(self):
+            pass
+
+        def post(self, url, headers, json, **kwargs):
             seen.update(url=url, headers=headers, json=json)
             return FakeResponse()
 

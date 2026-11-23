@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     # Headless/dev convenience: auto-approve OAuth authorization requests whose
     # redirect target is loopback, so native clients can complete the flow
     # without a browser consent form. Disable for shared/public deployments.
-    oauth_auto_approve_loopback: bool = Field(default=True, alias="ODOO_AGENT_OAUTH_AUTO_APPROVE_LOOPBACK")
+    oauth_auto_approve_loopback: bool = Field(default=False, alias="ODOO_AGENT_OAUTH_AUTO_APPROVE_LOOPBACK")
     oauth_authorization_code_ttl_seconds: int = Field(default=600, alias="ODOO_AGENT_OAUTH_AUTH_CODE_TTL_SECONDS")
     oauth_access_token_ttl_seconds: int = Field(default=3600, alias="ODOO_AGENT_OAUTH_ACCESS_TOKEN_TTL_SECONDS")
     oauth_refresh_token_ttl_seconds: int = Field(default=2592000, alias="ODOO_AGENT_OAUTH_REFRESH_TOKEN_TTL_SECONDS")

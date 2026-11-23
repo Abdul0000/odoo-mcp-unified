@@ -67,6 +67,7 @@ class JsonStore:
         self.approvals_file = self.root / "approvals.json"
         self.jobs_file = self.root / "jobs.json"
         self.jobs_dir = self.root / "jobs"
+        self.job_index_file = self.root / "job_index.json"
         self.audit_file = self.root / "audit.json"
         self.mutations_file = self.root / "functional_mutations.json"
         self.workflow_progress_file = self.root / "workflow_progress.json"
@@ -174,6 +175,30 @@ class JsonStore:
                 return ApprovalRecord.model_validate(row)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approval not found")
 
+    def claim_approval(self, approval_id: str, action: str, payload: dict[str, Any], *, bind_payload: bool) -> ApprovalRecord:
+        """Validate and consume approval ownership in one cross-process transaction."""
+        def claim(rows):
+            for index, row in enumerate(rows):
+                if row.get("id") != approval_id:
+                    continue
+                record = ApprovalRecord.model_validate(row)
+                if record.action != action:
+                    raise HTTPException(403, f"Approval {approval_id} is for {record.action}, not {action}")
+                if record.status != ApprovalStatus.approved:
+                    raise HTTPException(403, f"Approval {approval_id} is {record.status.value}, not approved")
+                if bind_payload and json.dumps(record.payload_preview, sort_keys=True, default=str) != json.dumps(payload, sort_keys=True, default=str):
+                    raise HTTPException(403, f"Approval {approval_id} does not match this exact mutation payload")
+                record.status = ApprovalStatus.running
+                record.decided_at = datetime.now(timezone.utc).isoformat()
+                record.reason = "Action started"
+                rows[index] = record.model_dump(mode="json")
+                return record
+            raise HTTPException(404, "Approval not found")
+
+        record = self._update_list(self.approvals_file, claim)
+        self.log_audit("approval.running", "running", record.summary, {"approval_id": record.id, "action": record.action})
+        return record
+
     def set_approval_status(self, approval_id: str, target: ApprovalStatus, reason: str | None = None) -> ApprovalRecord:
         def update(rows):
             for index, row in enumerate(rows):
@@ -197,14 +222,53 @@ class JsonStore:
         return job
 
     def list_jobs(self, limit: int = 100) -> list[JobRecord]:
+        if limit <= 0:
+            return []
+        with self._file_lock(self.job_index_file):
+            entries = self._job_index_entries()
+        ordered = sorted(entries, key=lambda key: entries[key], reverse=True)
         records: list[JobRecord] = []
+        for job_id in ordered:
+            try:
+                records.append(self.get_job(job_id))
+            except (OSError, ValueError, HTTPException):
+                continue
+            if len(records) >= limit:
+                break
+        return records
+
+    def _job_directory_signature(self) -> list[int]:
+        stat = self.jobs_dir.stat()
+        return [stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns]
+
+    def _save_job_index(self, entries: dict[str, str]) -> None:
+        temporary = self.job_index_file.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({"directory": self._job_directory_signature(), "entries": entries}, separators=(",", ":")), encoding="utf-8")
+        temporary.replace(self.job_index_file)
+
+    def _job_index_entries(self) -> dict[str, str]:
+        """Caller holds index lock. Directory identity detects external deletion/import."""
+        signature = self._job_directory_signature()
+        try:
+            index = json.loads(self.job_index_file.read_text(encoding="utf-8"))
+            if (index.get("directory") == signature and isinstance(index.get("entries"), dict)
+                    and all(isinstance(k, str) and isinstance(v, str) for k, v in index["entries"].items())):
+                return index["entries"]
+        except (OSError, ValueError, AttributeError):
+            pass
+        entries = {}
         for path in self.jobs_dir.glob("*.json"):
             try:
-                records.append(JobRecord.model_validate_json(path.read_text(encoding="utf-8")))
-            except (OSError, ValueError):
+                job = JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
+                if path == self._job_path(job.id):
+                    entries[job.id] = str(job.created_at or "")
+            except (OSError, ValueError, HTTPException):
                 continue
-        records.sort(key=lambda item: str(item.created_at or ""), reverse=True)
-        return records[:limit]
+        # Concurrent external cleanup must invalidate this snapshot, not stamp
+        # partially read records as a current index.
+        if signature == self._job_directory_signature():
+            self._save_job_index(entries)
+        return entries
 
     def get_job(self, job_id: str) -> JobRecord:
         path = self._job_path(job_id)
@@ -238,11 +302,11 @@ class JsonStore:
 
     def update_job(self, job: JobRecord) -> JobRecord:
         self._write_job(job)
-        self._prune_job_files()
         # Running jobs can update on every deployment poll. Auditing every
         # heartbeat rewrites the complete audit JSON and adds no durable value;
         # create and terminal transitions remain audited.
         if job.status not in {JobStatus.queued, JobStatus.running}:
+            self._prune_job_files()
             self.log_audit("job.update", job.status.value, job.job_type, {"job_id": job.id})
         return job
 
@@ -255,10 +319,14 @@ class JsonStore:
     def _write_job(self, job: JobRecord) -> None:
         path = self._job_path(job.id)
         payload = job.model_dump_json()
-        with self._file_lock(path):
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(path)
+        with self._file_lock(self.job_index_file):
+            entries = self._job_index_entries()
+            with self._file_lock(path):
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(path)
+            entries[job.id] = str(job.created_at or "")
+            self._save_job_index(entries)
         self._job_signal.bump(job.id)
 
     def _migrate_legacy_jobs(self) -> None:
@@ -279,7 +347,10 @@ class JsonStore:
     def _prune_job_files(self) -> None:
         """Bound terminal history while never evicting queued/running jobs (see job_retention)."""
         maximum = max(20, int(getattr(settings, "job_max_count", 500)))
-        prune_job_dir(self.jobs_dir, maximum, {JobStatus.queued.value, JobStatus.running.value})
+        with self._file_lock(self.job_index_file):
+            removed = prune_job_dir(self.jobs_dir, maximum, {JobStatus.queued.value, JobStatus.running.value})
+            if removed:
+                self._job_index_entries()
 
     def add_step(self, job: JobRecord, step: JobStep) -> JobRecord:
         step.finished_at = step.finished_at or datetime.now(timezone.utc).isoformat()

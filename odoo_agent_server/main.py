@@ -44,7 +44,11 @@ if any(os.getenv(name, "").lower() not in {"", "0", "false", "no"} for name in _
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     validate_required_tool_registry()
-    yield
+    try:
+        yield
+    finally:
+        from .services.http_client_pool import odoo_http_clients
+        odoo_http_clients.close()
 
 
 app = FastAPI(

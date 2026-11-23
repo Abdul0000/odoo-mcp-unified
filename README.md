@@ -2,6 +2,14 @@
 
 Browser client settings: open `/clients`; see [Client manager](docs/CLIENT_MANAGER.md).
 
+Regression checks: `python -m pytest -o addopts=''` runs the complete suite,
+including concurrency and process-boundary checks. Run `ruff check .` and
+`node tests/browser_extension.test.mjs` for static and extension checks.
+The CI workflow runs these against Python 3.12 and Node 20, matching the image.
+`python -m tests.benchmarks.run --samples 50 --history 450` measures local
+job lookup/update/listing and concurrent health responsiveness during simulated
+log I/O. It uses temporary state and makes no live Odoo or SSH requests.
+
 Oracle task execution: see [Execution worker setup](docs/EXECUTION_WORKER.md).
 The optional execution lane adds isolated task clones, file tools, Docker commands
 with polling/stdin/cancellation, and verified Git publishing. ChatGPT supplies
@@ -483,15 +491,17 @@ Equivalent `.mcp.json` entry:
 
 If you prefer OAuth instead of a pasted token, native clients use a loopback
 redirect (`http://localhost:<port>/callback`). The connector allows loopback
-redirects by default and can auto-approve them for headless clients:
+redirects by default. Bearer/API-key auth needs no browser consent. OAuth uses
+the existing token consent form by default:
 
 ```env
 ODOO_AGENT_OAUTH_ALLOW_LOOPBACK_REDIRECTS=true
-ODOO_AGENT_OAUTH_AUTO_APPROVE_LOOPBACK=true
+ODOO_AGENT_OAUTH_AUTO_APPROVE_LOOPBACK=false
 ```
 
-Set `ODOO_AGENT_OAUTH_AUTO_APPROVE_LOOPBACK=false` for shared or public
-deployments so a human must paste the admin token on the consent page.
+Private development deployments can explicitly enable loopback auto-approval.
+A loopback redirect describes the client callback, not the caller of the server;
+keep auto-approval disabled on shared or public deployments.
 
 #### Lean tool manifest for tight contexts
 

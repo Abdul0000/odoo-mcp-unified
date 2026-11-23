@@ -62,17 +62,7 @@ class ApprovalService:
                 },
             )
 
-        record = self.store.get_approval(approval_id)
-        if record.action != action:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Approval {approval_id} is for {record.action}, not {action}")
-        if record.status != ApprovalStatus.approved:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Approval {approval_id} is {record.status.value}, not approved")
-        if (bind_payload or force) and json.dumps(record.payload_preview, sort_keys=True, default=str) != json.dumps(payload_preview or {}, sort_keys=True, default=str):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Approval {approval_id} does not match this exact mutation payload",
-            )
-        self.store.set_approval_status(approval_id, ApprovalStatus.running, reason="Action started")
+        self.store.claim_approval(approval_id, action, payload_preview or {}, bind_payload=bind_payload or force)
 
     def mark_consumed(self, approval_id: str | None, reason: str | None = None) -> None:
         if approval_id:

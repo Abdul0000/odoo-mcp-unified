@@ -1057,6 +1057,8 @@ async def mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any
     """
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="provider", request=request, minimal=minimal)
@@ -1067,14 +1069,22 @@ async def mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any
 
 
 async def _handle_shell(
-    payload: dict[str, Any],
+    payload: Any,
     profile: str | None = None,
     request: Request | None = None,
     minimal: bool = False,
 ) -> dict[str, Any] | None:
-    method = payload.get("method")
+    if not isinstance(payload, dict):
+        return _shell_response(None, error={"code": -32600, "message": "Request must be an object"})
     request_id = payload.get("id")
-    params = payload.get("params") or {}
+    if (payload.get("jsonrpc", "2.0") != "2.0"
+            or not isinstance(payload.get("method"), str)
+            or isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None)))):
+        return _shell_response(None, error={"code": -32600, "message": "Invalid JSON-RPC request"})
+    method = payload.get("method")
+    params = payload.get("params", {})
+    if not isinstance(params, dict):
+        return _shell_response(request_id, error={"code": -32602, "message": "params must be an object"})
 
     if method == "notifications/initialized":
         return None
@@ -1155,9 +1165,11 @@ async def _handle_shell(
         return _shell_response(request_id, {"tools": _cached_tools_list(manifest_profile, minimal=minimal)})
     if method == "tools/call":
         name = params.get("name")
-        arguments = params.get("arguments") or {}
-        if not name:
+        arguments = params.get("arguments", {})
+        if not isinstance(name, str) or not name:
             return _shell_response(request_id, error={"code": -32602, "message": "tools/call requires params.name"})
+        if not isinstance(arguments, dict):
+            return _shell_response(request_id, error={"code": -32602, "message": "arguments must be an object"})
         internal_name = _mcp_name_to_internal(name)
         try:
             if profile in {"provider", "claude", "chatgpt", "grok", "qwen"} and internal_name not in _PROVIDER_TOOL_NAMES:
@@ -1310,6 +1322,8 @@ def claude_mcp_health() -> dict[str, Any]:
 async def claude_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="claude", request=request, minimal=minimal)
@@ -1345,6 +1359,8 @@ def chatgpt_tools_debug() -> dict[str, Any]:
 async def chatgpt_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="chatgpt", request=request, minimal=minimal)
@@ -1384,6 +1400,8 @@ async def grok_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str
     # OAuth/tool-call auth, strict tool names, and success_allowed=false until terminal proof.
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="grok", request=request, minimal=minimal)
@@ -1498,6 +1516,8 @@ async def qwen_mcp_path_shell(access_token: str, request: Request, payload: Any 
     _validate_qwen_url_token(access_token)
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="qwen", request=request, minimal=minimal)
@@ -1512,6 +1532,8 @@ async def qwen_mcp_query_shell(request: Request, payload: Any = Body(...), acces
     _validate_qwen_url_token(access_token)
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
+        if not payload:
+            return _shell_response(None, error={"code": -32600, "message": "Batch must not be empty"})
         responses = []
         for item in payload:
             response = await _handle_shell(item, profile="qwen", request=request, minimal=minimal)

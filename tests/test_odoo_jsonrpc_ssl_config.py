@@ -78,6 +78,9 @@ def test_jsonrpc_prefers_nested_odoo_exception_message(monkeypatch):
         def __exit__(self, *args):
             return False
 
+        def close(self):
+            pass
+
         def post(self, *args, **kwargs):
             return FakeResponse()
 
@@ -148,10 +151,12 @@ def test_protected_method_keeps_configured_network_timeout(monkeypatch):
     import httpx
     seen = []
     class Client:
-        def __init__(self, **kwargs): seen.append(kwargs['timeout'])
+        def __init__(self, **kwargs): pass
         def __enter__(self): return self
         def __exit__(self, *args): pass
+        def close(self): pass
         def post(self, *args, **kwargs):
+            seen.append(kwargs['timeout'])
             return type('Response', (), {'raise_for_status': lambda self: None, 'json': lambda self: {'result': True}})()
     service = OdooJsonRpcService()
     monkeypatch.setattr(service, '_base_url', lambda: 'https://fixture.invalid')

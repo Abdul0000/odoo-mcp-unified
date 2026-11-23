@@ -15,13 +15,15 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from itertools import islice
 
 from fastapi import HTTPException, status
 
 from ..config import settings
 from ..schemas import RepoIndexModule, RepoIndexResult
 from .path_service import resolve_allowed_path
-from .source_snapshot_service import content_digest
+from .source_snapshot_service import content_snapshot, source_files
+from .client_settings_store import atomic_json
 
 _TEMPLATE_RE = re.compile(r't-name=["\']([^"\']+)["\']')
 _SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache", "dist", "build"}
@@ -35,7 +37,10 @@ class RepoIndexService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project path not found: {project}")
 
         cache_file = self._cache_file(project)
-        fingerprint = f"v2:{max_files}:{self._fingerprint(project)}"
+        # One bounded inventory feeds both invalidation and rebuilding. A
+        # sentinel entry preserves the explicit partial-coverage indication.
+        paths = list(islice(self._walk(project), max_files + 1))
+        fingerprint = f"v3:{max_files}:{self._fingerprint(project, paths)}"
         if settings.repo_index_enabled and not force_refresh and cache_file.exists():
             try:
                 data = json.loads(cache_file.read_text(encoding="utf-8") or "{}")
@@ -47,13 +52,10 @@ class RepoIndexService:
             except Exception:
                 pass
 
-        result = self._build(project, max_files=max_files)
+        result = self._build(project, max_files=max_files, paths=paths)
         if settings.repo_index_enabled:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                json.dumps({"_saved_at": time.time(), "_fingerprint": fingerprint, "result": result.model_dump(mode="json")}, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            atomic_json(cache_file, {"_saved_at": time.time(), "_fingerprint": fingerprint, "result": result.model_dump(mode="json")})
         return result
 
     def related_files(self, written_files: list[str], project_path: str | None = None, max_related: int = 20) -> list[str]:
@@ -99,7 +101,7 @@ class RepoIndexService:
                         break
         return ordered
 
-    def _build(self, project: Path, max_files: int) -> RepoIndexResult:
+    def _build(self, project: Path, max_files: int, paths=None) -> RepoIndexResult:
         py: list[str] = []
         xml: list[str] = []
         js: list[str] = []
@@ -110,7 +112,7 @@ class RepoIndexService:
         notes: list[str] = []
         count = 0
 
-        for path in self._walk(project):
+        for path in paths if paths is not None else self._walk(project):
             count += 1
             if count > max_files:
                 notes.append(f"Index stopped at max_files={max_files}; increase max_files for a complete index.")
@@ -183,7 +185,7 @@ class RepoIndexService:
         key = hashlib.sha256(str(project).encode("utf-8")).hexdigest()[:24]
         return settings.cache_path / "repo_index" / f"{key}.json"
 
-    def _fingerprint(self, project: Path) -> str:
+    def _fingerprint(self, project: Path, paths=None) -> str:
         digest = hashlib.sha256()
         try:
             head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project,
@@ -197,22 +199,20 @@ class RepoIndexService:
         # _walk already sorts each directory and its children. Avoid first
         # materializing and globally sorting the entire repository path set;
         # this fingerprint runs before the index walk on every lookup.
-        for path in self._walk(project):
+        for path in paths if paths is not None else self._walk(project):
             digest.update(str(path.relative_to(project)).encode())
             try:
-                digest.update(str(path.lstat().st_mode).encode())
-                digest.update(content_digest(path))
+                mode, content = content_snapshot(path)
+                digest.update(str(mode).encode())
+                digest.update(content)
             except OSError:
                 digest.update(b"unreadable")
         return digest.hexdigest()
 
     def _walk(self, project: Path):
-        for directory, dirs, files in os.walk(project, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in _SKIP_DIRS)
-            for name in sorted(files):
-                path = Path(directory) / name
-                if path.suffix in _INTERESTING_SUFFIXES or name == "__manifest__.py":
-                    yield path
+        for path in source_files(project, _SKIP_DIRS):
+            if path.suffix in _INTERESTING_SUFFIXES or path.name == "__manifest__.py":
+                yield path
 
     def _module_root(self, path: Path) -> Path | None:
         current = path if path.is_dir() else path.parent

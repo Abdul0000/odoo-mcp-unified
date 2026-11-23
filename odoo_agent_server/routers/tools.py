@@ -9120,6 +9120,8 @@ async def _dispatch(name: str, args: dict) -> object:
 
 
 async def _dispatch_inner(name: str, args: dict) -> object:
+    # FastAPI only offloads sync REST routes automatically. MCP shares these
+    # handlers from an async route, so blocking handlers are offloaded explicitly.
     if not next((tool.read_only for tool in _TOOL_DESCRIPTORS if tool.name == name), False):
         from ..services.server_control_service import assert_no_maintenance
         assert_no_maintenance()
@@ -9129,7 +9131,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         svc=TaskService()
         if name=='task.open':
             opened=await asyncio.to_thread(svc.open,req)
-            return svc.envelope(svc.read(opened['task_id']))
+            return await asyncio.to_thread(lambda: svc.envelope(svc.read(opened['task_id'])))
         if name=='task.status':
             snapshot=await svc.resume(req.task_id,_dispatch)
             return snapshot
@@ -9162,30 +9164,30 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         }
     if name == "skills.list":
         req = SkillListRequest.model_validate(args)
-        return SkillService().list(req.task_description)
+        return await asyncio.to_thread(lambda: SkillService().list(req.task_description))
     if name == "skills.read":
         req = SkillReadRequest.model_validate(args)
-        return SkillService().read(req.name)
+        return await asyncio.to_thread(lambda: SkillService().read(req.name))
     if name == "artifacts.read":
         req = ArtifactReadRequest.model_validate(args)
-        return JsonStore().read_artifact(req.artifact_id, req.offset, req.max_chars)
+        return await asyncio.to_thread(lambda: JsonStore().read_artifact(req.artifact_id, req.offset, req.max_chars))
     if name == "client.check":
         req = ClientCheckRequest.model_validate(args)
         if req.run_validation:
-            return _start_client_validation(req)
-        return ClientGateService().check(req.client_name, validate=False, force_refresh=req.force_refresh)
+            return await asyncio.to_thread(lambda: _start_client_validation(req))
+        return await asyncio.to_thread(lambda: ClientGateService().check(req.client_name, validate=False, force_refresh=req.force_refresh))
     if name == "workflow.agent_instructions":
         try:
             from ..main import agent_instructions
 
-            return agent_instructions()
+            return await asyncio.to_thread(lambda: agent_instructions())
         except Exception as exc:
             return {"error": str(exc), "fallback": "Call workflow.coding_task_plan for workflow guidance"}
     if name == "workflow.capability_check":
         EmptyRequest.model_validate(args)
-        return capability_check()
+        return await asyncio.to_thread(lambda: capability_check())
     if name == "workflow.coding_task_plan":
-        return coding_task_plan(CodingTaskPlanRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: coding_task_plan(CodingTaskPlanRequest.model_validate(args)))
     if name == "workflow.odoo_code_change":
         return await _workflow_odoo_code_change(OdooCodeChangeRequest.model_validate(args))
     if name == "workflow.resume_continuation":
@@ -9242,7 +9244,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
             max_files=request.max_files,
         )
         if request.include_runtime:
-            result["rea_runtime_registry"] = _rea_runtime_registry(
+            result["rea_runtime_registry"] = await asyncio.to_thread(lambda: _rea_runtime_registry(
                 request.client_name,
                 {
                     "module_name": result["rea_xray"].get("module_name", request.module_name),
@@ -9253,7 +9255,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
                     ],
                     "cross_module_relationships": [],
                 },
-            )
+            ))
         result["inspection_instructions"] = (
             "Use rea_xray.nodes and rea_xray.edges as the static architecture map. "
             "Every edge carries source-path evidence. Runtime registry evidence is separately "
@@ -9487,7 +9489,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
             module_name=result["module_name"],
         )
         runtime_registry = (
-            _rea_runtime_registry(
+            await asyncio.to_thread(lambda: _rea_runtime_registry(
                 request.client_name,
                 {
                     "module_name": result["module_name"],
@@ -9498,7 +9500,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
                     ],
                     "cross_module_relationships": [],
                 },
-            )
+            ))
             if request.client_name else {"status": "skipped", "reason": "client_name not supplied"}
         )
         result["rea_impact"] = await asyncio.to_thread(
@@ -9544,157 +9546,157 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         return result
     if name == "workflow.module_test":
         request = OdooModuleTestRequest.model_validate(args)
-        return ModuleTestService().start(request, self_run)
+        return await asyncio.to_thread(lambda: ModuleTestService().start(request, self_run))
     if name == "workflow.module_install_and_check":
-        return odoo_module_deploy(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoo_module_deploy(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "workflow.frontend_visual_implement":
         return await _workflow_frontend_visual_implement(FrontendVisualImplementRequest.model_validate(args))
     if name == "workflow.smart_tool_router":
-        return smart_tool_router(SmartToolRouteRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: smart_tool_router(SmartToolRouteRequest.model_validate(args)))
     if name == "workflow.repo_index":
-        return repo_index(RepoIndexRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_index(RepoIndexRequest.model_validate(args)))
     if name == "workflow.full_verify":
         return await full_verify(FullVerifyRequest.model_validate(args))
     if name == "workflow.safe_deploy_module":
         return await safe_deploy_module(SafeDeployModuleRequest.model_validate(args))
     if name == "workflow.verify_deployed_module":
-        return verify_deployed_module(DeployedModuleVerifyRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: verify_deployed_module(DeployedModuleVerifyRequest.model_validate(args)))
     if name == "workflow.start_session":
-        return start_session(StartSessionRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: start_session(StartSessionRequest.model_validate(args)))
     if name == "workflow.registry_smoke_test":
-        return registry_smoke_test(RegistrySmokeTestRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: registry_smoke_test(RegistrySmokeTestRequest.model_validate(args)))
     if name == "workflow.restore_last_good_commit":
-        return restore_last_good_commit(RestoreLastGoodCommitRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: restore_last_good_commit(RestoreLastGoodCommitRequest.model_validate(args)))
     if name == "workflow.browser_menu_crawl":
         return await browser_menu_crawl(MenuCrawlerRequest.model_validate(args))
     if name == "workflow.frontend_pattern_preflight":
-        return frontend_pattern_preflight(FrontendPatternPreflightRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: frontend_pattern_preflight(FrontendPatternPreflightRequest.model_validate(args)))
     if name == "qa.self_run":
-        return self_run(SelfRunRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: self_run(SelfRunRequest.model_validate(args)))
     if name == "repo.prepare":
-        return repo_prepare(RepoPrepareRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_prepare(RepoPrepareRequest.model_validate(args)))
     if name == "repo.list_custom_modules":
-        return repo_custom_modules(RepoCustomModulesRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_custom_modules(RepoCustomModulesRequest.model_validate(args)))
     if name == "repo.list":
         req = RepoListRequest.model_validate(args)
-        return RepoService().list_files(req.project_path, req.relative_path, req.max_depth, req.max_items)
+        return await asyncio.to_thread(lambda: RepoService().list_files(req.project_path, req.relative_path, req.max_depth, req.max_items))
     if name == "repo.read":
         req = RepoReadRequest.model_validate(args)
-        return RepoService().read_file(req.project_path, req.relative_path, req.max_bytes)
+        return await asyncio.to_thread(lambda: RepoService().read_file(req.project_path, req.relative_path, req.max_bytes))
     if name == "repo.read_range":
         req = RepoReadRangeRequest.model_validate(args)
-        return RepoService().read_range(req.project_path, req.relative_path, req.start_line, req.max_lines)
+        return await asyncio.to_thread(lambda: RepoService().read_range(req.project_path, req.relative_path, req.start_line, req.max_lines))
     if name == "repo.search":
         req = RepoSearchRequest.model_validate(args)
-        return RepoService().search(req.project_path, req.pattern, req.relative_path, req.max_matches, req.context_lines, req.regex)
+        return await asyncio.to_thread(lambda: RepoService().search(req.project_path, req.pattern, req.relative_path, req.max_matches, req.context_lines, req.regex))
     if name == "repo.write":
-        return repo_write(RepoWriteRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_write(RepoWriteRequest.model_validate(args)))
     if name == "repo.write_many_smart":
-        return repo_write_many_smart(RepoWriteManySmartRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_write_many_smart(RepoWriteManySmartRequest.model_validate(args)))
     if name == "repo.write_many_fast_safe":
-        return repo_write_many_fast_safe(RepoWriteManyFastSafeRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_write_many_fast_safe(RepoWriteManyFastSafeRequest.model_validate(args)))
     if name == "repo.write_many_atomic":
-        return repo_write_many_atomic(RepoWriteManyAtomicRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_write_many_atomic(RepoWriteManyAtomicRequest.model_validate(args)))
     if name == "repo.delete":
-        return repo_delete(RepoDeleteRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_delete(RepoDeleteRequest.model_validate(args)))
     if name == "repo.apply_patch":
-        return repo_apply_patch(RepoPatchRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_apply_patch(RepoPatchRequest.model_validate(args)))
     if name == "repo.apply_patch_atomic":
-        return repo_apply_patch_atomic(RepoAtomicPatchRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_apply_patch_atomic(RepoAtomicPatchRequest.model_validate(args)))
     if name == "repo.clean_pyc":
-        return repo_clean_pyc(RepoCleanPycRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: repo_clean_pyc(RepoCleanPycRequest.model_validate(args)))
     if name == "git.status":
         req = BaseProjectRequest.model_validate(args)
-        return GitService().status(req.project_path)
+        return await asyncio.to_thread(lambda: GitService().status(req.project_path))
     if name == "git.current_branch":
         req = BaseProjectRequest.model_validate(args)
-        return GitService().current_branch(req.project_path)
+        return await asyncio.to_thread(lambda: GitService().current_branch(req.project_path))
     if name == "git.diff":
         req = GitDiffRequest.model_validate(args)
-        return GitService().diff(req.project_path, req.staged, req.timeout_seconds)
+        return await asyncio.to_thread(lambda: GitService().diff(req.project_path, req.staged, req.timeout_seconds))
     if name == "git.commit":
-        return git_commit(GitCommitRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: git_commit(GitCommitRequest.model_validate(args)))
     if name == "git.push":
-        return git_push(GitPushRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: git_push(GitPushRequest.model_validate(args)))
     if name == "odoosh.module_install_ssh":
-        return odoosh_module_install_ssh(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoosh_module_install_ssh(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoosh.health":
         req = ClientOnlyRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).health()
+        return await asyncio.to_thread(lambda: OdooShService(client).health())
     if name == "odoosh.git_status":
         req = ClientOnlyRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).git_status()
+        return await asyncio.to_thread(lambda: OdooShService(client).git_status())
     if name == "odoosh.check_commit":
         req = OdooShCheckCommitRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).check_commit_deployed(req.expected_sha)
+        return await asyncio.to_thread(lambda: OdooShService(client).check_commit_deployed(req.expected_sha))
     if name == "odoosh.wait_for_commit":
-        return odoosh_wait_for_commit(OdooShWaitForCommitRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: odoosh_wait_for_commit(OdooShWaitForCommitRequest.model_validate(args)))
     if name == "odoosh.verify_module_manifest":
-        return odoosh_verify_module_manifest(OdooShVerifyManifestRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: odoosh_verify_module_manifest(OdooShVerifyManifestRequest.model_validate(args)))
     if name == "odoosh.read_core_file":
         req = OdooShCoreFileReadRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).read_core_file(req.base, req.relative_path, req.max_bytes)
+        return await asyncio.to_thread(lambda: OdooShService(client).read_core_file(req.base, req.relative_path, req.max_bytes))
     if name == "odoosh.list_core_files":
         req = OdooShCoreFilesListRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).list_core_files(req.base, req.relative_path, req.max_items)
+        return await asyncio.to_thread(lambda: OdooShService(client).list_core_files(req.base, req.relative_path, req.max_items))
     if name == "odoosh.read_user_file":
         req = OdooShUserFileReadRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).read_user_file(req.relative_path, req.max_bytes)
+        return await asyncio.to_thread(lambda: OdooShService(client).read_user_file(req.relative_path, req.max_bytes))
     if name == "odoosh.list_user_files":
         req = OdooShUserFilesListRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).list_user_files(req.module_name, req.subdir, req.max_items)
+        return await asyncio.to_thread(lambda: OdooShService(client).list_user_files(req.module_name, req.subdir, req.max_items))
     if name == "odoosh.log":
         req = OdooShLogRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).tail_log(req.log_name, req.tail_lines)
+        return await asyncio.to_thread(lambda: OdooShService(client).tail_log(req.log_name, req.tail_lines))
     if name == "odoosh.logs_read":
         req = OdooShLogsReadRequest.model_validate(args)
         ClientGateService().require_validated_client(req.client_name, name)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).logs_read(req)
+        return await asyncio.to_thread(lambda: OdooShService(client).logs_read(req))
     if name == "odoosh.shell_diagnostics":
         req = OdooShShellDiagnosticsRequest.model_validate(args)
         ClientGateService().require_validated_client(req.client_name, name)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).shell_diagnostics(req)
+        return await asyncio.to_thread(lambda: OdooShService(client).shell_diagnostics(req))
     if name == "odoosh.grep_errors":
         req = OdooShCommandRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).grep_errors(req.tail_lines)
+        return await asyncio.to_thread(lambda: OdooShService(client).grep_errors(req.tail_lines))
     if name == "odoosh.error_pack":
         req = OdooShCommandRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
         return await asyncio.to_thread(OdooShService(client).error_pack, req.tail_lines)
     if name == "odoosh.module_deploy_ssh":
-        return odoosh_module_deploy_ssh(OdooShModuleUpdateRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoosh_module_deploy_ssh(OdooShModuleUpdateRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoosh.module_update":
-        return odoosh_module_update(OdooShModuleUpdateRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoosh_module_update(OdooShModuleUpdateRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoosh.query":
         req = OdooShQueryRequest.model_validate(args)
         client = _resolve_query_client(req.client_name)
-        return OdooShService(client).search_read(req.model, req.domain, req.fields, req.limit, req.offset, req.order, req.context, req.timeout_seconds)
+        return await asyncio.to_thread(lambda: OdooShService(client).search_read(req.model, req.domain, req.fields, req.limit, req.offset, req.order, req.context, req.timeout_seconds))
     if name == "odoo.health":
         req = ClientOnlyRequest.model_validate(args)
-        return _odoo_service_for_client(_resolve_query_client(req.client_name)).health()
+        return await asyncio.to_thread(lambda: _odoo_service_for_client(_resolve_query_client(req.client_name)).health())
     if name == "odoo.query":
         request = OdooFunctionalQueryRequest.model_validate(args)
         return await asyncio.to_thread(_odoo_functional_query, request)
     if name == "odoo.module_deploy":
-        return odoo_module_deploy(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoo_module_deploy(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoo.module_status":
         req = OdooModuleRequest.model_validate(args)
-        return _odoo_service_for_client(_resolve_query_client(req.client_name)).module_status(req.module_name)
+        return await asyncio.to_thread(lambda: _odoo_service_for_client(_resolve_query_client(req.client_name)).module_status(req.module_name))
     if name == "odoo.module_install":
-        return odoo_module_install(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoo_module_install(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoo.module_update":
-        return odoo_module_update(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args)))
+        return await asyncio.to_thread(lambda: odoo_module_update(OdooModuleRequest.model_validate(_force_mcp_async_deploy_args(args))))
     if name == "odoo.search_read":
         req = OdooSearchReadRequest.model_validate(args)
         data = await asyncio.to_thread(
@@ -9750,7 +9752,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         return await asyncio.to_thread(FunctionalOperationService().flow_test, req)
     if name == "odoo.mutation_audit":
         req = OdooMutationAuditRequest.model_validate(args)
-        return FunctionalOperationService().audit(req)
+        return await asyncio.to_thread(lambda: FunctionalOperationService().audit(req))
     if name == "browser.pos_flow":
         req = PosFlowCheckRequest.model_validate(args)
         return await CdpBrowserService().run_pos_flow(req)
@@ -9767,20 +9769,20 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         )
     if name == "approvals.list":
         req = LimitRequest.model_validate(args)
-        return JsonStore().list_approvals(limit=req.limit)
+        return await asyncio.to_thread(lambda: JsonStore().list_approvals(limit=req.limit))
     if name == "approvals.request":
         req = ApprovalCreateRequest.model_validate(args)
-        return JsonStore().create_approval(ApprovalRecord(action=req.action, summary=req.summary, payload_preview=req.payload_preview))
+        return await asyncio.to_thread(lambda: JsonStore().create_approval(ApprovalRecord(action=req.action, summary=req.summary, payload_preview=req.payload_preview)))
     if name == "approvals.approve":
         req = ApprovalDecisionRequest.model_validate(args)
         store = JsonStore()
         approval = store.get_approval(req.approval_id)
         if approval.status != ApprovalStatus.pending:
             raise HTTPException(status_code=409, detail=f"Approval {req.approval_id} is {approval.status.value}, not pending.")
-        return store.set_approval_status(req.approval_id, ApprovalStatus.approved, req.reason)
+        return await asyncio.to_thread(lambda: store.set_approval_status(req.approval_id, ApprovalStatus.approved, req.reason))
     if name == "jobs.list":
         req = LimitRequest.model_validate(args)
-        return JsonStore().list_jobs(limit=req.limit)
+        return await asyncio.to_thread(lambda: JsonStore().list_jobs(limit=req.limit))
     if name == "jobs.get":
         req = JobGetRequest.model_validate(args)
         watchdog = WorkflowWatchdogService()
@@ -9820,7 +9822,7 @@ async def _dispatch_inner(name: str, args: dict) -> object:
         return annotated
     if name == "audit.list":
         req = AuditListRequest.model_validate(args)
-        return JsonStore().list_audit(limit=req.limit)
+        return await asyncio.to_thread(lambda: JsonStore().list_audit(limit=req.limit))
     # Fix 3: Resume pipeline from last successful step
     if name == "workflow.resume_job":
         req = ResumeJobRequest.model_validate(args)
@@ -9828,27 +9830,27 @@ async def _dispatch_inner(name: str, args: dict) -> object:
     # Fix 7: Session state persistence
     if name == "session.save_state":
         req = SessionStateSaveRequest.model_validate(args)
-        return JsonStore().save_session_state(req.state, client_name=req.client_name)
+        return await asyncio.to_thread(lambda: JsonStore().save_session_state(req.state, client_name=req.client_name))
     if name == "session.load_state":
         req = SessionStateLoadRequest.model_validate(args)
-        return JsonStore().load_session_state(client_name=req.client_name)
+        return await asyncio.to_thread(lambda: JsonStore().load_session_state(client_name=req.client_name))
     # Fix 10: Auto-install dependencies
     if name == "odoo.ensure_dependencies":
         req = EnsureDependenciesRequest.model_validate(args)
-        return _odoo_service_for_client(_resolve_query_client(req.client_name)).ensure_dependencies(req.module_name)
+        return await asyncio.to_thread(lambda: _odoo_service_for_client(_resolve_query_client(req.client_name)).ensure_dependencies(req.module_name))
     # ---------------------------------------------------------------------------
     # V14 — Self-Learning Agent: Core File Discovery
     # ---------------------------------------------------------------------------
     if name == "workflow.find_core_file":
-        return find_core_file(FindCoreFileRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: find_core_file(FindCoreFileRequest.model_validate(args)))
     if name == "workflow.find_similar_view":
-        return find_similar_view(FindSimilarViewRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: find_similar_view(FindSimilarViewRequest.model_validate(args)))
     if name == "workflow.list_module_files":
-        return list_module_files(ListModuleFilesRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: list_module_files(ListModuleFilesRequest.model_validate(args)))
     if name == "workflow.scope_advice":
-        return scope_advice(ScopeAdviceRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: scope_advice(ScopeAdviceRequest.model_validate(args)))
     if name == "workflow.verify_against_core":
-        return verify_against_core(SyntaxVerifyRequest.model_validate(args))
+        return await asyncio.to_thread(lambda: verify_against_core(SyntaxVerifyRequest.model_validate(args)))
     if name == "workflow.verify_pos_change":
         return await verify_pos_change(PosChangeVerifyRequest.model_validate(args))
     raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
@@ -9881,8 +9883,15 @@ def _resolve_dispatch_return_annotation(node: ast.AST, namespace: dict) -> Any:
     typing.get_type_hints() evaluates those forward references using the
     target callable's own __globals__, which is what we need.
     """
+    if isinstance(node, ast.Await):
+        return _resolve_dispatch_return_annotation(node.value, namespace)
     if not isinstance(node, ast.Call):
         return inspect.Signature.empty
+    if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "asyncio" and node.func.attr == "to_thread" and node.args):
+        callback = node.args[0]
+        target = callback.body if isinstance(callback, ast.Lambda) else ast.Call(func=callback, args=[], keywords=[])
+        return _resolve_dispatch_return_annotation(target, namespace)
     func_node = node.func
     target: Any = None
     try:
@@ -10234,11 +10243,13 @@ def _same_resume_project(left: str | None, right: str | None) -> bool:
 
 def _job_matches_resume_request(job, req: "ResumeJobRequest", state: dict) -> bool:
     request = job.request or {}
+    if req.client_name and str(request.get("client_name") or "").casefold() != req.client_name.casefold():
+        return False
     req_project = request.get("project_path") or state.get("project_path")
     req_module = request.get("module_name") or state.get("module_name")
-    if req.project_path and req_project and not _same_resume_project(str(req_project), req.project_path):
+    if req.project_path and (not req_project or not _same_resume_project(str(req_project), req.project_path)):
         return False
-    if req.module_name and req_module and str(req_module) != req.module_name:
+    if req.module_name and str(req_module or "") != req.module_name:
         return False
     return True
 
@@ -10395,7 +10406,7 @@ def _latest_safe_deploy_job_id(req: "ResumeJobRequest", store: JsonStore) -> str
     if isinstance(saved_job_id, str) and saved_job_id.strip():
         try:
             saved_job = store.get_job(saved_job_id.strip())
-            if _job_matches_resume_request(saved_job, req, state):
+            if saved_job.job_type == "safe_deploy_module" and _job_matches_resume_request(saved_job, req, state):
                 return saved_job.id
         except Exception:
             pass
@@ -10403,16 +10414,17 @@ def _latest_safe_deploy_job_id(req: "ResumeJobRequest", store: JsonStore) -> str
     for job in store.list_jobs(limit=100):
         if job.job_type != "safe_deploy_module":
             continue
-        request = job.request or {}
-        if req.project_path and request.get("project_path") != req.project_path:
-            continue
-        if req.module_name and request.get("module_name") != req.module_name:
+        if not _job_matches_resume_request(job, req, {}):
             continue
         return job.id
     return None
 
 
 async def _resume_job(req: "ResumeJobRequest") -> dict:
+    return await asyncio.to_thread(_resume_job_sync, req)
+
+
+def _resume_job_sync(req: "ResumeJobRequest") -> dict:
     """Fix 3: Resume a safe_deploy_module pipeline from last successful step.
 
     Reads the original job record, finds the last step that succeeded, and
@@ -10433,6 +10445,8 @@ async def _resume_job(req: "ResumeJobRequest") -> dict:
         job = store.get_job(job_id)
     except Exception:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job.job_type != "safe_deploy_module" or not _job_matches_resume_request(job, req, {}):
+        raise HTTPException(409, "Deployment job does not match the requested client, project, or module")
     job = mark_stale_safe_deploy_running_job(job, store)
     if job.status in {JobStatus.queued, JobStatus.running}:
         return {

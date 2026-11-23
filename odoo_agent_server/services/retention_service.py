@@ -207,14 +207,17 @@ class RetentionService:
                 atomic_json(self.state / "task-tombstones" / path.name, {"expired": True})
                 path.unlink(missing_ok=True)
                 self.counts["tasks"] += 1
-        for path in (self.state / "jobs").glob("*.json"):
-            with unlocked(path.with_suffix(".lock")) as acquired:
-                if not acquired:
-                    continue
-                row = self.read(path)
-                if isinstance(row, dict) and row.get("status") not in ACTIVE and self.old(path, row):
-                    path.unlink(missing_ok=True)
-                    self.counts["jobs"] += 1
+        from .store_service import JsonStore
+        job_store = JsonStore()
+        with job_store._file_lock(job_store.job_index_file):
+            for path in (self.state / "jobs").glob("*.json"):
+                with unlocked(path.with_suffix(".lock")) as acquired:
+                    if not acquired:
+                        continue
+                    row = self.read(path)
+                    if isinstance(row, dict) and row.get("status") not in ACTIVE and self.old(path, row):
+                        path.unlink(missing_ok=True)
+                        self.counts["jobs"] += 1
         patterns = ["audit.json", "approvals.json", "functional_mutations.json", "workflow_progress.json", "debug_sessions__*.json", "operation_handoffs__*.json"]
         for pattern in patterns:
             for path in self.state.glob(pattern):

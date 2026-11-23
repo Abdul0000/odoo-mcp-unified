@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 import time
 from typing import Any
 
 import httpx
 
 from .deadline_service import remaining
+from .http_client_pool import odoo_http_clients
 from ..config import settings
 from ..schemas import OdooResult
 from .client_resolver_service import ResolvedClient
@@ -60,6 +63,11 @@ class OdooJsonRpcService:
             return bool(self.client.odoo_verify_ssl)
         return bool(settings.odoo_https_verify_ssl)
 
+    def _http_identity(self) -> str:
+        # No credentials or cookies may cross databases, users or key rotations.
+        values = [self._base_url(), self._db(), self._login(), self._password(), self._api_key()]
+        return hashlib.sha256(json.dumps(values).encode("utf-8")).hexdigest()
+
     def _call(self, service: str, method: str, args: list[Any], timeout_seconds: int) -> Any:
         timeout_seconds = remaining(timeout_seconds)
         if timeout_seconds <= 0:
@@ -74,11 +82,8 @@ class OdooJsonRpcService:
             "id": int(time.time() * 1000),
         }
         read_only = service == "common" or (service == "object" and len(args) > 4 and args[4] in {"search_read", "read_group"})
-        with httpx.Client(
-            timeout=_request_timeout(timeout_seconds, read_only=read_only),
-            verify=self._verify_ssl(),
-        ) as client:
-            response = client.post(f"{base_url}/jsonrpc", json=payload)
+        with odoo_http_clients.acquire(self._http_identity(), verify=self._verify_ssl()) as client:
+            response = client.post(f"{base_url}/jsonrpc", json=payload, timeout=_request_timeout(timeout_seconds, read_only=read_only))
             response.raise_for_status()
             data = response.json()
         if data.get("error"):
@@ -118,11 +123,8 @@ class OdooJsonRpcService:
         if self._db():
             headers["X-Odoo-Database"] = str(self._db())
         read_only = method in {"search_read", "read_group"}
-        with httpx.Client(
-            timeout=_request_timeout(timeout_seconds, read_only=read_only),
-            verify=self._verify_ssl(),
-        ) as client:
-            response = client.post(f"{base_url}/json/2/{model}/{method}", headers=headers, json=params)
+        with odoo_http_clients.acquire(self._http_identity(), verify=self._verify_ssl()) as client:
+            response = client.post(f"{base_url}/json/2/{model}/{method}", headers=headers, json=params, timeout=_request_timeout(timeout_seconds, read_only=read_only))
             response.raise_for_status()
             if not response.content:
                 return None

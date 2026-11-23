@@ -7,13 +7,16 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
-from threading import Lock
+from contextlib import contextmanager
+from threading import RLock
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
 from fastapi import HTTPException
 
 from ..config import settings
+from .client_settings_store import atomic_json
+from .store_service import JsonStore
 
 
 @dataclass(frozen=True)
@@ -92,7 +95,7 @@ class OAuthStore:
     Replace with PostgreSQL/Redis for multi-worker production deployments.
     """
 
-    _lock = Lock()
+    _lock = RLock()
 
     def __init__(self) -> None:
         self.root = settings.state_path
@@ -108,8 +111,8 @@ class OAuthStore:
                 return self._default_state()
             try:
                 data = json.loads(self.file.read_text(encoding="utf-8") or "{}")
-            except json.JSONDecodeError:
-                return self._default_state()
+            except json.JSONDecodeError as exc:
+                raise HTTPException(503, "OAuth state is unreadable; repair storage before retrying") from exc
             state = self._default_state()
             if isinstance(data, dict):
                 state.update({k: v for k, v in data.items() if k in state and isinstance(v, dict)})
@@ -118,7 +121,15 @@ class OAuthStore:
     def _write(self, state: dict[str, Any]) -> None:
         with self._lock:
             self.root.mkdir(parents=True, exist_ok=True)
-            self.file.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+            atomic_json(self.file, state)
+
+    @contextmanager
+    def _transaction(self):
+        # One lock covers read/validate/write, including separate API workers.
+        with self._lock, JsonStore()._file_lock(self.file):
+            state = self._read()
+            yield state
+            self._write(state)
 
     def register_client(self, metadata: dict[str, Any]) -> dict[str, Any]:
         redirect_uris = metadata.get("redirect_uris") or []
@@ -139,9 +150,8 @@ class OAuthStore:
             "scope": metadata.get("scope") or settings.oauth_default_scope,
             "token_endpoint_auth_method": metadata.get("token_endpoint_auth_method") or "none",
         }
-        state = self._read()
-        state["clients"][client_id] = record
-        self._write(state)
+        with self._transaction() as state:
+            state["clients"][client_id] = record
         return record
 
     def get_client(self, client_id: str) -> OAuthClient:
@@ -197,17 +207,16 @@ class OAuthStore:
             raise HTTPException(status_code=400, detail="PKCE S256 code_challenge is required")
 
         code = "code_" + secrets.token_urlsafe(32)
-        state = self._read()
-        state["codes"][code] = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "scope": scope or settings.oauth_default_scope,
-            "code_challenge": code_challenge,
-            "code_challenge_method": code_challenge_method,
-            "expires_at": int(time.time()) + settings.oauth_authorization_code_ttl_seconds,
-            "used": False,
-        }
-        self._write(state)
+        with self._transaction() as state:
+            state["codes"][code] = {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "scope": scope or settings.oauth_default_scope,
+                "code_challenge": code_challenge,
+                "code_challenge_method": code_challenge_method,
+                "expires_at": int(time.time()) + settings.oauth_authorization_code_ttl_seconds,
+                "used": False,
+            }
         return code
 
     def exchange_code(
@@ -222,23 +231,22 @@ class OAuthStore:
         client = self.get_client(client_id)
         _validate_client_secret(client, client_secret)
 
-        state = self._read()
-        record = state["codes"].get(code)
-        if not record:
-            raise HTTPException(status_code=400, detail="Invalid authorization code")
-        if record.get("used"):
-            raise HTTPException(status_code=400, detail="Authorization code already used")
-        if int(record.get("expires_at", 0)) < int(time.time()):
-            raise HTTPException(status_code=400, detail="Authorization code expired")
-        if record.get("client_id") != client_id or record.get("redirect_uri") != redirect_uri:
-            raise HTTPException(status_code=400, detail="Authorization code client or redirect mismatch")
-        if not _verify_pkce_s256(code_verifier, record.get("code_challenge", "")):
-            raise HTTPException(status_code=400, detail="Invalid PKCE code_verifier")
+        with self._transaction() as state:
+            record = state["codes"].get(code)
+            if not record:
+                raise HTTPException(status_code=400, detail="Invalid authorization code")
+            if record.get("used"):
+                raise HTTPException(status_code=400, detail="Authorization code already used")
+            if int(record.get("expires_at", 0)) < int(time.time()):
+                raise HTTPException(status_code=400, detail="Authorization code expired")
+            if record.get("client_id") != client_id or record.get("redirect_uri") != redirect_uri:
+                raise HTTPException(status_code=400, detail="Authorization code client or redirect mismatch")
+            if not _verify_pkce_s256(code_verifier, record.get("code_challenge", "")):
+                raise HTTPException(status_code=400, detail="Invalid PKCE code_verifier")
 
-        record["used"] = True
-        state["codes"][code] = record
-        token_payload = self._issue_tokens(state, client_id=client_id, scope=record.get("scope") or settings.oauth_default_scope)
-        self._write(state)
+            record["used"] = True
+            state["codes"][code] = record
+            token_payload = self._issue_tokens(state, client_id=client_id, scope=record.get("scope") or settings.oauth_default_scope)
         return token_payload
 
     def refresh_access_token(
@@ -260,14 +268,13 @@ class OAuthStore:
 
         client = self.get_client(client_id)
         _validate_client_secret(client, client_secret)
-        state = self._read()
-        record = state["refresh_tokens"].get(refresh_token)
-        if not record or record.get("client_id") != client_id:
-            raise HTTPException(status_code=400, detail="Invalid refresh_token")
-        if int(record.get("expires_at", 0)) < int(time.time()):
-            raise HTTPException(status_code=400, detail="Refresh token expired")
-        token_payload = self._issue_tokens(state, client_id=client_id, scope=record.get("scope") or settings.oauth_default_scope, reuse_refresh_token=refresh_token)
-        self._write(state)
+        with self._transaction() as state:
+            record = state["refresh_tokens"].get(refresh_token)
+            if not record or record.get("client_id") != client_id:
+                raise HTTPException(status_code=400, detail="Invalid refresh_token")
+            if int(record.get("expires_at", 0)) < int(time.time()):
+                raise HTTPException(status_code=400, detail="Refresh token expired")
+            token_payload = self._issue_tokens(state, client_id=client_id, scope=record.get("scope") or settings.oauth_default_scope, reuse_refresh_token=refresh_token)
         return token_payload
 
     def _issue_tokens(

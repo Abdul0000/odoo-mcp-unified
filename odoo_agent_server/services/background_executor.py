@@ -38,3 +38,24 @@ def submit_background(callback: Callable[[], Any]) -> Future[Any]:
         raise
     future.add_done_callback(lambda _: capacity.release())
     return future
+
+
+def submit_owned_background(callback, store, job_id, *, submit=None, approval=None, approval_id=None):
+    """A rejected submission must never leave a job or approval running."""
+    from ..schemas import JobStatus
+
+    try:
+        return (submit or submit_background)(callback)
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
+        try:
+            store.finish_job(store.get_job(job_id), JobStatus.failed, {
+                "status": "operation_not_started",
+                "error_code": detail.get("error_code", "background_submission_failed"),
+                "retry_after_seconds": detail.get("retry_after_seconds", 5),
+                "error": str(exc), "success_allowed": False, "completion_required": False,
+            })
+        finally:
+            if approval:
+                approval.mark_failed(approval_id, "Background worker could not be submitted")
+        raise

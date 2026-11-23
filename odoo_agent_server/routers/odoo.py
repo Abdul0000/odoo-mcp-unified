@@ -24,7 +24,7 @@ from ..services.store_service import JsonStore
 from ..services.workflow_guard_service import safe_deploy_shell_block
 from ..services.client_gate_service import ClientGateService
 from ..services.client_resolver_service import ClientResolverService
-from ..services.background_executor import submit_background
+from ..services.background_executor import submit_background, submit_owned_background
 
 router = APIRouter(prefix="/odoo", tags=["odoo"], dependencies=[AuthDependency])
 
@@ -321,7 +321,7 @@ def odoo_module_install(payload: OdooModuleRequest) -> OdooResult:
         approval.finalize_status(payload.approval_id, result.status == "ok", "odoo.module_install succeeded", "odoo.module_install failed")
         store.log_audit("odoo.module_install", result.status, payload.module_name)
 
-    submit_background(_bg)
+    submit_owned_background(_bg, store, job.id, submit=submit_background, approval=approval, approval_id=payload.approval_id)
     return _background_job_response(store, job, payload, "Install started.")
 
 
@@ -348,7 +348,7 @@ def odoo_module_update(payload: OdooModuleRequest) -> OdooResult:
         approval.finalize_status(payload.approval_id, result.status == "ok", "odoo.module_update succeeded", "odoo.module_update failed")
         store.log_audit("odoo.module_update", result.status, payload.module_name)
 
-    submit_background(_bg)
+    submit_owned_background(_bg, store, job.id, submit=submit_background, approval=approval, approval_id=payload.approval_id)
     return _background_job_response(store, job, payload, "Upgrade started.")
 
 
@@ -402,7 +402,7 @@ def start_odoo_module_deploy_job(
     if run_inline:
         _bg()
     else:
-        submit_background(_bg)
+        submit_owned_background(_bg, store, job.id, submit=submit_background, approval=approval, approval_id=payload.approval_id)
     return _background_job_response(store, job, payload, "Deploy started.")
 
 

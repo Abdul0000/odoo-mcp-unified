@@ -74,7 +74,7 @@ from ..services.path_service import resolve_allowed_path
 from ..services.browser_cdp_service import CdpBrowserService
 from ..services.repo_service import RepoService
 from ..services.store_service import JsonStore
-from ..services.background_executor import submit_background
+from ..services.background_executor import submit_background, submit_owned_background
 from ..services.core_finder_service import CoreFinderService          # V14
 from ..services.prewrite_gate_service import PreWriteGateService
 from ..services.syntax_verifier_service import SyntaxVerifierService  # V14+
@@ -611,7 +611,7 @@ async def full_verify(payload: FullVerifyRequest) -> WorkflowReport:
 
     if payload.clean_pyc:
         try:
-            result = RepoService().clean_pyc(
+            result = await asyncio.to_thread(RepoService().clean_pyc,
                 str(project_path),
                 payload.module_root_rel or payload.module_name,
             )
@@ -620,7 +620,7 @@ async def full_verify(payload: FullVerifyRequest) -> WorkflowReport:
             step("clean_pyc", "failed", error=str(exc))
             status_flags.append("failed")
 
-    qa_report = self_run(payload)
+    qa_report = await asyncio.to_thread(self_run, payload)
     step("qa_self_run", qa_report.status, qa_report)
     if qa_report.status == "failed":
         status_flags.append("failed")
@@ -628,7 +628,7 @@ async def full_verify(payload: FullVerifyRequest) -> WorkflowReport:
         status_flags.append("warning")
 
     if payload.include_git_diff:
-        git_result = GitService().diff(str(project_path), staged=False, timeout_seconds=30)
+        git_result = await asyncio.to_thread(GitService().diff, str(project_path), staged=False, timeout_seconds=30)
         step("git_diff", "passed" if git_result.exit_code == 0 else "warning", git_result)
         if git_result.exit_code != 0:
             status_flags.append("warning")
@@ -636,7 +636,7 @@ async def full_verify(payload: FullVerifyRequest) -> WorkflowReport:
     if payload.include_odoosh_errors:
         try:
             client = ClientResolverService().resolve_client(client_name=payload.client_name, project_path=payload.project_path, require_complete=False)
-            err_result = _odoosh_service_for_client(client).grep_errors(tail_lines=300)
+            err_result = await asyncio.to_thread(_odoosh_service_for_client(client).grep_errors, tail_lines=300)
             status_ = "passed" if err_result.exit_code == 0 else "warning"
             step("odoosh_grep_errors", status_, err_result)
             if "Traceback" in err_result.stdout or "ERROR" in err_result.stdout:
@@ -647,7 +647,7 @@ async def full_verify(payload: FullVerifyRequest) -> WorkflowReport:
 
     if payload.include_odoo_module_status:
         client = ClientResolverService().resolve_client(client_name=payload.client_name, project_path=payload.project_path, require_complete=False)
-        result = _odoo_service_for_client(client).module_status(payload.module_name)
+        result = await asyncio.to_thread(_odoo_service_for_client(client).module_status, payload.module_name)
         step("odoo_module_status", "passed" if result.status == "ok" else "warning", result)
         if result.status != "ok":
             status_flags.append("warning")
@@ -816,7 +816,7 @@ async def safe_deploy_module(payload: SafeDeployModuleRequest) -> WorkflowReport
             },
         )
 
-    try:
+    def _start():
         approval = ApprovalService()
         approval.ensure_allowed("workflow.safe_deploy_module", payload.approval_id, payload.model_dump(exclude={"approval_id"}, mode="json"))
 
@@ -880,7 +880,14 @@ async def safe_deploy_module(payload: SafeDeployModuleRequest) -> WorkflowReport
                     # leaking background exception handling back to the MCP stream.
                     pass
 
-        submit_background(_background)
+        submit_owned_background(_background, store, job.id, submit=submit_background, approval=approval, approval_id=payload.approval_id)
+        return store, job
+
+    try:
+        started = await asyncio.to_thread(_start)
+        if isinstance(started, WorkflowReport):
+            return started
+        store, job = started
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -2885,7 +2892,7 @@ async def verify_pos_change(payload: PosChangeVerifyRequest) -> PosChangeVerifyR
         fix_cycle=payload.fix_cycle,
         project_path=payload.project_path,
     )
-    static_result = SyntaxVerifierService().verify(static_request)
+    static_result = await asyncio.to_thread(SyntaxVerifierService().verify, static_request)
 
     pos_flow_result = None
     is_pos = _looks_pos_related(payload.written_files)
