@@ -261,7 +261,7 @@ def _ensure_provider_control_envelope(value: Any, *, is_error: bool = False) -> 
         state_class = "action_required"
     elif explicit_state:
         state_class = explicit_state
-    elif completion_required and input_required:
+    elif input_required:
         state_class = "input_required"
     elif completion_required and next_call:
         called_tool = internal_tool_name(str(next_call.get("tool") or ""))
@@ -1104,11 +1104,8 @@ async def _handle_shell(
             {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {
-                    # Clients must refresh the tool manifest after a connector
-                    # update/redeploy. Advertising listChanged avoids stale
-                    # manifests that produce "Resource not found" for newly
-                    # registered composite workflows.
-                    "tools": {"listChanged": True},
+                    # Headerless compatibility has no notification channel.
+                    "tools": {"listChanged": False},
                     "prompts": {"listChanged": False},
                 },
                 "serverInfo": {"name": "odoo-mcp-agent-connector", "version": "1.8.0"},
@@ -1426,6 +1423,13 @@ async def grok_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str
 @router.get("/system-prompt")
 def mcp_system_prompt() -> dict[str, str]:
     return shared_prompt_payload()
+
+
+@router.get("/metrics")
+def mcp_operation_metrics() -> dict[str, Any]:
+    """Authenticated bounded counters; no arguments, credentials or client data."""
+    from ..services.mcp_telemetry import metrics_snapshot
+    return {"scope": "api_process", "tools": metrics_snapshot()}
 
 
 @router.get("/client-check-prompt")

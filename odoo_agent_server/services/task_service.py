@@ -128,23 +128,19 @@ class TaskService:
             raise HTTPException(503, "Task checkpoint is unreadable; inspect preserved state.") from None
 
     def save(self, task):
+        from .mcp_telemetry import correlation, phase_event
+        if correlation():
+            task.setdefault("trace_context", correlation())
         task["updated_at"] = now()
         atomic_json(self.path(task["task_id"]), task)
+        step = next(reversed(task.get("steps", {}).values()), {})
+        phase_event("task." + str(step.get("tool") or "checkpoint") + "." + str(step.get("status") or "saved"),
+                    task_id=task["task_id"])
 
     async def checkpoint(self, task):
         """Keep disk I/O off the loop without releasing ownership mid-write."""
-        writer = asyncio.create_task(asyncio.to_thread(self.save, task))
-        cancelled = None
-        while not writer.done():
-            try:
-                await asyncio.shield(writer)
-            except asyncio.CancelledError as exc:
-                # A cancelled HTTP request must drain its durable write before
-                # the task lock is released or another request can change state.
-                cancelled = exc
-        writer.result()
-        if cancelled is not None:
-            raise cancelled
+        from .async_io import durable_thread_call
+        await durable_thread_call(self.save, task)
 
     def open(self, request):
         client = ClientAdminService()._client(request.client_name)

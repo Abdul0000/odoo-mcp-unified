@@ -6,6 +6,7 @@ JSON-RPC integrations continue through the compatibility routes.
 from __future__ import annotations
 
 import hashlib
+import asyncio
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
@@ -16,7 +17,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolRequestParams, CallToolResult, GetPromptRequestParams,
-    GetPromptResult, ListPromptsResult, ListResourcesResult, ListToolsResult,
+    GetPromptResult, ListPromptsResult, ListResourcesResult, ListResourceTemplatesResult, ListToolsResult,
+    ElicitRequest, ElicitRequestFormParams, InputRequiredResult,
     PaginatedRequestParams, Prompt, PromptMessage, ReadResourceRequestParams,
     ReadResourceResult, Resource, TextContent, TextResourceContents, Tool,
 )
@@ -30,6 +32,10 @@ from .config import settings
 from .routers import mcp as bridge
 from .services.prompt_service import load_client_check_system_prompt, load_mcp_system_prompt
 from .services.runtime_identity_service import SERVICE_VERSION
+from .services.mcp_telemetry import rpc_operation
+from .services.mcp_clarification_service import McpClarificationService, digest
+from .services.client_settings_store import atomic_json
+from .services.async_io import durable_thread_call
 
 
 _PROMPTS = {
@@ -73,14 +79,85 @@ async def _list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams 
     profile, minimal = _profile(ctx)
     return ListToolsResult(tools=[
         Tool.model_validate(item) for item in bridge._cached_tools_list(profile, minimal=minimal)
-    ])
+    ], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
-async def _call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult:
+async def _call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult | InputRequiredResult:
     # Profiles change discovery only. The shared provider policy still prevents
     # hidden low-level tools from bypassing workflow/verification guardrails.
-    result = await bridge.call_tool_result(params.name, params.arguments or {}, "provider")
-    return CallToolResult.model_validate(result)
+    async with rpc_operation(ctx, params.name) as info:
+        if params.request_state is not None:
+            result = await _resume_clarification(ctx, params)
+        elif params.input_responses is not None:
+            raise _invalid("inputResponses requires its original requestState")
+        else:
+            result = await bridge.call_tool_result(params.name, params.arguments or {}, "provider")
+        structured = result.get("structuredContent") or {}
+        info.update(is_error=result.get("isError", False), **{
+            key: structured[key] for key in ("task_id", "job_id", "operation_id", "process_id", "workspace_id")
+            if key in structured
+        })
+        capabilities = ctx.session.client_capabilities
+        elicitation = capabilities.elicitation if capabilities else None
+        if (params.request_state is None and ctx.protocol_version >= "2026-07-28"
+                and elicitation is not None and elicitation.form is not None):
+            candidate = McpClarificationService.continuation(structured)
+            if candidate:
+                question, call, field = candidate
+                service = McpClarificationService()
+                try:
+                    state = await asyncio.to_thread(service.issue, _principal(ctx), params.name, params.arguments or {}, call, field, result)
+                except MCPError:
+                    state = None  # Keep the custom input flow on admission contention.
+                if state:
+                    return InputRequiredResult(request_state=state, input_requests={
+                        "business_clarification": ElicitRequest(params=ElicitRequestFormParams(
+                            message=str(question.get("prompt") or "Clarify the requested business behavior")[:2000],
+                            requested_schema={"type": "object", "properties": {"answer": {
+                                "type": "string", "title": "Your answer", "minLength": 1, "maxLength": 4000,
+                            }}, "required": ["answer"]},
+                        )),
+                    })
+        return CallToolResult.model_validate(result)
+
+
+def _principal(ctx):
+    user = ctx.request.scope.get("user") if ctx.request else None
+    if not isinstance(user, AuthenticatedUser):
+        raise _invalid("Clarification requires an authenticated request")
+    return user.access_token.client_id
+
+
+async def _resume_clarification(ctx, params):
+    service = McpClarificationService()
+    # claim's nonblocking flock remains held until the durable receipt exists.
+    # A cancellation/crash leaves dispatching, never an automatically replayable mutation.
+    with service.claim(params.request_state, _principal(ctx), params.name, params.arguments or {}) as (path, record):
+        response = (params.input_responses or {}).get("business_clarification")
+        if response is None or not hasattr(response, "action"):
+            raise _invalid("Missing business clarification response")
+        answer_fingerprint = digest({"action": response.action, "content": response.content})
+        if record["phase"] == "completed":
+            if record["answer_fingerprint"] != answer_fingerprint:
+                raise _invalid("Clarification already completed with a different answer")
+            return record["receipt"]
+        if response.action != "accept":
+            result = record["fallback"]
+        else:
+            answer = (response.content or {}).get("answer")
+            if not isinstance(answer, str) or not 1 <= len(answer.strip()) <= 4000:
+                raise _invalid("Clarification answer must contain 1-4000 characters")
+            call = service.answered_call(record, answer.strip())
+            record["phase"] = "dispatching"
+            await _durable_clarification_write(path, record)
+            result = await bridge.call_tool_result(call["tool"], call["arguments"], "provider")
+        record.update(phase="completed", receipt=result, answer_fingerprint=answer_fingerprint)
+        await _durable_clarification_write(path, record)
+        return result
+
+
+async def _durable_clarification_write(path, record):
+    await durable_thread_call(atomic_json, path, record)
 
 
 async def _list_prompts(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListPromptsResult:
@@ -88,7 +165,7 @@ async def _list_prompts(ctx: ServerRequestContext, params: PaginatedRequestParam
     return ListPromptsResult(prompts=[
         Prompt(name=name, title=title, description=description, arguments=[])
         for name, (title, description, _) in _PROMPTS.items()
-    ])
+    ], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
 async def _get_prompt(ctx: ServerRequestContext, params: GetPromptRequestParams) -> GetPromptResult:
@@ -103,22 +180,27 @@ async def _get_prompt(ctx: ServerRequestContext, params: GetPromptRequestParams)
     ])
 
 
+async def _list_resource_templates(ctx, params):
+    _no_cursor(params)
+    return ListResourceTemplatesResult(resource_templates=[], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
+
+
 async def _list_resources(ctx: ServerRequestContext, params: PaginatedRequestParams | None) -> ListResourcesResult:
     _no_cursor(params)
     return ListResourcesResult(resources=[
         Resource(uri=uri, name=name, title=_PROMPTS[name][0],
                  description=_PROMPTS[name][1], mime_type="text/plain")
         for uri, name in _RESOURCES.items()
-    ])
+    ], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
 async def _read_resource(ctx: ServerRequestContext, params: ReadResourceRequestParams) -> ReadResourceResult:
     name = _RESOURCES.get(params.uri)
     if name is None:
-        raise MCPError(code=-32002, message="Resource not found")
+        raise MCPError(code=-32602 if ctx.protocol_version >= "2026-07-28" else -32002, message="Resource not found")
     return ReadResourceResult(contents=[TextResourceContents(
         uri=params.uri, mime_type="text/plain", text=_PROMPTS[name][2](),
-    )])
+    )], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
 server = Server(
@@ -131,6 +213,7 @@ server = Server(
     on_list_tools=_list_tools, on_call_tool=_call_tool,
     on_list_prompts=_list_prompts, on_get_prompt=_get_prompt,
     on_list_resources=_list_resources, on_read_resource=_read_resource,
+    on_list_resource_templates=_list_resource_templates,
 )
 
 
@@ -155,8 +238,8 @@ def create_sdk_app():
     # streaming/cancellation and bounded legacy sessions; durable task/job
     # state remains in the existing services, independent of these sessions.
     return server.streamable_http_app(
-        stateless_http=False, json_response=False, max_sessions=256,
-        session_idle_timeout=300, transport_security=transport_security(),
+        stateless_http=False, json_response=False, max_sessions=settings.mcp_max_sessions,
+        session_idle_timeout=settings.mcp_session_idle_seconds, transport_security=transport_security(),
     )
 
 

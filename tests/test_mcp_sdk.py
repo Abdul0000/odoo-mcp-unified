@@ -127,7 +127,7 @@ def test_sdk_prompts_and_resources_are_readable_and_unknown_uris_cannot_read_fil
             prompt = rpc(client, "prompts/get", {"name": resource["name"]}).json()["result"]
             assert text["mimeType"] == "text/plain"
             assert text["text"] == prompt["messages"][0]["content"]["text"]
-        assert rpc(client, "resources/read", {"uri": "file:///etc/passwd"}).json()["error"]["code"] == -32002
+        assert rpc(client, "resources/read", {"uri": "file:///etc/passwd"}).json()["error"]["code"] == -32602
         assert rpc(client, "prompts/get", {"name": "missing"}).json()["error"]["code"] == -32602
 
 

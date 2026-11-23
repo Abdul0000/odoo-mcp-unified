@@ -28,6 +28,7 @@ each test container is limited to 128 MB. The report includes task/command laten
 queue wait and memory measurements. It never pushes, deploys or queries Odoo.
 
 Oracle task execution: see [Execution worker setup](docs/EXECUTION_WORKER.md).
+Advanced MCP behavior: [progress, caching, clarification and deployment checks](docs/MCP_SDK.md).
 The optional execution lane adds isolated task clones, file tools, Docker commands
 with polling/stdin/cancellation, and verified Git publishing. ChatGPT supplies
 reasoning over MCP: no backend model key or database is required. Enable the

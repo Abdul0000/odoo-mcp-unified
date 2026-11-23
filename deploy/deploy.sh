@@ -108,6 +108,15 @@ for ((i=0; i<HEALTH_TIMEOUT; i++)); do
   sleep 1
 done
 if [[ "$healthy" != 1 ]]; then echo "Health check failed for $COMMIT" >&2; false; fi
+# Read-only SDK checks run against the same authenticated transport users reach.
+# A failure is still inside the rollback trap. Secrets stay in the env file and
+# are never passed on the command line or into the regression-test container.
+(cd "$RELEASE" && "$VENV/bin/python" -m deploy.mcp_transport_check \
+  --env-file /etc/odoo-mcp/odoo-mcp.env --url "${HEALTH_URL%/health}/mcp" --expected-commit "$COMMIT")
+if [[ "${DEPLOY_PUBLIC_MCP_CHECK:-1}" == 1 ]]; then
+  (cd "$RELEASE" && "$VENV/bin/python" -m deploy.mcp_transport_check \
+    --env-file /etc/odoo-mcp/odoo-mcp.env --expected-commit "$COMMIT")
+fi
 trap - ERR
 printf '%s\n' "$COMMIT" > "$ROOT/deploy/last-successful-commit"
 echo "DEPLOY_SUCCESS commit=$COMMIT"

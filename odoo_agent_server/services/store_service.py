@@ -132,12 +132,16 @@ class JsonStore:
 
     def update_workflow_progress(self, operation_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         """Atomically merge one bounded, secret-free workflow progress record."""
+        from .mcp_telemetry import correlation
+        origin = correlation()
         def update(rows: list[dict[str, Any]]) -> dict[str, Any]:
             index = next(
                 (idx for idx, row in enumerate(rows) if row.get("operation_id") == operation_id),
                 None,
             )
             record = dict(rows[index]) if index is not None else {"operation_id": operation_id}
+            if origin:
+                record.setdefault("trace_context", origin)
             record.update(changes)
             if index is None:
                 rows.append(record)
@@ -147,7 +151,11 @@ class JsonStore:
             del rows[:-50]
             return dict(record)
 
-        return self._update_list(self.workflow_progress_file, update)
+        record = self._update_list(self.workflow_progress_file, update)
+        from .mcp_telemetry import phase_event
+        if "current_phase" in changes:
+            phase_event(str(changes["current_phase"]), origin=record.get("trace_context"), operation_id=operation_id)
+        return record
 
     def get_workflow_progress(self, operation_id: str) -> dict[str, Any] | None:
         for row in self._read_list(self.workflow_progress_file):
@@ -219,6 +227,8 @@ class JsonStore:
         self._write_job(job)
         self._prune_job_files()
         self.log_audit("job.create", job.status.value, job.job_type, {"job_id": job.id})
+        from .mcp_telemetry import phase_event
+        phase_event("job." + job.status.value, origin=job.trace_context, job_id=job.id)
         return job
 
     def list_jobs(self, limit: int = 100) -> list[JobRecord]:
@@ -308,6 +318,8 @@ class JsonStore:
         if job.status not in {JobStatus.queued, JobStatus.running}:
             self._prune_job_files()
             self.log_audit("job.update", job.status.value, job.job_type, {"job_id": job.id})
+        from .mcp_telemetry import phase_event
+        phase_event("job." + job.status.value, origin=job.trace_context, job_id=job.id)
         return job
 
     def _job_path(self, job_id: str) -> Path:
@@ -317,6 +329,9 @@ class JsonStore:
         return self.jobs_dir / f"{value}.json"
 
     def _write_job(self, job: JobRecord) -> None:
+        from .mcp_telemetry import correlation
+        if not job.trace_context:
+            job.trace_context = correlation()
         path = self._job_path(job.id)
         payload = job.model_dump_json()
         with self._file_lock(self.job_index_file):

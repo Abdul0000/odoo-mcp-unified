@@ -2080,6 +2080,7 @@ class JobRecord(BaseModel):
     request: dict[str, Any] = Field(default_factory=dict)
     steps: list[JobStep] = Field(default_factory=list)
     result: Any = None
+    trace_context: dict[str, str] = Field(default_factory=dict)
 
     @computed_field  # type: ignore[misc]
     @property

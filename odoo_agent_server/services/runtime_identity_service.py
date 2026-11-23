@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-SERVICE_VERSION = "1.8.1"
+SERVICE_VERSION = "1.9.0"
 _STARTED_AT = datetime.now(timezone.utc).isoformat()
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _COMMIT_ENV_KEYS = (

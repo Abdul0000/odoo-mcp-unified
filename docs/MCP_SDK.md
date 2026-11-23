@@ -45,6 +45,8 @@ supports cancellation in both automatic and legacy clients. Legacy transport
 sessions are bounded to 256 with a five-minute idle timeout and bound to the
 validated credential through an opaque hash. The same API key works via bearer
 or API-key headers; no new scopes or user approvals are introduced.
+`ODOO_AGENT_MCP_MAX_SESSIONS` and `ODOO_AGENT_MCP_SESSION_IDLE_SECONDS` tune these
+limits. Saturation returns 503 rather than creating unbounded sessions.
 
 Legacy session requests must reach the same API worker; the shipped deployment
 runs one API worker. Configure session affinity before scaling that API behind
@@ -75,3 +77,68 @@ and configure `Authorization: Bearer <token>` (or `X-API-Key`). Test initializat
 the task-profile manifest, `connector_health`, prompt retrieval and resource reads.
 Use an approved test client/repository for any mutation; Inspector checks supplement
 the regression suite.
+
+## Progress, caching and correlation
+
+Active RPCs stream actual workflow phases, job transitions and durable task
+checkpoints through the SDK's request-scoped progress API. Progress counts phase
+events, not invented percentages; totals are omitted. A bounded queue coalesces
+repeated phases and `ODOO_AGENT_MCP_PROGRESS_INTERVAL_MS` throttles delivery.
+Notifications stop when the RPC ends, including when a detached job continues.
+Existing task/job polling remains the recovery mechanism for background work.
+
+Modern catalogs and instruction resources return private cache hints, configured
+by `ODOO_AGENT_MCP_CACHE_TTL_SECONDS` (60 seconds by default; zero disables client
+caching). Server manifest caches immediately invalidate on settings changes;
+client caches may remain valid until their bounded TTL expires. Keep profiles
+stable for a client connection; use different endpoint URLs such as
+`/mcp?profile=task` for persistent caches. No subscription invalidation is promised.
+Resource error codes follow the negotiated version; an empty resource-template
+catalog is supported. Headerless compatibility advertises no list-change channel.
+
+Secret-free JSON operation logs contain request/trace IDs, tool names, outcomes,
+durations and related task/job/operation IDs. Arguments, file contents, credentials
+and opaque clarification handles are excluded. Trace correlation persists with
+job, task and workflow records. The SDK's OpenTelemetry span is used when an
+application tracing provider exists; otherwise a local correlation ID is generated.
+No external collector is required. `GET /mcp/metrics` uses existing token auth and
+returns bounded process counters, cancellations, errors and recent p95 durations.
+Counters reset on API restart; durable workflow phase/queue timings remain stored.
+
+## Standard business clarification
+
+Modern clients declaring form elicitation can receive a standard
+`InputRequiredResult` for a genuine business `clarification_answer`. The SDK
+client collects the answer and retries the original call with `inputResponses`
+and its opaque `requestState`. Unsupported clients retain custom `input_request`
+and `next_call`. Technical argument generation and approval/authorization gates
+are not converted to forms and do not introduce new authentication requirements.
+
+Clarification handles reference server-private records, expire after ten minutes,
+and bind to the authenticated credential and original tool arguments. Only a
+server-generated continuation can execute. Writes are durable before dispatch;
+completed responses are saved for exact retry replay. A cancelled or crashed
+dispatch requires existing task/job reconciliation and cannot be automatically
+replayed. Admission is bounded to 256 records with bounded lock buckets; oversized
+continuations use the existing custom flow. No session affinity is needed for
+these records when API workers share the same supported durable filesystem.
+
+## Deployment checks and scaling
+
+`python -m pytest -o addopts='' tests/test_mcp_advanced.py` adds real HTTP progress,
+standard clarification with an official client, replay/tamper/cancellation checks,
+restart recovery, session saturation/expiry and deployment-check coverage.
+
+`python -m deploy.mcp_transport_check --env-file /etc/odoo-mcp/odoo-mcp.env`
+checks the configured public HTTPS endpoint with automatic and legacy SDK
+clients, reconnects, SSE, private cache hints, resources and API-key auth. It makes
+no mutations. Configure `ODOO_AGENT_PUBLIC_BASE_URL` (or the existing OAuth issuer)
+to the real proxy hostname. The deployment script checks loopback and public HTTPS
+after restart, before clearing its rollback trap. Secrets are read from the env
+file and never printed or placed in command-line arguments.
+
+The shipped deployment keeps one API worker. Multiple hosts additionally require
+a supported shared state/queue/locking design and legacy session affinity; turning
+on extra workers alone does not distribute durable jobs. Test those boundaries
+before horizontal rollout. New sampling, roots, subscriptions and STDIO features
+are not required for this remote Odoo connector.
