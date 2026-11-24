@@ -1,6 +1,55 @@
-# Odoo Scope & Impact Checklist
+# Odoo Reasoning, Scope & Impact Guide
 
 Internal checklist, not a mandatory user-facing phase. Follow `MCP_SYSTEM_PROMPT.md` and the configured provider lane; examples never authorize a second pipeline.
+
+## Decide before implementing
+
+Use for complex/unfamiliar changes, uncertain causes or coupled layers. For clear work, apply the main prompt checklist internally without loading more skills or adding a planning phase. This guide supplements the owning implementation skill and never changes authorization, target or provider lane.
+
+1. **Outcome:** translate the request into an observable before/after assertion. Preserve explicit requirements; distinguish coding, push, deploy and functional targets.
+2. **Facts:** identify client, owning addon, installed version/API and exact source references. Separate observed facts from assumptions and unknowns. Tool errors, partial coverage and missing search matches do not establish absence.
+3. **Behavior:** trace input → entry point → business logic → stored/displayed output. For defects, connect the symptom to a source-backed hypothesis and choose a focused check that could disprove it. Do not patch the first suspicious line just because it resembles the symptom.
+4. **Change:** choose the smallest complete implementation that satisfies acceptance. Compare alternatives only when they materially change behavior, compatibility or risk; record a brief reason for the choice. Trace callers, dependencies, security, existing data and required wiring.
+5. **Verification:** before editing, identify the assertion, relevant check and required environment. Include a relevant edge case or regression where justified. A passing syntax check cannot establish ORM behavior; report unavailable checks as unverified.
+6. **Evaluate:** implement in the configured lane, compare actual results with acceptance, and revise the hypothesis when contradicted. On failure, distinguish addon defects from baseline or connector failures before changing code. Reuse completed checkpoints; stop at the authorized terminal outcome.
+
+Proceed when acceptance, ownership, required API and implementation scope have sufficient evidence. Resolve technical unknowns with focused reads; ask only for material business/scope decisions source cannot settle. Never invent facts to fill the checklist. This is decision support, not a new server-enforced gate.
+
+For complex or interrupted work, retain a compact decision record in the existing task/handoff context:
+
+- Outcome and authorized target.
+- Evidence references (path/symbol or tool receipt), material assumptions and unresolved unknowns.
+- Chosen change and brief reason; affected files/dependencies.
+- Acceptance checks and observed results or unavailable layers.
+- Remaining blocker/next action, if any.
+
+Keep this to useful facts and decisions, not a private reasoning transcript. Do not require a new tool, user approval or user-facing plan for clear tasks. Revisit settled decisions only when new evidence changes them.
+
+## Worked Odoo examples
+
+These illustrate decisions, not installed API definitions or mandatory files. Verify the selected version and owning source before using any symbol.
+
+### Bug: a stored amount stays stale after a line edit
+
+- Acceptance: changing a relevant line value updates the stored amount to the business formula established by source/request.
+- Evidence: inspect the custom compute, dependency declarations and line-write path. Hypothesis: a dependency is missing; an incorrect formula or an overriding write may instead explain the symptom.
+- Check: reproduce changing that dependency in an Odoo test and compare the stored result; reject the hypothesis if the compute runs correctly and another method overwrites it.
+- Change: repair the evidenced cause in the owning addon; preserve currency rounding and batch behavior. Avoid an unrelated onchange or `sudo()` workaround.
+- Verify: cover the original line edit and a relevant multi-record/rounding case. Without an Odoo runtime, report static verification only and leave behavior unverified.
+
+### Feature: expose an existing field on an order form
+
+- Acceptance: intended users can see/edit the field in the requested location under existing permissions.
+- Evidence: confirm the field already exists, its owning addon, installed parent view/XML ID and a unique insertion anchor. Inspect group restrictions and inherited views.
+- Change: add the narrow inherited view and required manifest/dependency wiring. Do not create another field or broaden access to make the view load.
+- Verify: check XML/reference closure and, where available and authorized, upgrade/render the compiled view for a representative user. Source inspection alone does not prove the rendered view.
+
+### New addon: track equipment loans
+
+- Acceptance: an authorized user records equipment, borrower and return state; unauthorized users cannot access loans. Resolve any unspecified business rule that materially changes the design, such as whether concurrent loans are allowed.
+- Evidence: inspect existing equipment/employee models, project conventions and access patterns before choosing relations; avoid duplicating an installed business model.
+- Change: close the requested models/logic, security, views/actions/menus, imports, manifest and dependencies. Add multi-company handling only as required by the actual ownership model and scope.
+- Verify: exercise the requested loan/return flow, applicable constraints and access rules in Odoo. Installation success alone does not prove business behavior. Keep deployment within the user's authorized target.
 
 ## Classify and inspect
 

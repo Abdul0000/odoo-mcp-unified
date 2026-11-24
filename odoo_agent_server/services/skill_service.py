@@ -22,7 +22,7 @@ _SKILLS = {
     "odoo-pos-development": ("odoo-pos-development-skill.md", "POS: sessions, orders, payments, OWL, receipts, hardware."),
     "odoo-website-development": ("odoo-website-development.md", "Website: themes, QWeb, snippets, eCommerce, controllers, SEO."),
     "odoo-custom-module-development": ("13-SKILL-custom-module.md", "Standalone addon: models, manifest, security, views, menus."),
-    "odoo-task-planning": ("14-SKILL-planning.md", "Scope, dependency, file-completeness and risk checklist."),
+    "odoo-task-planning": ("14-SKILL-planning.md", "Evidence-based reasoning guide: acceptance, cause, scope, impact and verification."),
     "odoo-view-development": ("15-SKILL-views.md", "Views/XML: version, XPath, inheritance, security, actions."),
     "odoo-backend-development": ("16-SKILL-backend.md", "Backend ORM: models, fields, computes, constraints, batching."),
     "odoo-frontend-owl-development": ("17-SKILL-frontend-owl.md", "Frontend: OWL, services, registries, widgets, assets."),
@@ -88,6 +88,8 @@ _ALIASES = {
     "standalone-module": "odoo-custom-module-development",
     "own-model": "odoo-custom-module-development",
     "scratch-module": "odoo-custom-module-development",
+    "reasoning": "odoo-task-planning",
+    "reasoning-guide": "odoo-task-planning",
     "planning": "odoo-task-planning",
     "plan": "odoo-task-planning",
     "task-plan": "odoo-task-planning",
@@ -202,7 +204,7 @@ _ROUTING_TERMS = {
     "odoo-accounting-development": ("invoice", "journal", "payment", "tax", "reconciliation", "fiscal position", "account.move"),
     "odoo-all-modules-reference": ("which module", "module dependency", "module selection", "choose module", "available addons", "implementation roadmap"),
     "odoo-custom-module-development": ("custom module", "new module", "new addon", "standalone addon", "create addon", "scaffold addon", "module scaffold", "standalone module", "own model", "own table", "scratch module", "_name =", "not inherit"),
-    "odoo-task-planning": ("plan", "planning", "scope this", "before implementing", "file checklist", "what files are needed", "break down the task"),
+    "odoo-task-planning": ("plan", "planning", "reasoning guide", "scope this", "before implementing", "file checklist", "what files are needed", "break down the task"),
 }
 
 
