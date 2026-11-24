@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from mcp.server import Server, ServerRequestContext
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp.server.auth.provider import AccessToken
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import (
     CallToolRequestParams, CallToolResult, GetPromptRequestParams,
@@ -82,10 +82,21 @@ async def _list_tools(ctx: ServerRequestContext, params: PaginatedRequestParams 
     ], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
+async def _transport_progress_probe(ctx):
+    await ctx.session.report_progress(1, message="transport.probe.started")
+    await asyncio.sleep(.5)
+    await ctx.session.report_progress(2, message="transport.probe.ready")
+
+
 async def _call_tool(ctx: ServerRequestContext, params: CallToolRequestParams) -> CallToolResult | InputRequiredResult:
     # Profiles change discovery only. The shared provider policy still prevents
     # hidden low-level tools from bypassing workflow/verification guardrails.
-    async with rpc_operation(ctx, params.name) as info:
+    # Opt-in, fixed-cost read-only transport diagnostic used by deployment QA.
+    # Separate timestamps expose proxy buffering without a new tool or credential.
+    probe = params.name == "connector_health" and (params.meta or {}).get("io.odoo-mcp/progressProbe") is True
+    if probe:
+        await _transport_progress_probe(ctx)
+    async with rpc_operation(ctx, params.name, initial_progress=2 if probe else 0) as info:
         if params.request_state is not None:
             result = await _resume_clarification(ctx, params)
         elif params.input_responses is not None:
@@ -262,7 +273,16 @@ class MCPTransportMiddleware:
             or "mcp-session-id" in request.headers
             or request.method == "DELETE"
         )
-        if not standard or (path not in _PATHS and not qwen_path):
+        if path not in _PATHS and not qwen_path:
+            await self.app(scope, receive, send)
+            return
+        if not standard:
+            # Keep compatibility authentication in its existing route dependency,
+            # but apply the same configured Host/Origin policy as the SDK path.
+            rejected = await TransportSecurityMiddleware(transport_security()).validate_request(request)
+            if rejected is not None:
+                await rejected(scope, receive, send)
+                return
             await self.app(scope, receive, send)
             return
         try:

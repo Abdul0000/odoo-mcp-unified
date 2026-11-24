@@ -73,6 +73,32 @@ def test_symlink_escape_is_rejected(tmp_path, monkeypatch):
     assert response.status_code == 403
 
 
+def test_recursive_search_does_not_follow_symlinks(tmp_path, monkeypatch):
+    project = tmp_path / "repo"
+    project.mkdir()
+    monkeypatch.setattr(settings, "allowed_roots_raw", str(project))
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("sentinel outside project")
+    (project / "safe.txt").write_text("sentinel inside project")
+    try:
+        (project / "linked.txt").symlink_to(outside / "secret.txt")
+        (project / "linked-dir").symlink_to(outside, target_is_directory=True)
+        (project / "broken.txt").symlink_to(outside / "missing.txt")
+    except OSError as exc:
+        pytest.skip(f"symlink privilege unavailable: {exc}")
+    client = TestClient(app)
+    result = client.post("/repo/search", headers=_auth(), json={"project_path": str(project), "pattern": "sentinel"})
+    assert result.status_code == 200
+    body = result.json()
+    assert [row["path"] for row in body["matches"]] == ["safe.txt"]
+    assert "outside project" not in result.text
+    rejected = client.post("/repo/search", headers=_auth(), json={
+        "project_path": str(project), "pattern": "sentinel", "relative_path": "linked.txt",
+    })
+    assert rejected.status_code == 403
+
+
 @pytest.mark.integration
 def test_apply_patch_check_only_does_not_mutate_and_escape_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))

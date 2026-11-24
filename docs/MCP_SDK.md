@@ -33,6 +33,11 @@ An HTTP request uses the SDK if it includes `Accept: text/event-stream`
 `MCP-Session-Id`. DELETE also enters the SDK. Requests without those transport
 headers retain the previous JSON-RPC behavior, including batch compatibility.
 The selector never reads a request body before passing it to the SDK.
+Compatibility requests use the same configured Host/Origin validation as the SDK.
+Existing bearer, API-key, OAuth and Qwen URL-token authentication is unchanged.
+Notifications receive an empty 202 response, including notification-only batches;
+mixed batches contain replies only for requests with IDs. ID-less tool messages
+are ignored rather than dispatched without a receipt ID.
 
 `/claude/mcp`, `/chatgpt/mcp`, `/grok/mcp` and the existing Qwen URL-token routes
 use the same selector. Qwen tokens retain their existing validation path.
@@ -132,7 +137,13 @@ restart recovery, session saturation/expiry and deployment-check coverage.
 `python -m deploy.mcp_transport_check --env-file /etc/odoo-mcp/odoo-mcp.env`
 checks the configured public HTTPS endpoint with automatic and legacy SDK
 clients, reconnects, SSE, private cache hints, resources and API-key auth. It makes
-no mutations. Configure `ODOO_AGENT_PUBLIC_BASE_URL` (or the existing OAuth issuer)
+no mutations. Its first health call in each mode opts into a fixed 500 ms progress
+probe using `_meta["io.odoo-mcp/progressProbe"]=true`. Two diagnostic milestones
+must arrive at least 200 ms apart, so missing notifications or proxy buffering
+fail the check instead of passing with zero progress events. The metadata applies
+only to `connector_health`; ordinary calls incur no probe delay. It grants no new
+permissions and needs no additional credentials.
+Configure `ODOO_AGENT_PUBLIC_BASE_URL` (or the existing OAuth issuer)
 to the real proxy hostname. The deployment script checks loopback and public HTTPS
 after restart, before clearing its rollback trap. Secrets are read from the env
 file and never printed or placed in command-line arguments.

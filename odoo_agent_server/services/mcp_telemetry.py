@@ -68,13 +68,13 @@ def metrics_snapshot():
 
 
 class ProgressSink:
-    def __init__(self, ctx):
+    def __init__(self, ctx, initial_progress=0):
         self.ctx = ctx
         self.loop = asyncio.get_running_loop()
         self.queue = asyncio.Queue(maxsize=32)
         self.active = True
         self.last = None
-        self.count = 0
+        self.count = initial_progress
 
     def offer(self, phase):
         if self.active:
@@ -104,7 +104,7 @@ class ProgressSink:
 
 
 @asynccontextmanager
-async def rpc_operation(ctx, name: str):
+async def rpc_operation(ctx, name: str, *, initial_progress=0):
     request = ctx.request
     supplied = request.headers.get("x-request-id", "") if request else ""
     request_id = supplied if _ID.fullmatch(supplied) else uuid.uuid4().hex[:12]
@@ -113,7 +113,7 @@ async def rpc_operation(ctx, name: str):
     tool = name if _ID.fullmatch(name) else "unknown"
     # The SDK owns token/callback negotiation in each protocol era and makes
     # report_progress a no-op when the caller did not opt in.
-    sink = ProgressSink(ctx)
+    sink = ProgressSink(ctx, initial_progress)
     token = _context.set({"correlation": {"request_id": request_id, "trace_id": trace_id, "tool": tool}, "sink": sink})
     sender = asyncio.create_task(sink.run()) if sink else None
     started = time.monotonic()

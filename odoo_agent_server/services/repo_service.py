@@ -417,6 +417,10 @@ class RepoService:
         for file_path in files:
             if len(matches) >= max_matches:
                 break
+            # Walking a safe directory does not make its file symlinks safe.
+            # Match the execution workspace policy: never search linked files.
+            if file_path.is_symlink() or not file_path.resolve().is_relative_to(project):
+                continue
             scanned_files += 1
             try:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
@@ -455,7 +459,8 @@ class RepoService:
             current_path = Path(current)
             dirs[:] = sorted(
                 d for d in dirs
-                if not is_ignored_source_path((current_path / d).relative_to(root).parts)
+                if not (current_path / d).is_symlink()
+                and not is_ignored_source_path((current_path / d).relative_to(root).parts)
             )
             for filename in sorted(files):
                 yield Path(current) / filename

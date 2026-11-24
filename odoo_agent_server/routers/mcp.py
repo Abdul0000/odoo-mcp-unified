@@ -6,10 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request, status
 from pydantic import ValidationError
+from starlette.responses import Response
 
 from ..auth import AuthDependency
 from ..config import settings
 from ..services.oauth_service import OAuthStore
+from ..services.runtime_identity_service import SERVICE_VERSION
 from ..services.prompt_service import load_mcp_system_prompt, load_client_check_system_prompt, shared_prompt_payload, client_check_prompt_payload
 from ..services.qwen_token_service import QwenTokenService
 from ..services.store_service import JsonStore
@@ -32,6 +34,11 @@ def _shell_response(request_id: Any, result: Any = None, error: dict[str, Any] |
     else:
         payload["result"] = result
     return payload
+
+
+def _compatibility_reply(result: Any) -> Any:
+    """Notifications, including notification-only batches, have no JSON body."""
+    return Response(status_code=202) if result is None or result == [] else result
 
 
 def _dump_any(value: Any) -> Any:
@@ -1059,7 +1066,7 @@ def _tool_to_mcp(tool, profile: str | None = None) -> dict[str, Any]:
 
 
 @router.post("")
-async def mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def mcp_shell(request: Request, payload: Any = Body(...)) -> Any:
     """Lightweight JSON-RPC MCP-compatible endpoint.
 
     It exposes initialize, tools/list, and tools/call over one HTTPS POST route.
@@ -1074,8 +1081,8 @@ async def mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any
             response = await _handle_shell(item, profile="provider", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="provider", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="provider", request=request, minimal=minimal))
 
 
 async def _handle_shell(
@@ -1092,6 +1099,10 @@ async def _handle_shell(
             or isinstance(request_id, bool) or not isinstance(request_id, (str, int, float, type(None)))):
         return _shell_response(None, error={"code": -32600, "message": "Invalid JSON-RPC request"})
     method = payload.get("method")
+    # A notification never receives a JSON-RPC response. Ignore unsupported
+    # notifications, and never dispatch request-only tools without a receipt ID.
+    if "id" not in payload:
+        return None
     params = payload.get("params", {})
     if not isinstance(params, dict):
         return _shell_response(request_id, error={"code": -32602, "message": "params must be an object"})
@@ -1108,7 +1119,7 @@ async def _handle_shell(
                     "tools": {"listChanged": False},
                     "prompts": {"listChanged": False},
                 },
-                "serverInfo": {"name": "odoo-mcp-agent-connector", "version": "1.8.0"},
+                "serverInfo": {"name": "odoo-mcp-agent-connector", "version": SERVICE_VERSION},
                 "instructions": load_client_check_system_prompt() + (
                     "\nTask profile: after client validation, call task_open then task_run(task_id). "
                     "Supply nested inspection/edit/test tools in task_run arguments; use task_resume to reconcile. "
@@ -1328,7 +1339,7 @@ def claude_mcp_health() -> dict[str, Any]:
 
 
 @claude_router.post("/mcp")
-async def claude_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def claude_mcp_shell(request: Request, payload: Any = Body(...)) -> Any:
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
         if not payload:
@@ -1338,8 +1349,8 @@ async def claude_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[s
             response = await _handle_shell(item, profile="claude", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="claude", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="claude", request=request, minimal=minimal))
 
 
 @chatgpt_router.get("/mcp")
@@ -1365,7 +1376,7 @@ def chatgpt_tools_debug() -> dict[str, Any]:
 
 
 @chatgpt_router.post("/mcp")
-async def chatgpt_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def chatgpt_mcp_shell(request: Request, payload: Any = Body(...)) -> Any:
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
         if not payload:
@@ -1375,8 +1386,8 @@ async def chatgpt_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[
             response = await _handle_shell(item, profile="chatgpt", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="chatgpt", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="chatgpt", request=request, minimal=minimal))
 
 
 @grok_router.get("/mcp")
@@ -1404,7 +1415,7 @@ def grok_tools_debug() -> dict[str, Any]:
 
 
 @grok_router.post("/mcp")
-async def grok_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def grok_mcp_shell(request: Request, payload: Any = Body(...)) -> Any:
     # Keep Grok on the same hybrid-safe contract as ChatGPT: short bounded waits,
     # OAuth/tool-call auth, strict tool names, and success_allowed=false until terminal proof.
     minimal = _requested_minimal(request)
@@ -1416,8 +1427,8 @@ async def grok_mcp_shell(request: Request, payload: Any = Body(...)) -> dict[str
             response = await _handle_shell(item, profile="grok", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="grok", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="grok", request=request, minimal=minimal))
 
 
 @router.get("/system-prompt")
@@ -1528,7 +1539,7 @@ def qwen_mcp_query_health(access_token: str = Query(default="")) -> dict[str, An
 
 
 @qwen_router.post("/mcp/{access_token}")
-async def qwen_mcp_path_shell(access_token: str, request: Request, payload: Any = Body(...)) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def qwen_mcp_path_shell(access_token: str, request: Request, payload: Any = Body(...)) -> Any:
     _validate_qwen_url_token(access_token)
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
@@ -1539,12 +1550,12 @@ async def qwen_mcp_path_shell(access_token: str, request: Request, payload: Any 
             response = await _handle_shell(item, profile="qwen", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="qwen", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="qwen", request=request, minimal=minimal))
 
 
 @qwen_router.post("/mcp")
-async def qwen_mcp_query_shell(request: Request, payload: Any = Body(...), access_token: str = Query(default="")) -> dict[str, Any] | list[dict[str, Any]] | None:
+async def qwen_mcp_query_shell(request: Request, payload: Any = Body(...), access_token: str = Query(default="")) -> Any:
     _validate_qwen_url_token(access_token)
     minimal = _requested_minimal(request)
     if isinstance(payload, list):
@@ -1555,5 +1566,5 @@ async def qwen_mcp_query_shell(request: Request, payload: Any = Body(...), acces
             response = await _handle_shell(item, profile="qwen", request=request, minimal=minimal)
             if response is not None:
                 responses.append(response)
-        return responses
-    return await _handle_shell(payload, profile="qwen", request=request, minimal=minimal)
+        return _compatibility_reply(responses)
+    return _compatibility_reply(await _handle_shell(payload, profile="qwen", request=request, minimal=minimal))

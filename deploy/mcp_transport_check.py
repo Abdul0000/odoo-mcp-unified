@@ -25,6 +25,7 @@ async def check(url, token, expected_commit=None, expected_ttl_ms=None):
     for mode in ("auto", "legacy"):
         seen_sse = []
         progress = []
+        probe_times = {}
 
         async def response_hook(response):
             if "text/event-stream" in response.headers.get("content-type", ""):
@@ -32,6 +33,8 @@ async def check(url, token, expected_commit=None, expected_ttl_ms=None):
 
         async def on_progress(value, total, message):
             progress.append(value)
+            if message in {"transport.probe.started", "transport.probe.ready"}:
+                probe_times[message] = time.monotonic()
 
         async with httpx2.AsyncClient(headers={"Authorization": "Bearer " + token},
                                       event_hooks={"response": [response_hook]}) as http:
@@ -48,7 +51,10 @@ async def check(url, token, expected_commit=None, expected_ttl_ms=None):
                         or (expected_ttl_ms is not None and tools.ttl_ms != expected_ttl_ms)
                     ):
                         raise RuntimeError("MCP cache hints differ from configuration")
-                    health = await client.call_tool("connector_health", {}, progress_callback=on_progress)
+                    health = await client.call_tool(
+                        "connector_health", {}, progress_callback=on_progress,
+                        meta={"io.odoo-mcp/progressProbe": True} if iteration == 0 else None,
+                    )
                     body = health.structured_content or {}
                     if health.is_error or body.get("status") != "ok":
                         raise RuntimeError("MCP health tool failed")
@@ -71,10 +77,15 @@ async def check(url, token, expected_commit=None, expected_ttl_ms=None):
                         else:
                             raise RuntimeError("Unknown resource unexpectedly succeeded")
                     await asyncio.sleep(.05)
+                if iteration == 0:
+                    first = probe_times.get("transport.probe.started")
+                    last = probe_times.get("transport.probe.ready")
+                    if first is None or last is None or last - first < .2:
+                        raise RuntimeError("Intermediate progress missing or buffered by proxy")
             if mode == "legacy" and not seen_sse:
                 raise RuntimeError("Proxy did not deliver legacy SSE responses")
             report["modes"][mode] = {"reconnected": True, "sse_responses": len(seen_sse),
-                                     "progress_events": len(progress), "elapsed_ms": round((time.monotonic() - started) * 1000)}
+                                     "progress_events": len(progress), "progress_streaming": True, "elapsed_ms": round((time.monotonic() - started) * 1000)}
     async with httpx2.AsyncClient(headers={"X-API-Key": token}) as http:
         async with Client(streamable_http_client(url, http_client=http), read_timeout_seconds=30) as client:
             result = await client.call_tool("connector_health", {})

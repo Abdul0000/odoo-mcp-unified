@@ -232,6 +232,24 @@ async def test_deployment_readonly_transport_checks(http_server):
     assert result["api_key"] == "passed"
     assert result["modes"]["legacy"]["sse_responses"] > 0
     assert result["modes"]["auto"]["reconnected"] is True
+    for mode in ("auto", "legacy"):
+        assert result["modes"][mode]["progress_streaming"] is True
+        assert result["modes"][mode]["progress_events"] >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("behavior", ["missing", "bunched"])
+async def test_deployment_check_rejects_missing_or_buffered_progress(http_server, monkeypatch, behavior):
+    from deploy.mcp_transport_check import check
+
+    async def broken_probe(ctx):
+        if behavior == "bunched":
+            await ctx.session.report_progress(1, message="transport.probe.started")
+            await ctx.session.report_progress(2, message="transport.probe.ready")
+
+    monkeypatch.setattr(mcp_sdk, "_transport_progress_probe", broken_probe)
+    with pytest.raises(RuntimeError, match="progress missing or buffered"):
+        await check(http_server, settings.api_token)
 
 
 @pytest.mark.asyncio

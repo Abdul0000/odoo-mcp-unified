@@ -57,6 +57,12 @@ def _disable_global_approval_by_default(monkeypatch):
     monkeypatch.setattr(settings, "require_approval", False)
 
 
+@pytest.fixture(autouse=True)
+def _trust_testclient_host(monkeypatch):
+    """Synthetic ASGI/TestClient hosts are trusted only in tests, never in production."""
+    monkeypatch.setattr(settings, "mcp_allowed_hosts", [*settings.mcp_allowed_hosts, "testserver", "test", "agent.example.com"])
+
+
 TASK_TOOLS = frozenset({
     'task_open', 'task_run', 'task_status', 'task_resume', 'task_list',
     'task_deploy', 'task_test_plan', 'task_knowledge', 'odoo_mutation_preview',
