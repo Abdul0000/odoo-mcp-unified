@@ -130,7 +130,7 @@ Navigates Odoo pages through an external Chrome DevTools Protocol browser and re
 - `GET /jobs/{job_id}`
 - `GET /jobs/audit/events`
 
-High-impact actions require approval by default. Protected branch pushes always require approval regardless of the global setting:
+Tool calls run without extra server approval by default (`ODOO_AGENT_REQUIRE_APPROVAL=false`). Set the flag to `true` to enable configured mutation approvals. Protected branch pushes still require explicit approval. The policy can cover:
 
 ```text
 repo.write
@@ -144,7 +144,7 @@ odoo.module_update
 odoosh.module_update
 ```
 
-High-impact writes require a one-time approval by default. Read-only discovery and query tools remain approval-free. The default policy covers repository mutations, Git commit/push, module install/update, safe deploy, and sensitive record actions. Set `ODOO_AGENT_REQUIRE_APPROVAL=false` only for an explicitly trusted development environment; production deployments should keep approval enabled.
+Read-only discovery and queries remain approval-free. When approval mode is enabled, the configured policy covers module install/update, safe deploy and sensitive record actions; routine coding follows its existing exemption. Authentication, filesystem boundaries, feature switches and verification gates are independent of this setting. The exposed tool catalog is unchanged.
 
 ## Install locally
 
@@ -925,7 +925,7 @@ These results remain static and advisory, not proof of runtime impact.
 For Odoo 19+ databases that expose External JSON-2, add `odoo_api_key` to the selected `ODOO_CLIENTS` entry (or set `ODOO_API_KEY` for single-client configuration). The connector uses `POST /json/2/<model>/<method>` with `Authorization: bearer <key>` for `search_read`, `read_group`, `fields_get`, `read`, `create`, `write`, access-right checks, and business actions that use named arguments. Recordset methods send `ids`; create sends `vals_list`; write sends `vals`. JSON-2 has no positional-argument support, so actions that require positional arguments return a clear unsupported-arguments error. The transport sends named parameters and `X-Odoo-Database` when configured. When no API key is supplied, existing username/password clients continue using legacy JSON-RPC. API keys are never included in public client metadata. JSON-2 may require an eligible Odoo plan, and each request runs in its own transaction; multi-step business operations requiring atomicity should be implemented as one server-side Odoo method.
 
 
-**Deployment note:** an existing Render environment variable overrides code defaults. Set `ODOO_AGENT_REQUIRE_APPROVAL=true` in the Render service environment and redeploy to activate the new default on an already-configured service. Existing explicit `false` values remain respected for compatibility.
+**Deployment note:** existing environment variables override code defaults. Set `ODOO_AGENT_REQUIRE_APPROVAL=false` in the service environment and restart/redeploy to apply the default allow policy to an existing installation. An explicit `true` keeps optional server approvals enabled.
 
 
 

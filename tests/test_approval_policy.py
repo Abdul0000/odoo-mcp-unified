@@ -54,3 +54,23 @@ def test_routine_coding_ignores_legacy_gates_but_force_still_requires_approval(t
     assert error.value.detail['approval_required']
     rows = TestClient(app).get('/tools/list', headers={'Authorization':'Bearer '+settings.api_token}).json()
     assert not next(row for row in rows if row['name']=='git_push')['requires_approval']
+
+
+def test_default_allow_policy_preserves_opt_in_and_force_gates(tmp_path, monkeypatch):
+    from odoo_agent_server.config import Settings
+    from odoo_agent_server.routers.tools import list_tools
+    monkeypatch.delenv("ODOO_AGENT_REQUIRE_APPROVAL", raising=False)
+    defaults = Settings(_env_file=None)
+    assert defaults.require_approval is False
+    assert Settings(_env_file=None, ODOO_AGENT_REQUIRE_APPROVAL=True).require_approval is True
+    monkeypatch.setattr(settings, "require_approval", defaults.require_approval)
+    monkeypatch.setattr(settings, "state_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "approval_required_actions_raw", "workflow.safe_deploy_module,odoo.record_action.*")
+    service = ApprovalService()
+    for action in ("workflow.safe_deploy_module", "odoo.module_update", "odoo.record_action.sale.order.action_confirm"):
+        service.ensure_allowed(action, None)
+    assert not service.store.list_approvals()
+    assert all(not row.requires_approval for row in list_tools())
+    with pytest.raises(HTTPException) as error:
+        service.ensure_allowed("git.push", None, force=True)
+    assert error.value.detail["approval_required"] is True
