@@ -240,6 +240,16 @@ No automatic ours/theirs selection or force-push is used.
 The lightweight GitHub/GitLab API workspace also merges base/local/upstream text
 instead of replaying full writes over newer files, including restored WIP writes.
 Its `verification_scope=file_lint_only` reports the actual validation boundary;
-use the execution lane when runtime tests are required. The legacy Git push path
-returns `SYNC_REQUIRED` after a remote rejection; it cannot rebase and immediately
-push untested merged source.
+use the execution lane when runtime tests are required. Native Git commit and
+push paths return `SYNC_REQUIRED` when upstream integration is needed. Commit
+preflight fetches the target branch without changing local commits, the index,
+working tree, untracked files or existing stashes; it never runs an in-place
+`rebase --autostash` after verification. Its repository lock spans preflight,
+staging and commit. An operator's unfinished merge/rebase is left intact and
+reported as `GIT_OPERATION_IN_PROGRESS`.
+
+Preserve the original checkout while resolving both intents in an isolated
+workspace. Follow the sync result, rerun the declared checks against the changed
+tree, then retry a normal push. There is no automatic force-push or ours/theirs
+selection. Authentication/permission rejections retain their original error;
+only evidence of an advanced remote is classified as `SYNC_REQUIRED`.

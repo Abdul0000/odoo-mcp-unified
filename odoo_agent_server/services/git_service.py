@@ -219,47 +219,91 @@ class GitService:
         return self._run(["git", "reset", "--hard", f"{remote}/{branch}"], project, timeout_seconds)
 
     def pull_rebase(self, project_path: str, remote: str = "origin", branch: str | None = None, timeout_seconds: int = 120) -> CommandResult:
+        """Legacy pre-commit hook: inspect upstream without rebasing verified source.
+
+        Integration belongs in the isolated workspace sync path, where snapshots
+        preserve both intents and a changed tree invalidates verification. This
+        hook never stashes, resets, rebases or aborts an operator's Git operation.
+        The caller holds the repository lock through preflight and commit.
+        """
         project = self._project(project_path)
+        command = ["git", "sync-preflight", remote]
+        git_dir = self._run(["git", "rev-parse", "--absolute-git-dir"], project, 20)
+        if git_dir.exit_code != 0:
+            return git_dir
+        state_dir = Path(git_dir.stdout.strip())
+        active = [name for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+                  if (state_dir / name).exists()]
+        unmerged = self._run(["git", "ls-files", "--unmerged"], project, 20)
+        if unmerged.exit_code != 0:
+            return unmerged
+        if active or unmerged.stdout.strip():
+            return CommandResult(command=command, cwd=str(project), exit_code=1,
+                                 stderr="GIT_OPERATION_IN_PROGRESS: Existing merge/rebase or unresolved index preserved. Resolve or abort that operation before committing.")
         if not branch:
             branch_result = self.current_branch(str(project))
             if branch_result.exit_code != 0:
                 return branch_result
             branch = branch_result.stdout.strip()
         if branch in {"", "HEAD"}:
-            return CommandResult(command=["git", "pull", "--rebase"], cwd=str(project), exit_code=0, stdout="Detached HEAD; skipping pull --rebase.\n")
+            return CommandResult(command=command, cwd=str(project), exit_code=0,
+                                 stdout="Detached HEAD; no upstream integration attempted.\n")
         remote_result = self._run(["git", "remote", "get-url", remote], project, 20)
         if remote_result.exit_code != 0:
-            return CommandResult(command=["git", "pull", "--rebase", "--autostash", remote, branch], cwd=str(project), exit_code=0, stdout=f"Remote {remote} not configured; skipping pull --rebase.\n")
-        fetch = self._run(["git", "fetch", remote], project, timeout_seconds)
+            if remote_result.exit_code != 2:
+                return remote_result
+            return CommandResult(command=command, cwd=str(project), exit_code=0,
+                                 stdout=f"Remote {remote} not configured; local commit only.\n")
+        advertised = self._run(["git", "ls-remote", "--heads", "--", remote, f"refs/heads/{branch}"], project, min(timeout_seconds, 30))
+        if advertised.exit_code != 0:
+            return advertised
+        if not advertised.stdout.strip():
+            return CommandResult(command=command, cwd=str(project), exit_code=0,
+                                 stdout="Remote target branch does not exist; no upstream integration needed.\n")
+        # Fetch exactly the target branch. FETCH_HEAD is read under the same
+        # repository lock; a second remote update will still fail normal push.
+        fetch = self._run(["git", "fetch", "--no-tags", "--no-recurse-submodules", "--", remote, f"refs/heads/{branch}"], project, timeout_seconds)
         if fetch.exit_code != 0:
             return fetch
-        return self._run(["git", "rebase", "--autostash", f"{remote}/{branch}"], project, timeout_seconds)
+        fetched = self._run(["git", "rev-parse", "--verify", "FETCH_HEAD^{commit}"], project, 20)
+        if fetched.exit_code != 0:
+            return fetched
+        ancestor = self._run(["git", "merge-base", "--is-ancestor", fetched.stdout.strip(), "HEAD"], project, 20)
+        if ancestor.exit_code == 1:
+            return CommandResult(command=command, cwd=str(project), exit_code=1,
+                                 stderr="SYNC_REQUIRED: Remote advanced or diverged. Local commits, index, working tree and untracked files are unchanged. Sync in an isolated execution workspace, resolve both intents, rerun verification, then retry normal push. No in-place rebase or force push was performed.")
+        if ancestor.exit_code != 0:
+            return ancestor
+        return CommandResult(command=command, cwd=str(project), exit_code=0,
+                             stdout="HEAD already contains the fetched remote tip; source unchanged.\n")
 
     def commit(self, project_path: str, message: str, paths: list[str], timeout_seconds: int = 60) -> CommandResult:
         project = self._project(project_path)
-        branch_result = self.current_branch(str(project))
-        branch = branch_result.stdout.strip() if branch_result.exit_code == 0 else None
-        identity_result = self.configure_identity(str(project))
-        if identity_result.exit_code != 0:
-            return identity_result
-        # Fetch before deciding whether remote work must be incorporated.
-        rebase_result = self.pull_rebase(str(project), "origin", branch, min(timeout_seconds, 120))
-        if rebase_result.exit_code != 0:
-            return rebase_result
-        if paths:
-            add_command = ["git", "add"]
-            for rel in paths:
-                self.repo.target(str(project), rel)
-                add_command.append(rel)
-        else:
-            add_command = ["git", "add", "-A"]
         with RepoLockService().locked(str(project), owner="git.commit", timeout_seconds=min(timeout_seconds, 120)):
+            branch_result = self.current_branch(str(project))
+            if branch_result.exit_code != 0:
+                return branch_result
+            branch = branch_result.stdout.strip()
+            sync_result = self.pull_rebase(str(project), "origin", branch, min(timeout_seconds, 120))
+            if sync_result.exit_code != 0:
+                return sync_result
+            identity_result = self.configure_identity(str(project))
+            if identity_result.exit_code != 0:
+                return identity_result
+            if paths:
+                for rel in paths:
+                    self.repo.target(str(project), rel)
+                add_command = ["git", "add", "--", *paths]
+            else:
+                add_command = ["git", "add", "-A"]
             add_result = self._run(add_command, project, timeout_seconds)
             if add_result.exit_code != 0:
                 return add_result
             diff_result = self._run(["git", "diff", "--cached", "--quiet"], project, timeout_seconds)
             if diff_result.exit_code == 0:
                 return CommandResult(command=["git", "commit", "-m", message], cwd=str(project), exit_code=1, stderr="No staged changes to commit.")
+            if diff_result.exit_code != 1:
+                return diff_result
             validate_git_artifacts(project, ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRT", "--"])
             return self._run(["git", "commit", "-m", message], project, timeout_seconds)
 
@@ -302,7 +346,8 @@ class GitService:
             validate_git_artifacts(project, ["diff", "--name-only", "-z", "--diff-filter=ACMRT", base, "HEAD", "--"]
                                    if base else ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
             result = self._run(command, project, timeout_seconds)
-            if result.exit_code != 0 and ("non-fast-forward" in (result.stderr or "") or "fetch first" in (result.stderr or "") or "rejected" in (result.stderr or "")):
+            failure_text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
+            if result.exit_code != 0 and any(marker in failure_text for marker in ("non-fast-forward", "fetch first", "remote contains work")):
                 return CommandResult(command=command, cwd=str(project), exit_code=1,
                                      stderr="SYNC_REQUIRED: Remote advanced. Fetch/merge in an isolated execution workspace, rerun verification, then retry normal push. No automatic unverified rebase/push was performed.")
         if result.exit_code == 0:
