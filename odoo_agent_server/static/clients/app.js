@@ -147,11 +147,11 @@
       renderChecks(job.checks,job.steps);
       if (job.terminal) {
         const ok=job.validated || job.coding_ready;
-        const title=job.full_validation_passed?'Client ready':ok?(job.deploy_ready?'Coding & deployment ready · HTTPS needs attention':'Coding ready · deployment needs attention'):'Connection needs attention';
+        const title=job.full_validation_passed?'Client ready':ok?(job.deploy_ready?'Coding & deployment ready · Odoo credentials need attention':'Coding ready · deployment needs attention'):'Connection needs attention';
         status(title,[job.summary || 'Review the connection settings and try again.',job.details].filter(Boolean).join('\n'),job.full_validation_passed?'success':ok?'warning':'error');
         fill(await api('/admin/clients/'+encodeURIComponent(current.name))); return;
       }
-      status('Checking connection…','Settings saved. Checking repository, Odoo and SSH access.');
+      status('Checking connection…','Settings saved. Checking repository, Odoo HTTPS login and Odoo.sh SSH separately.');
       await new Promise(resolve=>setTimeout(resolve,1500));
     }
     if (generation===pollGeneration) status('Check is still running','Settings are saved. Reopen this client or retry validation later to review the result.');

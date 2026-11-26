@@ -216,7 +216,7 @@ class RepoService:
         staging_parent = resolve_allowed_path(str(project.parent))
         staging = Path(tempfile.mkdtemp(prefix=f".{project.name}.clone-", dir=staging_parent))
         try:
-            result = self._run(["git", "clone", "--filter=blob:none", "--branch", branch, "--single-branch", repo_url, str(staging)], project.parent, timeout_seconds, env=env)
+            result = self._run(["git", "-c", "http.connectTimeout=10", "-c", "http.lowSpeedLimit=1024", "-c", "http.lowSpeedTime=30", "clone", "--depth", "1", "--no-tags", "--filter=blob:none", "--branch", branch, "--single-branch", repo_url, str(staging)], project.parent, timeout_seconds, env=env)
             if result.exit_code != 0:
                 return result
             if project.exists() and any(project.iterdir()):

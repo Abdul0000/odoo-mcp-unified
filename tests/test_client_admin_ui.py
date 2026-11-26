@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -85,6 +86,9 @@ def test_client_save_applies_immediately_preserves_secrets_and_survives_new_proc
     assert result.status_code == 200 and result.json()['saved']
     effective = get_odoo_clients()
     assert effective[0]['branch'] == 'new-staging'
+    assert effective[0]['path'] != before[0]['path']
+    assert Path(effective[0]['path']).parent == Path(before[0]['path']).parent
+    assert Path(before[0]['path']).is_dir()
     assert effective[0]['token'] == before[0]['token'] and effective[0]['odoo_password'] == before[0]['odoo_password']
     assert effective[0]['odoosh_ssh_private_key_b64'] == before[0]['odoosh_ssh_private_key_b64']
     assert effective[1] == before[1]
@@ -406,3 +410,18 @@ def test_runtime_form_detects_environment_change_after_reload(ui, monkeypatch):
     monkeypatch.setattr(settings, 'coding_workflow_max_queue', settings.coding_workflow_max_queue + 1)
     response = client.patch('/admin/settings', headers=headers, json={'revision': before['revision'], 'values': {'job_max_count': 250}})
     assert response.status_code == 409
+
+
+def test_odoo_build_url_updates_only_linked_database_values(ui):
+    client, before = ui
+    before[0].update(odoo_url='https://project-old-123.dev.odoo.com',
+                     odoo_db='project-old-123', odoosh_db_name='project-old-123')
+    os.environ['ODOO_CLIENTS'] = json.dumps(before)
+    headers = login(client)
+    detail = client.get('/admin/clients/Alpha').json()
+    result = client.patch('/admin/clients/Alpha', headers=headers, json={
+        'revision': detail['revision'], 'values': {'odoo_url': 'https://project-new-456.dev.odoo.com'}})
+    assert result.status_code == 200
+    effective = get_odoo_clients()[0]
+    assert effective['odoo_db'] == 'project-new-456'
+    assert effective['odoosh_db_name'] == 'project-new-456'

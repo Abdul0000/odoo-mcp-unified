@@ -166,6 +166,20 @@ class ClientAdminService:
         """Keep a standard Odoo.sh build profile coherent when its URL/db moves."""
         updates = {}
         merged = {**current, **changes}
+        if ('branch' in changes or 'repo' in changes) and 'path' not in provided and current.get('path'):
+            # A target change gets its own deterministic cache. Never switch or
+            # discard the previous checkout: it may contain uncommitted work.
+            identity = json.dumps([merged.get('repo'), merged.get('branch')], separators=(',', ':'))
+            suffix = hashlib.sha256(identity.encode()).hexdigest()[:12]
+            slug = re.sub(r'[^a-z0-9_-]+', '-', str(current['name']).lower()).strip('-') or 'client'
+            updates['path'] = str(Path(current['path']).parent / (slug + '--' + suffix))
+            target = Path(updates['path']).resolve()
+            for other in get_odoo_clients():
+                if str(other.get('name', '')).casefold() == str(current['name']).casefold() or not other.get('path'):
+                    continue
+                other_path = Path(other['path']).expanduser().resolve()
+                if target.is_relative_to(other_path) or other_path.is_relative_to(target):
+                    raise HTTPException(409, 'Automatic checkout overlaps another client; choose a separate path.')
         try:
             old_host = urlsplit(str(current.get('odoo_url') or '')).hostname
             new_host = urlsplit(str(merged.get('odoo_url') or '')).hostname
@@ -178,8 +192,14 @@ class ClientAdminService:
             new_id = re.search(r'-(\d+)\.dev\.odoo\.com$', new_host)
             if old_id and new_id and str(current.get('odoosh_ssh_user')) == old_id.group(1) and 'odoosh_ssh_user' not in provided:
                 updates['odoosh_ssh_user'] = new_id.group(1)
-        if 'odoo_db' in changes and 'odoosh_db_name' not in provided and (not current.get('odoosh_db_name') or current['odoosh_db_name'] == current.get('odoo_db')):
-            updates['odoosh_db_name'] = merged['odoo_db']
+        suffix = '.dev.odoo.com'
+        if ('odoo_url' in changes and old_host and new_host
+                and old_host.endswith(suffix) and new_host.endswith(suffix)
+                and current.get('odoo_db') == old_host[:-len(suffix)]
+                and 'odoo_db' not in provided):
+            updates['odoo_db'] = new_host[:-len(suffix)]
+        if ('odoo_db' in changes or 'odoo_db' in updates) and 'odoosh_db_name' not in provided and (not current.get('odoosh_db_name') or current['odoosh_db_name'] == current.get('odoo_db')):
+            updates['odoosh_db_name'] = updates.get('odoo_db', merged.get('odoo_db'))
         if (merged.get('odoosh_ssh_host') or updates.get('odoosh_ssh_host')) and (merged.get('odoosh_ssh_user') or updates.get('odoosh_ssh_user')):
             defaults = self.defaults()
             for key in ('odoosh_odoo_path', 'odoosh_user_addons_path', 'odoosh_ssh_key_path'):
