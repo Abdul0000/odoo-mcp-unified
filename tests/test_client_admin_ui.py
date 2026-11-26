@@ -173,10 +173,13 @@ def test_validation_uses_existing_async_job_and_never_returns_its_secrets(ui, mo
     assert response.status_code == 200 and called[0].force_refresh and called[0].run_validation
     job = JsonStore().get_job(response.json()['job_id'])
     JsonStore().finish_job(job, JobStatus.passed, {'validated': True, 'coding_ready': True, 'deploy_ready': True,
-                                               'summary': 'odoo-secret-123', 'checks': {'checkout': 'ok'}})
+                                               'summary': 'odoo-secret-123', 'checks': {'checkout': 'ok'},
+                                               'validation_log': ['Repository failed: repository-secret-123', 'Odoo failed: odoo-secret-123']})
     result = client.get('/admin/validation/' + job.id)
     assert result.json()['terminal'] and result.json()['validated']
     assert 'odoo-secret-123' not in result.text
+    assert 'repository-secret-123' not in result.text
+    assert 'Repository failed' in result.json()['details']
 
 
 def test_embedded_repo_credentials_stay_hidden_and_untouched(ui, monkeypatch):

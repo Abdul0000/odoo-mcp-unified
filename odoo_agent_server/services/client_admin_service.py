@@ -51,6 +51,10 @@ class ClientAdminService:
         validation = ClientGateService().validation_state(name)
         return {'name': client['name'], 'revision': self.revision(client), 'values': values,
                 'configured_secrets': {key: bool(client.get(key)) for key in SECRETS},
+                'repository_credentials': {
+                    'configured': bool(client.get('token')),
+                    'behavior': 'Blank keeps this client’s existing token; Save & Validate checks remote repository access.',
+                },
                 'validation': {key: validation.get(key) for key in (
                     'validated', 'coding_ready', 'deploy_ready', 'data_query_ready',
                     'ssh_ready', 'validated_at', 'stale_reason', 'full_validation_passed', 'summary')},
@@ -251,15 +255,18 @@ class ClientAdminService:
             raise HTTPException(404, 'Validation job not found')
         result = job.result or {}
         text = str(result.get('summary') or result.get('error') or '')[:2000]
+        details = '\n'.join(str(line) for line in (result.get('validation_log') or [])[-20:])[:6000]
         for client in get_odoo_clients():
             for key in SECRETS | {'odoosh_ssh_private_key_b64'}:
                 secret = str(client.get(key) or '')
                 if secret:
                     text = text.replace(secret, '[hidden]')
+                    details = details.replace(secret, '[hidden]')
         return {'job_id': job.id, 'status': job.status.value,
                 'terminal': job.status.value not in {'queued', 'running'},
                 'validated': bool(result.get('validated')), 'coding_ready': bool(result.get('coding_ready')),
                 'deploy_ready': bool(result.get('deploy_ready')), 'full_validation_passed': bool(result.get('full_validation_passed')),
                 'data_query_ready': bool(result.get('data_query_ready')), 'summary': text,
+                'details': ClientGateService._redact(details),
                 'checks': result.get('checks') or {},
                 'steps': [{'name': step.name, 'status': step.status} for step in job.steps]}

@@ -65,7 +65,7 @@
   function renderChecks(checks, steps=[]) {
     $('checks').replaceChildren();
     const rows = Object.keys(checks).length ? Object.entries(checks) : steps.map(s=>[s.name,s.status]);
-    const titles={checkout:'Repository',repo_prepare:'Repository',repo:'Repository',odoo_shell:'Odoo connection',odoo_https:'Odoo HTTPS',odoosh:'Odoo.sh SSH',ssh:'Odoo.sh SSH',addons_path:'Addons path'};
+    const titles={repository:'Repository / credential access',checkout:'Repository',repo_prepare:'Repository',repo:'Repository',odoo_shell:'Odoo connection',odoo_https:'Odoo HTTPS',odoosh:'Odoo.sh SSH',ssh:'Odoo.sh SSH',addons_path:'Addons path'};
     for (const [name,value] of rows) {
       const li=document.createElement('li'); const ok=['ok','passed'].includes(value), failed=['failed','error'].includes(value);
       const icon=document.createElement('span'); icon.className=ok?'check-pass':failed?'check-fail':''; icon.textContent=ok?'✓ ':failed?'! ':'• ';
@@ -84,6 +84,12 @@
       else if (type==='checkbox') input.checked=value == null ? true : value===true || String(value).toLowerCase()==='true';
       else input.value=value == null ? (name==='odoosh_ssh_port'?'22':'') : String(value);
     }
+    const tokenNote=$('repository-token-note') || document.createElement('p');
+    tokenNote.id='repository-token-note';
+    tokenNote.textContent=detail.configured_secrets.token
+      ? 'Existing repository token will be reused when blank. Save & Validate checks access with this client’s credentials.'
+      : 'No repository token configured. Private repositories require a token for this client.';
+    if(!tokenNote.parentNode) $('credential-fields').append(tokenNote);
     markDirty(false);
   }
   async function selectClient(name) {
@@ -142,7 +148,7 @@
       if (job.terminal) {
         const ok=job.validated || job.coding_ready;
         const title=job.full_validation_passed?'Client ready':ok?(job.deploy_ready?'Coding & deployment ready · HTTPS needs attention':'Coding ready · deployment needs attention'):'Connection needs attention';
-        status(title,job.summary || 'Review the connection settings and try again.',job.full_validation_passed?'success':ok?'warning':'error');
+        status(title,[job.summary || 'Review the connection settings and try again.',job.details].filter(Boolean).join('\n'),job.full_validation_passed?'success':ok?'warning':'error');
         fill(await api('/admin/clients/'+encodeURIComponent(current.name))); return;
       }
       status('Checking connection…','Settings saved. Checking repository, Odoo and SSH access.');
