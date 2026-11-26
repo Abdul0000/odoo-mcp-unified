@@ -112,3 +112,16 @@ metadata, with provenance. Source manifests are declarations, not proof of runti
 execution. Cached facts expire after 30 minutes and cannot survive a changed
 client profile or source SHA; dirty/unavailable source is explicitly unverified.
 Runtime connection failures never invent an Odoo version or installed modules.
+
+
+Large first checkouts use a bounded 900-second preparation budget by default.
+`ODOO_AGENT_CLIENT_CHECKOUT_TIMEOUT_SECONDS` can set 30–1800 seconds. The Git
+connection preflight still fails quickly for unreachable hosts; healthy downloads
+are allowed more time instead of being cancelled at 180 seconds. A failed clone
+never replaces the configured checkout with a partial repository.
+
+Repository credentials and Odoo HTTPS credentials are separate. Successful Git
+access or Odoo.sh SSH does not validate the Odoo user's HTTPS login. After a new
+staging build, check its database URL/name and update its Odoo login/password as
+needed. A rejected HTTPS login is reported separately from coding/deployment
+readiness; the connector does not reset passwords or bypass user authentication.

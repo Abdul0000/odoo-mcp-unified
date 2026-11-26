@@ -137,6 +137,7 @@ def test_client_validation_prepares_missing_configured_checkout(monkeypatch, tmp
         _client("Alpha", "https://github.com/acme/a.git", "dev", str(checkout)),
     ])
     prepare_calls = []
+    monkeypatch.setattr(ClientGateService, "_git_remote_transport_error", lambda self, url: None)
 
     def prepare_repo(self, **kwargs):
         prepare_calls.append(kwargs)
@@ -154,7 +155,7 @@ def test_client_validation_prepares_missing_configured_checkout(monkeypatch, tmp
 
     assert checked["validated"] is True
     assert checked["checks"]["checkout"] == "ok"
-    assert prepare_calls == [{"client_name": "Alpha", "timeout_seconds": 180}]
+    assert prepare_calls == [{"client_name": "Alpha", "timeout_seconds": settings.client_checkout_timeout_seconds}]
     assert checkout.is_dir()
     ClientGateService().require_validated_client("Alpha", "workflow.odoo_code_change")
 
@@ -436,3 +437,30 @@ def test_branch_update_preserves_divergent_target_commits(branch_change_checkout
     result=ClientGateService()._check_checkout(client)
     assert result['status']=='failed' and git('rev-parse','new')==local
     assert git('branch','--show-current')=='old'
+
+
+def test_new_checkout_uses_configured_large_repository_budget(tmp_path, monkeypatch):
+    from odoo_agent_server.services.client_resolver_service import ResolvedClient
+    from odoo_agent_server.services.repo_service import RepoService
+    client = ResolvedClient(name="Large repo", repo="https://gitlab.internal/acme/a.git", branch="staging", path=str(tmp_path / "missing"))
+    monkeypatch.setattr(settings, "client_checkout_timeout_seconds", 900)
+    monkeypatch.setattr(ClientGateService, "_git_remote_transport_error", lambda self, url: None)
+    captured = {}
+    def prepare(self, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(project_path=client.path, branch=client.branch)
+    monkeypatch.setattr(RepoService, "prepare_repo", prepare)
+    assert ClientGateService()._check_checkout(client)["status"] == "ok"
+    assert captured == {"client_name": client.name, "timeout_seconds": 900}
+
+
+def test_missing_checkout_fails_fast_for_unreachable_git_host(tmp_path, monkeypatch):
+    from odoo_agent_server.services.client_resolver_service import ResolvedClient
+    from odoo_agent_server.services.repo_service import RepoService
+    client = ResolvedClient(name="Unreachable", repo="https://gitlab.internal/acme/a.git", branch="staging", path=str(tmp_path / "missing"))
+    monkeypatch.setattr(ClientGateService, "_git_remote_transport_error", lambda self, url: ("git_remote_timeout", "Git host unreachable; credentials unverified"))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Do not start a long clone when connection preflight fails")
+    monkeypatch.setattr(RepoService, "prepare_repo", forbidden)
+    result = ClientGateService()._check_checkout(client)
+    assert result["status"] == "failed" and result["error_type"] == "git_remote_timeout"

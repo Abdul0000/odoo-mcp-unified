@@ -706,7 +706,11 @@ class ClientGateService:
             # Validation itself runs in a connector-owned background job, so it
             # can safely materialize the configured checkout without holding an
             # MCP request open or passing a nonexistent path downstream.
-            result = RepoService().prepare_repo(client_name=client.name, timeout_seconds=180)
+            transport_error = self._git_remote_transport_error(client.repo)
+            if transport_error:
+                error_type, message = transport_error
+                return {"status": "failed", "network_verified": True, "error_type": error_type, "log": [message]}
+            result = RepoService().prepare_repo(client_name=client.name, timeout_seconds=settings.client_checkout_timeout_seconds)
             return {
                 "status": "ok",
                 "network_verified": True,
