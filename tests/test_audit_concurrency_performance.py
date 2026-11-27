@@ -203,32 +203,29 @@ def test_malformed_rpc_returns_protocol_error(state, payload, code, endpoint):
 
 @pytest.mark.asyncio
 async def test_concurrent_health_requests_finish_while_log_io_is_running(state, monkeypatch):
-    started, release = threading.Event(), threading.Event()
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
     def logs(*_):
         started.set()
-        release.wait(2)
+        release.wait(25)
+        finished.set()
         return {"status": "ok"}
     monkeypatch.setattr(settings, "mcp_operation_guard_enabled", False)
     monkeypatch.setattr(tools.ClientGateService, "require_validated_client", lambda *_: None)
     monkeypatch.setattr(tools, "_resolve_query_client", lambda *_: None)
     monkeypatch.setattr(tools.OdooShService, "logs_read", logs)
-    timer = threading.Timer(2, release.set)
-    timer.start()
-    try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            pending = asyncio.create_task(client.post("/mcp", headers={"Authorization": f"Bearer {settings.api_token}"}, json={
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "odoosh_logs_read", "arguments": {"last_hours": 1}},
-            }))
-            assert await asyncio.to_thread(started.wait, 1)
-            assert not release.is_set(), "Log I/O blocked the event loop"
-            responses = await asyncio.wait_for(asyncio.gather(*(client.get("/health") for _ in range(8))), timeout=1)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        pending = asyncio.create_task(client.post("/mcp", headers={"Authorization": f"Bearer {settings.api_token}"}, json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "odoosh_logs_read", "arguments": {"last_hours": 1}},
+        }))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            responses = await asyncio.wait_for(asyncio.gather(*(client.get("/health") for _ in range(8))), timeout=10)
             assert all(response.status_code == 200 for response in responses)
-            assert not pending.done()
+            assert not finished.is_set() and not pending.done(), "Health requests did not finish while log I/O was blocked"
+        finally:
             release.set()
-            assert (await pending).status_code == 200
-    finally:
-        release.set()
-        timer.cancel()
+            response, = await asyncio.gather(pending, return_exceptions=True)
+        assert isinstance(response, httpx.Response) and response.status_code == 200
 
 
 def test_job_index_reads_only_requested_records_and_recovers_external_changes(state, monkeypatch):
