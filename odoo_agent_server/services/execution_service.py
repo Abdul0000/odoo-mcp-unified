@@ -104,6 +104,56 @@ class ExecutionService:
     def root(self, workspace_id):
         return self.store.root / "workspaces" / workspace_id / "repo"
 
+    def open_qa_snapshot(self, source, key, timeout):
+        """Materialize a disposable, read-only test candidate using a private Git index."""
+        source = resolve_allowed_path(str(source))
+        from ..main import worker_readiness
+        if not (source / ".git").exists() or not worker_readiness()["ready"]:
+            raise HTTPException(503, "Isolated QA needs a Git checkout and ready worker image")
+        record, _ = self.store.create("workspace", key, {"task_description": "Isolated QA snapshot"}, status="initializing")
+        workspace_id = record["id"]
+        root = self.root(workspace_id)
+        try:
+            with tempfile.TemporaryDirectory(dir=self.store.root) as temporary:
+                env = {"GIT_INDEX_FILE": str(Path(temporary) / "index")}
+                git(["read-tree", "HEAD"], source, env=env, timeout=timeout)
+                git(["add", "-A", "--", "."], source, env=env, timeout=timeout)
+                tree = git(["write-tree"], source, env=env, timeout=timeout).strip()
+            root.parent.mkdir(parents=True)
+            git(["clone", "--local", "--no-checkout", "--", str(source), str(root)], source, timeout=timeout)
+            git(["read-tree", tree], root, timeout=timeout)
+            git(["checkout-index", "-a"], root, timeout=timeout)
+            candidate = git(["-c", "user.name=Odoo MCP QA", "-c", "user.email=qa@localhost",
+                             "commit-tree", tree, "-p", "HEAD", "-m", "Isolated QA candidate"], root, timeout=timeout).strip()
+            git(["update-ref", "HEAD", candidate], root, timeout=timeout)
+            self.store.update(workspace_id, "workspace", status="ready", phase="verify", qa_only=True,
+                              source_path=str(source), base_sha=tree)
+            return workspace_id
+        except Exception:
+            self.store.update(workspace_id, "workspace", status="failed")
+            raise
+
+    def start_qa_process(self, request):
+        record = self.workspace(request.workspace_id)
+        if not record.get("qa_only"):
+            raise HTTPException(409, "Expected an isolated QA snapshot")
+        from ..main import worker_readiness
+        worker = worker_readiness()
+        runtime = worker.get("image_id")
+        if not worker["ready"] or not str(runtime).startswith("sha256:"):
+            raise HTTPException(503, "Isolated worker image is unavailable")
+        process, _ = self.store.create("process", request.request_id, request.model_dump(),
+                                       data={"runtime_id": runtime, "qa_snapshot": True})
+        return self.poll(process["id"], max_bytes=1)
+
+    def tail_process_output(self, process_id):
+        log = self.store.root / "logs" / f"{process_id}.log"
+        if not log.is_file():
+            return ""
+        with log.open("rb") as stream:
+            stream.seek(max(0, log.stat().st_size - 12000))
+            return stream.read(12000).decode("utf-8", errors="replace")
+
     def target(self, workspace_id, relative, *, directory=False):
         self.workspace(workspace_id)
         root = self.root(workspace_id).resolve()
@@ -180,10 +230,16 @@ class ExecutionService:
                 base = git(["rev-parse", "HEAD"], path).strip()
                 if base != remote_base:
                     raise HTTPException(409, "Source has unpublished commits; preserved. Publish/reconcile them before starting a fresh task")
+            plan = request.accepted_plan
+            if plan and base != plan.base_sha:
+                raise HTTPException(409, "Checkout base differs from the approved plan; accept a revised plan")
             record = self.store.update(record["id"], "workspace", status="ready", client_name=client.name if client else None,
                                        source_path=str(source), branch=branch, base_sha=base,
                                        remote_base_sha=remote_base, source_branch=configured_branch, phase="inspect",
-                                       deploy_branch=client.branch if client else configured_branch)
+                                       deploy_branch=client.branch if client else configured_branch,
+                                       accepted_plan=plan.model_dump() if plan else None)
+            if plan:
+                self.store.update(record["id"], "workspace", protected_inputs=self._pin_inputs(record["id"], plan.protected_inputs))
             return self.status(record["id"])
         except Exception as exc:
             detail = getattr(exc, "detail", "Workspace initialization failed; source preserved")
@@ -306,10 +362,71 @@ class ExecutionService:
             git(["add", "-A", "--", "."], root, env=env)
             return git(["write-tree"], root, env=env).strip()
 
+    def _input_digest(self, workspace_id, relative):
+        try:
+            target = self.target(workspace_id, relative)
+            if target.is_file():
+                with target.open("rb") as stream:
+                    return hashlib.file_digest(stream, "sha256").hexdigest()
+            if target.is_dir():
+                digest = hashlib.sha256()
+                for count, path in enumerate(self._walk(target), 1):
+                    if count > 2000:
+                        raise HTTPException(409, "Acceptance input directory is too broad")
+                    digest.update(str(path.relative_to(target)).encode() + b"\0")
+                    if path.is_symlink():
+                        digest.update(os.readlink(path).encode() + b"\0")
+                    elif path.is_file():
+                        with path.open("rb") as stream:
+                            digest.update(hashlib.file_digest(stream, "sha256").digest())
+                return digest.hexdigest()
+        except (OSError, HTTPException):
+            return None
+        return None
+
+    def _pin_inputs(self, workspace_id, paths, *, required=True):
+        pinned = {}
+        root = self.root(workspace_id).resolve()
+        for relative in paths:
+            target = self.target(workspace_id, relative)
+            name = target.relative_to(root).as_posix()
+            digest = self._input_digest(workspace_id, name)
+            if digest is None:
+                if required:
+                    raise HTTPException(409, f"Cannot snapshot acceptance input: {name}")
+                continue
+            pinned[name] = digest
+        return pinned
+
+    @staticmethod
+    def _enforce_plan_paths(workspace, paths):
+        from .git_service import path_in_commit_scope
+
+        accepted = workspace.get("accepted_plan")
+        protected = list(workspace.get("protected_inputs", {}))
+        for path in paths:
+            if path_in_commit_scope(path, protected) or any(item.startswith(path + "/") for item in protected):
+                raise HTTPException(409, f"Acceptance input is frozen: {path}. Use an approved plan revision.")
+            if accepted and not path_in_commit_scope(path, accepted["scope_paths"]):
+                raise HTTPException(409, f"Path is outside the accepted plan: {path}")
+
+    def _changed_plan_paths(self, workspace_id, tree):
+        root = self.root(workspace_id)
+        base = self.workspace(workspace_id)["accepted_plan"]["base_sha"]
+        output = git(["diff", "--name-only", "--no-renames", "-z", base, tree, "--"], root)
+        if len(output) >= 32000:
+            raise HTTPException(409, "Approved plan change list exceeds the review limit")
+        return [path for path in output.split("\0") if path]
+
     def plan(self, request):
         with self.store.workspace_lock(request.workspace_id):
             self.assert_idle(request.workspace_id)
             workspace = self.workspace(request.workspace_id)
+            if workspace.get("qa_only"):
+                raise HTTPException(409, "QA snapshots are internal")
+            accepted = workspace.get("accepted_plan")
+            if accepted and not set(accepted["required_layers"]).issubset(request.required_layers):
+                raise HTTPException(409, "Check plan must cover every layer in the accepted plan")
             checks = [c.model_dump() for c in request.checks]
             if not set(request.required_layers).issubset({c["layer"] for c in checks}):
                 raise HTTPException(400, "Every required verification layer needs a planned check")
@@ -368,6 +485,18 @@ class ExecutionService:
                 contract["phase"] = "verify"
                 contract["runtime_error"] = None
             contract["check_results"] = results
+            protected = dict(workspace.get("protected_inputs", {}))
+            from .check_scope import test_targets
+            for check in checks:
+                runner, targets = test_targets(check["argv"])
+                if runner:
+                    cwd = Path(check["cwd"])
+                    inputs = [str(cwd / target.split("::", 1)[0]) for target in targets if target != "."]
+                    if not inputs:
+                        inputs = [str(cwd / "tests")]
+                    inputs += [str(cwd / filename) for filename in ("conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")]
+                    protected = {**self._pin_inputs(request.workspace_id, inputs, required=False), **protected}
+            contract["protected_inputs"] = protected
             self.store.update(request.workspace_id, "workspace", **contract)
             return {**self._status(request.workspace_id), "skills": [s for s in skills if s["name"] in changed_skills]}
 
@@ -384,12 +513,15 @@ class ExecutionService:
         passed_layers = sorted({c.get("layer", "unspecified") for c in workspace.get("checks", []) if c not in missing})
         required = workspace.get("required_layers", ["unit"])
         missing_layers = sorted(set(required) - set(passed_layers))
-        return {"ready": bool(workspace.get("checks")) and "required_layers" in workspace and not missing and not missing_layers and not exhausted,
+        changed_inputs = [path for path, digest in workspace.get("protected_inputs", {}).items()
+                          if self._input_digest(workspace_id, path) != digest]
+        return {"ready": bool(workspace.get("checks")) and "required_layers" in workspace and not missing and not missing_layers and not exhausted and not changed_inputs,
                 "tree": tree, "missing_checks": [c["name"] for c in missing],
                 "scope": "declared_checks_only", "passed_layers": passed_layers, "missing_layers": missing_layers,
                 "orm_verified": "orm" in passed_layers, "deployment_verified": False,
                 "next_check": missing[0] if missing and not exhausted else None,
-                "repair_attempts": workspace.get("repair_attempts", 0), "needs_input": exhausted,
+                "repair_attempts": workspace.get("repair_attempts", 0), "needs_input": exhausted or bool(changed_inputs),
+                "changed_acceptance_inputs": changed_inputs,
                 "results": results}
 
     def runtime_id(self):
@@ -489,7 +621,7 @@ class ExecutionService:
                 self.store.update(ws, "workspace", check_results=results, repair_attempts=attempts, failure_streaks=streaks, phase=phase,
                                   runtime_error=details.get("error") if status == "runtime_unavailable" else None)
             else:
-                self.store.update(ws, "workspace", phase=phase)
+                self.store.update(ws, "workspace", phase="done" if record.get("qa_snapshot") else phase)
             return self.store.update(record["id"], "process", status=status, **details)
 
     def files(self, request: WorkspaceFiles):
@@ -508,6 +640,15 @@ class ExecutionService:
             raise HTTPException(409, "Workspace has a queued/running command; poll or cancel it before editing or publishing")
 
     def _files(self, request: WorkspaceFiles):
+        workspace = self.workspace(request.workspace_id)
+        if workspace.get("qa_only"):
+            raise HTTPException(409, "QA snapshots are internal and immutable")
+        if request.operation in {"batch", "write"}:
+            paths = [request.path] if request.operation == "write" else [
+                path for edit in request.edits or [] for path in (edit.path, edit.destination) if path
+            ]
+            normalized = [self.target(request.workspace_id, path).relative_to(self.root(request.workspace_id).resolve()).as_posix() for path in paths]
+            self._enforce_plan_paths(workspace, normalized)
         if request.operation == "batch":
             from .task_edit_service import apply_edits
             return apply_edits(self, request.workspace_id, request.edits)
@@ -583,6 +724,8 @@ class ExecutionService:
                 yield Path(parent, name)
 
     def start_process(self, request):
+        if self.workspace(request.workspace_id).get("qa_only"):
+            raise HTTPException(409, "QA snapshots accept only server-owned checks")
         if self.workspace(request.workspace_id).get("publishing"):
             raise HTTPException(409, "Publishing is active; poll its operation before submitting commands")
         self.target(request.workspace_id, request.cwd, directory=True)
@@ -670,6 +813,8 @@ class ExecutionService:
                 raise HTTPException(409, {"error_code": "resolution_stale", "actual_head": latest, "message": "Remote moved; inspect conflicts again before resolving"})
             if latest == ws.get("remote_base_sha"):
                 return {"status": "up_to_date", "workspace_id": wid, "remote_sha": latest}
+            if ws.get("accepted_plan") and latest != ws["accepted_plan"]["base_sha"]:
+                raise HTTPException(409, "Upstream changed since plan approval. Preserve the workspace and approve a revised plan against the new base.")
             # Each call performs one bounded merge, not an internal retry loop.
             # Independent upstream updates must not exhaust a lifetime quota.
             old_head = git(["rev-parse", "HEAD"], root).strip()
@@ -814,6 +959,8 @@ class ExecutionService:
 
     def _publish(self, request):
         workspace = self.workspace(request.workspace_id)
+        if workspace.get("qa_only"):
+            raise HTTPException(409, "QA snapshots cannot be published")
         client = ClientResolverService().resolve_client(workspace.get("client_name"), project_path=workspace["source_path"], require_complete=False)
         branch = request.branch or workspace["branch"]
         if not RepoService()._safe_branch_name(branch):
@@ -824,6 +971,9 @@ class ExecutionService:
         if not verification["ready"]:
             raise HTTPException(409, {"message": "Publish requires all planned checks to pass on the current tree",
                                       "verification": verification})
+        if workspace.get("accepted_plan"):
+            accepted_scope = {**workspace, "protected_inputs": {}}
+            self._enforce_plan_paths(accepted_scope, self._changed_plan_paths(request.workspace_id, verification["tree"]))
         validate_git_artifacts(self.root(request.workspace_id),
                                ["diff", "--name-only", "-z", "--diff-filter=ACMRT", "HEAD", verification["tree"], "--"])
         approvals = ApprovalService()

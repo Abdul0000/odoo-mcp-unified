@@ -26,17 +26,24 @@ from .services.execution_service import ExecutionService
 
 class ExecutionWorker:
     def __init__(self, *, service=None):
+        from uuid import uuid4
+
         self.service = service or ExecutionService()
         self.store = self.service.store
         self.stopping = False
         self._heartbeat_lock = threading.Lock()
         self._last_heartbeat = 0.0
+        self.instance_id = uuid4().hex
+        from .services.runtime_identity_service import runtime_identity
+        self.release_commit = runtime_identity()["commit_sha"]
 
     def heartbeat(self):
         with self._heartbeat_lock:
             if time.monotonic() - self._last_heartbeat < 1:
                 return
-            self.store._write(self.store.root / "worker-heartbeat", time.time())
+            self.store._write(self.store.root / "worker-heartbeat", {
+                "observed_at": time.time(), "instance_id": self.instance_id, "commit_sha": self.release_commit,
+            })
             self._last_heartbeat = time.monotonic()
 
     @staticmethod
@@ -78,7 +85,7 @@ class ExecutionWorker:
                 "--security-opt", "no-new-privileges", "--pids-limit", "128", "--cpus", "1",
                 "--memory", settings.execution_memory, "--memory-swap", settings.execution_memory,
                 "--user", f"{stat.st_uid}:{stat.st_gid}",
-                "--mount", f"type=bind,src={root},dst=/workspace" + (",readonly" if req.check_name else ""),
+                "--mount", f"type=bind,src={root},dst=/workspace" + (",readonly" if req.check_name or record.get("qa_snapshot") else ""),
                 "--mount", f"type=bind,src={root / '.git'},dst=/workspace/.git,readonly",
                 "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
                 "--workdir", "/workspace" + ("/" + str(cwd) if str(cwd) != "." else ""),
@@ -92,18 +99,23 @@ class ExecutionWorker:
     def refresh_capabilities(self):
         probe = "import importlib.util,shutil,json;print(json.dumps({'python':True,'odoo':importlib.util.find_spec('odoo') is not None,'npm':bool(shutil.which('npm')),'node':bool(shutil.which('node'))}))"
         try:
-            result = subprocess.run(["docker", "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
-                                     "--memory", "96m", "--pids-limit", "64", "--user", f"{os.getuid()}:{os.getgid()}",
-                                     settings.execution_image, "python", "-c", probe],
-                                    env={"PATH": os.defpath, "HOME": "/tmp"}, capture_output=True, text=True, timeout=15)
-            value = json.loads(result.stdout) if result.returncode == 0 else {}
+            env = {"PATH": os.defpath, "HOME": "/tmp"}
             image = subprocess.run(["docker", "image", "inspect", "--format", "{{.Id}}", settings.execution_image],
-                                   env={"PATH": os.defpath, "HOME": "/tmp"}, capture_output=True, text=True, timeout=5)
-            if image.returncode == 0:
-                value["image_id"] = image.stdout.strip()
-        except (OSError, ValueError, subprocess.TimeoutExpired):
+                                   env=env, capture_output=True, text=True, timeout=5, check=True)
+            image_id = image.stdout.strip()
+            if not image_id.startswith("sha256:"):
+                raise ValueError("Worker image has no content digest")
+            result = subprocess.run(["docker", "run", "--pull", "never", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                                     "--memory", "96m", "--pids-limit", "64", "--user", f"{os.getuid()}:{os.getgid()}",
+                                     image_id, "python", "-c", probe],
+                                    env=env, capture_output=True, text=True, timeout=15, check=True)
+            value = {**json.loads(result.stdout), "image_id": image_id}
+        except (OSError, TypeError, ValueError, subprocess.SubprocessError):
             value = {}
-        self.store._write(self.store.root / "capabilities.json", {**value, "image": settings.execution_image, "memory_limit": settings.execution_memory, "tmpfs_bytes": 67108864, "observed_at": time.time()})
+        self.store._write(self.store.root / "capabilities.json", {**value, "image": settings.execution_image,
+            "instance_id": self.instance_id, "commit_sha": self.release_commit,
+            "memory_limit": settings.execution_memory, "tmpfs_bytes": 67108864, "observed_at": time.time()})
+        return bool(value.get("python") and value.get("image_id"))
 
     def execute(self, record):
         process_id = record["id"]
@@ -293,7 +305,10 @@ class ExecutionWorker:
         with (self.store.root / "worker.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.recover()
-            self.refresh_capabilities()
+            self.heartbeat()
+            while not self.stopping and self.refresh_capabilities() is False:
+                self.heartbeat()
+                time.sleep(2)
             with ThreadPoolExecutor(max_workers=settings.execution_max_workers) as pool:
                 running = {}
                 while not self.stopping:

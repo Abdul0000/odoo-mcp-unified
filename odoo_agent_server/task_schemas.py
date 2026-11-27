@@ -2,6 +2,7 @@
 
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
+from .execution_schemas import AcceptedPlan
 
 
 class TaskOpen(BaseModel):
@@ -11,6 +12,9 @@ class TaskOpen(BaseModel):
     description: str = Field(min_length=1, max_length=2000)
     target: Literal["coding", "push", "deploy", "functional"]
     module_name: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    risk_level: Literal["routine", "high"] | None = None
+    accepted_plan: AcceptedPlan | None = None
+    plan_approval_id: str | None = None
 
 
 class TaskId(BaseModel):

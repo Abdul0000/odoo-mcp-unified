@@ -106,21 +106,30 @@ def health() -> dict[str, object]:
     }
 
 
-@app.get("/ready")
-def readiness():
-    """Readiness includes worker evidence; /health remains a liveness probe."""
-    live = health()
+def worker_readiness():
     worker = {"required": settings.execution_enabled, "ready": not settings.execution_enabled}
     if settings.execution_enabled:
         try:
             root = Path(settings.execution_root)
-            age = max(0, time.time() - float(json.loads((root / "worker-heartbeat").read_text())))
+            heartbeat = json.loads((root / "worker-heartbeat").read_text())
+            age = max(0, time.time() - float(heartbeat["observed_at"]))
             capabilities = json.loads((root / "capabilities.json").read_text())
             worker.update(heartbeat_age_seconds=round(age, 2), image_id=capabilities.get("image_id"),
+                          instance_id=heartbeat.get("instance_id"), probed_at=capabilities.get("observed_at"),
                           ready=age < 15 and capabilities.get("image") == settings.execution_image
+                          and bool(heartbeat.get("instance_id")) and heartbeat["instance_id"] == capabilities.get("instance_id")
+                          and heartbeat.get("commit_sha") == capabilities.get("commit_sha") == runtime_identity()["commit_sha"]
                           and bool(capabilities.get("python") and capabilities.get("image_id")))
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             worker["reason"] = "Worker heartbeat or runtime proof unavailable"
+    return worker
+
+
+@app.get("/ready")
+def readiness():
+    """Readiness includes worker evidence; /health remains a liveness probe."""
+    live = health()
+    worker = worker_readiness()
     ready = live["status"] == "ok" and worker["ready"]
     return JSONResponse({"status": "ok" if ready else "not_ready", "worker": worker,
                          "runtime": live["runtime"]}, status_code=200 if ready else 503)

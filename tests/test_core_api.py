@@ -110,10 +110,17 @@ def test_readiness_requires_fresh_worker_and_runtime_proof(tmp_path, monkeypatch
     client = TestClient(app)
     assert client.get('/health').status_code == 200
     assert client.get('/ready').status_code == 503
-    (tmp_path / 'worker-heartbeat').write_text(json.dumps(time.time()))
-    (tmp_path / 'capabilities.json').write_text(json.dumps({'image': settings.execution_image, 'image_id': 'sha256:proof', 'python': True}))
+    commit = client.get('/health').json()['runtime']['commit_sha']
+    identity = {'instance_id': 'new-worker', 'commit_sha': commit}
+    heartbeat = {'observed_at': time.time(), **identity}
+    capabilities = {'image': settings.execution_image, 'image_id': 'sha256:proof', 'python': True,
+                    'observed_at': time.time(), **identity}
+    (tmp_path / 'worker-heartbeat').write_text(json.dumps(heartbeat))
+    (tmp_path / 'capabilities.json').write_text(json.dumps({**capabilities, 'instance_id': 'old-worker'}))
+    assert client.get('/ready').status_code == 503
+    (tmp_path / 'capabilities.json').write_text(json.dumps(capabilities))
     assert client.get('/ready').status_code == 200
-    (tmp_path / 'worker-heartbeat').write_text(json.dumps(time.time() - 60))
+    (tmp_path / 'worker-heartbeat').write_text(json.dumps({**heartbeat, 'observed_at': time.time() - 60}))
     assert client.get('/ready').status_code == 503
 
 

@@ -1,7 +1,8 @@
 """Compact contracts for local task workspaces and the durable execution worker."""
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ExecutionRequest(BaseModel):
@@ -12,6 +13,33 @@ class ExecutionStatus(ExecutionRequest):
     operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
+class AcceptedPlan(ExecutionRequest):
+    revision: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,100}$")
+    base_sha: str = Field(pattern=r"^[a-f0-9]{40,64}$")
+    scope_paths: list[str] = Field(min_length=1, max_length=25)
+    acceptance_criteria: list[str] = Field(min_length=1, max_length=20)
+    required_layers: list[Literal["syntax", "unit", "build", "orm", "integration"]] = Field(min_length=1, max_length=5)
+    protected_inputs: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("scope_paths", "protected_inputs")
+    @classmethod
+    def repo_relative_paths(cls, values):
+        paths = []
+        for value in values:
+            path = PurePosixPath(value.replace("\\", "/"))
+            if not path.parts or path.is_absolute() or ":" in str(path) or "\0" in str(path) or {"..", ".git"}.intersection(path.parts):
+                raise ValueError("Plan paths must be repository-relative files or directories")
+            paths.append(path.as_posix())
+        return list(dict.fromkeys(paths))
+
+    @field_validator("acceptance_criteria")
+    @classmethod
+    def bounded_criteria(cls, values):
+        if any(not value.strip() or len(value) > 2000 for value in values):
+            raise ValueError("Acceptance criteria must be non-empty and at most 2000 characters each")
+        return values
+
+
 class WorkspaceOpen(ExecutionRequest):
     client_name: str | None = None
     project_path: str | None = None
@@ -19,6 +47,7 @@ class WorkspaceOpen(ExecutionRequest):
     branch: str | None = Field(default=None, max_length=200)
     fresh: bool = True
     scope_paths: list[str] = Field(default_factory=list, max_length=25)
+    accepted_plan: AcceptedPlan | None = None
     request_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 

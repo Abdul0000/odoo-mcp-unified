@@ -6479,7 +6479,7 @@ async def _workflow_odoo_code_change_impl(payload: OdooCodeChangeRequest) -> dic
         if payload.auto_deploy else None
     )
     require_runtime_tests = "tests" in (module_contract.get("required_layers") or [])
-    qa = self_run(SelfRunRequest(
+    qa = await asyncio.to_thread(self_run, SelfRunRequest(
         project_path=project_path,
         client_name=client_name,
         module_name=effective_module_name,

@@ -35,6 +35,26 @@ def task(execution, monkeypatch):  # noqa: F811
     return ledger, opened["task_id"], svc, wid, clients
 
 
+def test_high_risk_plan_needs_bound_approval(task):
+    ledger, _, service, wid, _ = task
+    from odoo_agent_server.schemas import ApprovalStatus
+    from odoo_agent_server.services.store_service import JsonStore
+
+    data = dict(client_name="Alpha", request_id="high-risk-fixture", description="Release a scoped change", target="push", risk_level="high")
+    with pytest.raises(HTTPException, match="versioned implementation plan"):
+        ledger.open(TaskOpen(**data))
+    data["accepted_plan"] = {"revision": "revision-1", "base_sha": service.workspace(wid)["base_sha"],
+                             "scope_paths": ["hello.py"], "acceptance_criteria": ["Calculation passes"],
+                             "required_layers": ["unit"]}
+    with pytest.raises(HTTPException) as exc:
+        ledger.open(TaskOpen(**data))
+    approval_id = exc.value.detail["approval_id"]
+    JsonStore().set_approval_status(approval_id, ApprovalStatus.approved)
+    opened = ledger.open(TaskOpen(**data, plan_approval_id=approval_id))
+    assert opened["accepted_plan"]["revision"] == "revision-1"
+    assert opened["plan_approval_id"] == approval_id
+
+
 def test_task_contract_idempotency_and_configuration_invalidation(task, monkeypatch):
     ledger, tid, _, _, clients = task
     again = ledger.open(TaskOpen(client_name="Alpha", request_id="durable-task-001", description="Fix calculation", target="push", module_name="addon"))

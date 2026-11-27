@@ -1,6 +1,4 @@
 """Execution tool registry shared by MCP and the autonomous worker."""
-import time
-
 from .execution_schemas import AgentId, AgentStart, ExecutionStatus, ProcessId, ProcessInput, ProcessPoll, ProcessStart, TaskPlan, WorkspaceFiles, WorkspaceId, WorkspaceStatus, WorkspaceOpen, WorkspacePublish, WorkspaceSync
 from .services.execution_service import ExecutionService
 
@@ -32,17 +30,17 @@ def dispatch_execution(name, args, *, service=None):
     if name == "execution.status":
         if req.operation_id:
             return svc.operation_status(req.operation_id)
-        heartbeat = svc.store.root / "worker-heartbeat"
-        age = time.time() - float(heartbeat.read_text()) if heartbeat.exists() else None
+        from .main import worker_readiness
         from .config import settings
-        return {"status": "ready" if age is not None and age < 120 else "worker_unavailable",
-                "heartbeat_age_seconds": round(age, 1) if age is not None else None,
+        worker = worker_readiness()
+        return {"status": "ready" if worker["ready"] else "worker_unavailable",
+                "heartbeat_age_seconds": worker.get("heartbeat_age_seconds"),
                 "mode": "chatgpt_mcp", "requires_model_key": False,
                 "max_parallel_commands": settings.execution_max_workers,
                 "runtime_capabilities": svc.store._read(svc.store.root / "capabilities.json") or {},
                 "recent_tasks": [{"workspace_id": row["id"], "client_name": row.get("client_name"),
                                   "branch": row.get("branch"), "last_known_phase": row.get("phase", row["status"]),
-                                  "updated_at": row["updated_at"]} for row in svc.store.recent("workspace")],
+                                  "updated_at": row["updated_at"]} for row in svc.store.recent("workspace") if not row.get("qa_only")],
                 "agent_configured": bool(settings.agent_api_key and settings.agent_model),
                 "execution": "Docker; no network; task-only mount; bounded memory, runtime and logs"}
     if name == "execution.workspace_open":

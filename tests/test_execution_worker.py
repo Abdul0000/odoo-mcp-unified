@@ -64,6 +64,46 @@ def queue(service, workspace, code, **kwargs):
     return service.store.claim("process"), result
 
 
+def test_qa_snapshot_contains_dirty_candidate_without_touching_source(execution, monkeypatch):
+    service, _, source, _ = execution
+    from odoo_agent_server import main
+
+    monkeypatch.setattr(main, "worker_readiness", lambda: {"ready": True, "image_id": "sha256:fixture"})
+    original_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source)
+    (source / "hello.py").write_text("VALUE = 'candidate'\n")
+    (source / "test_candidate.py").write_text("def test_candidate(): assert True\n")
+    wid = service.open_qa_snapshot(source, "qa-snapshot-fixture", 20)
+    assert (service.root(wid) / "hello.py").read_bytes() == (source / "hello.py").read_bytes()
+    assert (service.root(wid) / "test_candidate.py").is_file()
+    assert not subprocess.check_output(["git", "status", "--porcelain"], cwd=service.root(wid))
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source) == original_head
+    request = ProcessStart(workspace_id=wid, request_id="qa-process-fixture", argv=["python", "-V"])
+    with pytest.raises(HTTPException, match="server-owned checks"):
+        service.start_process(request)
+    process = service.start_qa_process(request)
+    record = service.store.get(process["process_id"], "process")
+    assert record["qa_snapshot"] is True
+    assert any(arg.endswith("dst=/workspace,readonly") for arg in ExecutionWorker(service=service).command(record))
+
+
+def test_verification_freezes_test_inputs(execution):
+    service, wid, _, _ = execution
+    tests = service.root(wid) / "tests"
+    tests.mkdir()
+    target = tests / "test_candidate.py"
+    target.write_text("def test_candidate(): assert True\n")
+    service.plan(TaskPlan(workspace_id=wid, checks=[{
+        "name": "acceptance", "argv": ["python", "-m", "pytest", "tests"], "layer": "unit",
+    }]))
+    with pytest.raises(HTTPException, match="Acceptance input is frozen"):
+        service.files(WorkspaceFiles(workspace_id=wid, operation="write",
+                                     path="tests/test_candidate.py", content="# replaced"))
+    target.write_text("# externally changed\n")
+    result = service.verification(wid)
+    assert result["changed_acceptance_inputs"] == ["tests"]
+    assert not result["ready"]
+
+
 def test_workspace_isolated_idempotent_and_cas(execution):
     service, ws, source, _ = execution
     reopened = service.open(WorkspaceOpen(project_path=str(source), task_description="Test isolated coding", request_id="workspace-1"))

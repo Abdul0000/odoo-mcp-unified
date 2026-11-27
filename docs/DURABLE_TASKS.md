@@ -32,6 +32,17 @@ expose provider-hidden tools through an arbitrary tool tunnel.
    evidence. The worker can supply a passing unit or ORM layer from the adopted
    commit. Standalone QA reports `static_status` and `runtime_test_status`
    separately, including deferred native tests.
+   Repository pytest runs in a read-only snapshot on the isolated worker. An
+   unavailable worker or an all-skipped suite cannot satisfy required QA.
+   A changed retry candidate must repeat the configured QA before push.
+
+For high-risk implementation, pass `risk_level=high` and an `accepted_plan`
+to `task_open`. The plan identifies the revision, base SHA, allowed paths,
+acceptance criteria, required layers and any additional protected inputs.
+Approve the generated plan record and retry with its `plan_approval_id`.
+The linked workspace enforces the approved base, scope and evidence layers.
+Existing tests selected by planned checks and declared protected inputs are
+fingerprinted. Use an approved revision if their contents or the base must change.
 6. `task_resume` performs bounded read-only workspace/process/job reconciliation.
    It never replays a commit, push, upgrade or record action. A source match alone
    cannot confirm a module upgrade or business outcome. Task claims describe only

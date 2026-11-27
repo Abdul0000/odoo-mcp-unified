@@ -2429,6 +2429,10 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
     def _run_fix_cycle(attempt: int, deploy_result, error_pack: CommandResult) -> bool:
         nonlocal verify_files, expected_user_hashes, expected_registry_fields, pushed_sha, push_started_epoch, fix_cycle_blocked_by_verifier
         fix_cycle_blocked_by_verifier = False
+        if payload.execution_workspace_id:
+            _step(f"fix_cycle_{attempt}", "failed", error="Reverify and publish the retry from the execution workspace; its previous proof covers only the adopted commit.")
+            fix_cycle_blocked_by_verifier = True
+            return False
         implicated_files = _error_pack_implicated_files(
             project_path=project_path,
             module_name=payload.module_name,
@@ -2443,6 +2447,9 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         if implicated_files:
             try:
                 retry_tree = snapshot_deploy_tree(retry_paths)
+                if (payload.run_qa or payload.require_runtime_tests) and not run_deploy_qa(payload.require_runtime_tests):
+                    fix_cycle_blocked_by_verifier = True
+                    return False
                 verifier_payload = SyntaxVerifierService().verify(SyntaxVerifyRequest(
                     written_files=implicated_files,
                     fix_cycle=attempt,

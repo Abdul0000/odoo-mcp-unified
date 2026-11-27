@@ -97,6 +97,9 @@ rollback() {
 }
 trap rollback ERR
 if [[ -n "${CANDIDATE_IMAGE:-}" ]]; then docker tag "$CANDIDATE_IMAGE" odoo-mcp-execution:local; fi
+EXPECTED_IMAGE=""
+if [[ -n "${CANDIDATE_IMAGE:-}" ]]; then EXPECTED_IMAGE="$(docker image inspect --format '{{.Id}}' "$CANDIDATE_IMAGE")"; fi
+ROLLOUT_STARTED="$(date +%s)"
 switch_links
 systemctl restart "$SERVICE"
 if systemctl is-active --quiet odoo-mcp-execution.service; then
@@ -104,7 +107,18 @@ if systemctl is-active --quiet odoo-mcp-execution.service; then
 fi
 healthy=0
 for ((i=0; i<HEALTH_TIMEOUT; i++)); do
-  if curl --fail --silent --max-time 3 "${HEALTH_URL%/health}/ready" | grep -q '"status":"ok"'; then healthy=1; break; fi
+  if curl --fail --silent --max-time 3 "${HEALTH_URL%/health}/ready" | "$VENV/bin/python" -c '
+import json, sys
+try:
+    response = json.load(sys.stdin)
+    worker = response["worker"]
+    ready = response["status"] == "ok" and response["runtime"]["commit_sha"] == sys.argv[1]
+    if sys.argv[2]:
+        ready = ready and worker["ready"] and worker["image_id"] == sys.argv[2] and worker["probed_at"] >= int(sys.argv[3])
+except (ValueError, KeyError, TypeError):
+    ready = False
+sys.exit(0 if ready else 1)
+' "$COMMIT" "$EXPECTED_IMAGE" "$ROLLOUT_STARTED"; then healthy=1; break; fi
   sleep 1
 done
 if [[ "$healthy" != 1 ]]; then echo "Health check failed for $COMMIT" >&2; false; fi

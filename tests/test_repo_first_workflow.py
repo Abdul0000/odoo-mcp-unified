@@ -90,9 +90,11 @@ def test_repo_timeout_stops_descendant_processes(tmp_path):
                 os.kill(child, 0)
             except ProcessLookupError:
                 break
-            stat = Path(f"/proc/{child}/stat")
-            if stat.exists() and stat.read_text().split()[2] == "Z":
-                break  # Dead child awaiting reaping by the container's PID 1.
+            try:
+                if Path(f"/proc/{child}/stat").read_text().split()[2] == "Z":
+                    break  # Dead child awaiting reaping by the container's PID 1.
+            except (FileNotFoundError, ProcessLookupError):
+                break  # The child was reaped between checks.
             time.sleep(0.02)
         else:
             raise AssertionError("Timed-out command left its child running")

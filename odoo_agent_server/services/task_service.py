@@ -145,7 +145,10 @@ class TaskService:
     def open(self, request):
         client = ClientAdminService()._client(request.client_name)
         task_id = hashlib.sha256((str(client["name"]).casefold() + "\0" + request.request_id).encode()).hexdigest()[:32]
-        contract = request.model_dump()
+        contract = request.model_dump(exclude={"plan_approval_id"})
+        for optional in ("risk_level", "accepted_plan"):
+            if contract[optional] is None:
+                contract.pop(optional)
         contract["client_name"] = client["name"]
         fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
         with self.lock(task_id):
@@ -154,8 +157,21 @@ class TaskService:
                 if task["fingerprint"] != fingerprint:
                     raise HTTPException(409, "request_id already belongs to another task contract")
             else:
+                if request.risk_level == "high" and request.accepted_plan is None:
+                    raise HTTPException(409, "High-risk work requires a versioned implementation plan")
                 if sum(1 for _ in self.root.glob("*.json")) >= settings.job_max_count:
                     raise HTTPException(429, "Task retention capacity reached; archive completed task checkpoints before creating more.")
+                approval = None
+                plan = None
+                if request.accepted_plan:
+                    from .approval_service import ApprovalService
+                    plan = {**contract["accepted_plan"],
+                            "acceptance_criteria": [scrub(item) for item in request.accepted_plan.acceptance_criteria]}
+                    approval = ApprovalService()
+                    approval.ensure_allowed("task.accept_plan", request.plan_approval_id,
+                                            {"task_id": task_id, "contract_sha256": fingerprint,
+                                             "plan": plan},
+                                            force=True, bind_payload=True)
                 task = {
                     "task_id": task_id,
                     "fingerprint": fingerprint,
@@ -172,8 +188,12 @@ class TaskService:
                     "events": [],
                     "refs": {},
                     "claims": {},
+                    "accepted_plan": plan,
+                    "plan_approval_id": request.plan_approval_id if approval else None,
                 }
                 self.save(task)
+                if approval:
+                    approval.mark_consumed(request.plan_approval_id)
         return self.public(task)
 
     def current(self, task):
@@ -388,6 +408,15 @@ class TaskService:
                     args[key] = candidates[0]
         if name == "execution.workspace_open":
             args.setdefault("task_description", task["description"])
+            if args.get("accepted_plan") and args["accepted_plan"] != task.get("accepted_plan"):
+                raise HTTPException(409, "Workspace plan must match the approved task revision")
+            if task.get("accepted_plan"):
+                args["accepted_plan"] = task["accepted_plan"]
+        if task.get("accepted_plan") and name in {
+            "workflow.odoo_code_change", "workflow.odoo_debug_and_fix",
+            "workflow.frontend_visual_implement", "workflow.resume_continuation",
+        }:
+            raise HTTPException(409, "Approved-plan tasks must use an execution workspace")
         if name == "execution.publish":
             args.setdefault("push", task["target"] != "coding")
             args.setdefault("message", task["description"])

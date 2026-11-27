@@ -11,9 +11,9 @@ from ..services.validator_service import OdooModuleValidator
 router = APIRouter(prefix="/qa", tags=["qa"], dependencies=[AuthDependency])
 
 
-def _module_test_strategy(module_path, project_path, requested: str) -> tuple[str, list[str]]:
+def _module_test_strategy(module_path, project_path, requested: str, *, module_only: bool = False) -> tuple[str, list[str]]:
     module_tests = sorted((module_path / "tests").glob("test_*.py")) if (module_path / "tests").is_dir() else []
-    project_tests = sorted((project_path / "tests").glob("test_*.py")) if (project_path / "tests").is_dir() else []
+    project_tests = sorted((project_path / "tests").glob("test_*.py")) if not module_only else []
     if requested == "none":
         return "none", []
     if requested == "odoo_native":
@@ -100,16 +100,17 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
             module_path,
             project_path,
             payload.test_strategy,
+            module_only=payload.require_runtime_tests,
         )
-        if selected_test_strategy == "pytest":
+        if selected_test_strategy == "pytest" and selected_test_targets:
             pytest_result = runner.pytest(
                 project_path,
                 timeout_seconds=payload.timeout_seconds,
                 targets=selected_test_targets,
             )
             commands.append(pytest_result)
-            runtime_status = "passed" if pytest_result.exit_code == 0 else "failed"
-            if pytest_result.exit_code != 0:
+            runtime_status = {0: "passed", 125: "unavailable"}.get(pytest_result.exit_code, "failed")
+            if runtime_status == "failed":
                 findings.append(
                     Finding(
                         severity=Severity.error,
