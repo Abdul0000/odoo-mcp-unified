@@ -106,6 +106,20 @@ def test_json2_only_client_does_not_require_legacy_password():
     assert service._api_key() == "test-api-key"
 
 
+def test_json2_can_use_host_selected_database(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(service, "_db", lambda: None)
+    calls = []
+
+    def json2(model, method, params, timeout):
+        calls.append((model, method))
+        return []
+
+    monkeypatch.setattr(service, "_json2_call", json2)
+    assert service.search_read("res.partner").status == "ok"
+    assert calls == [("res.partner", "search_read")]
+
+
 def test_json2_request_uses_bearer_key_and_database_header(monkeypatch):
     service = _service()
     seen = {}

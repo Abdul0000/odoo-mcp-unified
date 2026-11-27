@@ -898,6 +898,7 @@ class TaskService:
                 commit_message=task["description"][:300],
                 execution_workspace_id=wid,
                 verification_assertion=request.verification_assertion,
+                require_runtime_tests=request.require_runtime_tests,
                 approval_id=request.approval_id,
                 wait_for_result=False,
                 github_push_fallback=False,

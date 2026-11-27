@@ -318,7 +318,7 @@ def _asset_path_exists(module_root: Path, asset: str) -> bool:
     if any(candidate.exists() for candidate in raw_candidates):
         return True
     if "*" in asset:
-        return bool(glob.glob(str(parent / asset)) or glob.glob(str(module_root / asset)))
+        return bool(glob.glob(str(parent / asset), recursive=True) or glob.glob(str(module_root / asset), recursive=True))
     return False
 
 
@@ -799,10 +799,10 @@ class SyntaxVerifierService:
                         message=f"depends[] '{dep}' — verified exists in src roots.",
                         fix_hint="",
                     ))
-        findings.extend(self._verify_manifest_assets(file_path, content))
+        findings.extend(self._verify_manifest_assets(file_path, content, client_name))
         return findings
 
-    def _verify_manifest_assets(self, file_path: str, content: str) -> list[VerifyFinding]:
+    def _verify_manifest_assets(self, file_path: str, content: str, client_name: str | None = None) -> list[VerifyFinding]:
         findings: list[VerifyFinding] = []
         try:
             manifest = ast.literal_eval(content)
@@ -814,6 +814,9 @@ class SyntaxVerifierService:
         if not isinstance(assets, dict):
             return findings
         module_root = Path(file_path).parent
+        declared = manifest.get("depends")
+        dependencies = {item for item in declared if isinstance(item, str)} if isinstance(declared, (list, tuple)) else set()
+        addon_sources: dict[str, list[Path]] = {}
         # Bundle ownership cannot be inferred from addon, directory, or file
         # names. Names such as ``pos_*``, ``website_*``, and ``*_editor`` are
         # valid in multiple Odoo applications and bundles. Keep this syntax
@@ -823,14 +826,29 @@ class SyntaxVerifierService:
         # available.
         for bundle, entries in assets.items():
             for asset in _flatten_asset_entries(entries):
-                if not _asset_path_exists(module_root, asset):
-                    findings.append(VerifyFinding(
-                        file=file_path,
-                        severity=VerifySeverity.CRITICAL,
-                        check="manifest_asset_exists",
-                        message=f"Asset '{asset}' in bundle '{bundle}' does not resolve to a file/glob from this module.",
-                        fix_hint="Fix the asset path or remove it from __manifest__.py before pushing.",
-                    ))
+                if _asset_path_exists(module_root, asset):
+                    continue
+                owner, _, relative = asset.partition("/")
+                if relative.startswith("static/") and owner != module_root.name and re.fullmatch(r"[A-Za-z0-9_]+", owner):
+                    if owner not in addon_sources:
+                        addon_sources[owner] = _iter_module_dirs(owner, client_name)
+                    sources = addon_sources[owner]
+                    if any(_asset_path_exists(source, asset) for source in sources):
+                        continue
+                    if not sources and owner in dependencies:
+                        findings.append(VerifyFinding(
+                            file=file_path, severity=VerifySeverity.WARNING, check="manifest_asset_unverified",
+                            message=f"Asset '{asset}' in bundle '{bundle}' could not be checked because '{owner}' source is unavailable.",
+                            fix_hint="Verify the asset and bundle order against the installed dependency.",
+                        ))
+                        continue
+                findings.append(VerifyFinding(
+                    file=file_path,
+                    severity=VerifySeverity.CRITICAL,
+                    check="manifest_asset_exists",
+                    message=f"Asset '{asset}' in bundle '{bundle}' does not resolve to a file or glob.",
+                    fix_hint="Fix the asset path or remove it from __manifest__.py before pushing.",
+                ))
         return findings
 
     # ------------------------------------------------------------------
@@ -1387,7 +1405,14 @@ class SyntaxVerifierService:
                 ),
             ))
 
-        if modern_signals and "/** @odoo-module **/" not in content:
+        module_root = _addon_root(file_path)
+        _, _, major = _manifest_context(file_path)
+        auto_module = (
+            major is not None and major >= 18 and module_root is not None
+            and Path(file_path).resolve().relative_to(module_root).parts[:2] in {("static", "src"), ("static", "tests")}
+        )
+        module_header = re.match(r"\s*(?://|/\*)[^\r\n]*?@odoo-module\b(?![ \t]+ignore\b)", content)
+        if modern_signals and not (module_header or auto_module):
             findings.append(VerifyFinding(
                 file=file_path,
                 severity=VerifySeverity.CRITICAL,

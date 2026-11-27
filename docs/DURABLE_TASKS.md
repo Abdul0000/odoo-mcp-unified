@@ -28,6 +28,10 @@ expose provider-hidden tools through an arbitrary tool tunnel.
    client/branch/local/remote SHA, classifies upgrade impact, and delegates to safe
    deploy. Commit and push are skipped; normal source, registry, upgrade and
    task-specific live-assertion gates remain. Changed remote/source blocks adoption.
+   Set `require_runtime_tests=true` when this deployment also requires test
+   evidence. The worker can supply a passing unit or ORM layer from the adopted
+   commit. Standalone QA reports `static_status` and `runtime_test_status`
+   separately, including deferred native tests.
 6. `task_resume` performs bounded read-only workspace/process/job reconciliation.
    It never replays a commit, push, upgrade or record action. A source match alone
    cannot confirm a module upgrade or business outcome. Task claims describe only

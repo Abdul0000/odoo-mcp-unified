@@ -833,6 +833,7 @@ def test_verification_proof_is_bound_to_exact_working_tree(tmp_path, monkeypatch
     target = project / rel
     target.write_text("VALUE = 2\n", encoding="utf-8")
     service = VerificationProofService()
+    verified_fingerprint = service.fingerprint(project, "custom_module_1", [rel])
     proof_id = service.create(
         project=project,
         module_name="custom_module_1",
@@ -857,6 +858,19 @@ def test_verification_proof_is_bound_to_exact_working_tree(tmp_path, monkeypatch
         module_name="custom_module_1",
         module_root_rel="custom_module_1",
         paths=[rel],
+    ) is None
+    late_proof = service.create(
+        project=project,
+        module_name="custom_module_1",
+        module_root_rel="custom_module_1",
+        paths=[rel],
+        verifier_result={"push_blocked": False},
+        accepted=True,
+        verified_fingerprint=verified_fingerprint,
+    )
+    assert service.validate(
+        late_proof, project=project, module_name="custom_module_1",
+        module_root_rel="custom_module_1", paths=[rel],
     ) is None
 
 

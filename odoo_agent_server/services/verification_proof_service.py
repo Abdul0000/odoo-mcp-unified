@@ -30,6 +30,7 @@ class VerificationProofService:
         paths: list[str],
         verifier_result: dict[str, Any],
         accepted: bool,
+        verified_fingerprint: str | None = None,
     ) -> str:
         proof_id = "vfy_" + uuid4().hex
         record = {
@@ -38,7 +39,7 @@ class VerificationProofService:
             "module_name": module_name,
             "module_root_rel": module_root_rel.strip("/"),
             "paths": sorted(set(paths)),
-            "fingerprint": self.fingerprint(project, module_root_rel, paths),
+            "fingerprint": verified_fingerprint or self.fingerprint(project, module_root_rel, paths),
             "accepted": bool(accepted),
             "verifier_result": verifier_result,
             "created_at": time.time(),

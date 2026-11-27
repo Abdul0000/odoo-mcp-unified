@@ -14,11 +14,10 @@ def test_health():
     assert response.json()["status"] == "ok"
 
 
-def test_self_run_endpoint(monkeypatch):
-    fixture_root = Path(__file__).parent / "fixtures"
-    # Other tests/compileall can create pycache under the fixture module; QA is
-    # correct to warn on that in real addons, so keep this fixture clean first.
-    shutil.rmtree(fixture_root / "test_module" / "models" / "__pycache__", ignore_errors=True)
+def test_self_run_endpoint(monkeypatch, tmp_path):
+    fixture_root = tmp_path
+    shutil.copytree(Path(__file__).parent / "fixtures" / "test_module", fixture_root / "test_module",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     monkeypatch.setattr(settings, "allowed_roots_raw", str(fixture_root))
     client = TestClient(app)
     response = client.post(
@@ -72,5 +71,16 @@ def test_self_run_defers_odoo_native_tests_instead_of_plain_pytest(monkeypatch, 
     assert response.status_code == 200
     data = response.json()
     assert data["summary"]["test_strategy"] == "odoo_native"
+    assert data["status"] == "warning"
+    assert data["summary"]["static_status"] == "passed"
+    assert data["summary"]["runtime_test_status"] == "deferred"
     assert not data["commands"]
     assert "ODOO_NATIVE_TESTS_DEFERRED" in {item["code"] for item in data["findings"]}
+    required = client.post(
+        "/qa/self-run",
+        headers={"Authorization": "Bearer change-me"},
+        json={"project_path": str(tmp_path), "module_name": "native_test_module",
+              "require_runtime_tests": True, "include_git_status": False},
+    ).json()
+    assert required["status"] == "failed"
+    assert "REQUIRED_RUNTIME_TESTS_UNVERIFIED" in {item["code"] for item in required["findings"]}

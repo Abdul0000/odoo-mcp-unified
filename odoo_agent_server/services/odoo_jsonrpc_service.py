@@ -55,8 +55,9 @@ class OdooJsonRpcService:
         return self.client.odoo_api_key if self.client else settings.odoo_api_key
 
     def configured(self) -> bool:
-        credentials_ready = bool(self._api_key()) or bool(self._login() and self._password())
-        return bool(self._base_url() and self._db() and credentials_ready)
+        if self._api_key():
+            return bool(self._base_url())
+        return bool(self._base_url() and self._db() and self._login() and self._password())
 
     def _verify_ssl(self) -> bool:
         if self.client is not None and self.client.odoo_verify_ssl is not None:

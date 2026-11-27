@@ -1282,8 +1282,7 @@ def _normalise_safe_deploy_paths(
             continue
         if rel == ".git" or rel.startswith(".git/"):
             raise ValueError("Deploy path inside .git is blocked")
-        # Safe deploy is module-scoped. Refuse accidental unrelated files unless the
-        # caller intentionally passes no paths and lets git add -A capture all changes.
+        # Safe deploy is module-scoped.
         if module_root and not (rel == module_root or rel.startswith(f"{module_root}/")):
             raise ValueError(
                 "DEPLOY_PATH_OUTSIDE_MODULE: safe_deploy_module received a path outside the target module. "
@@ -1293,7 +1292,7 @@ def _normalise_safe_deploy_paths(
         if rel not in seen:
             seen.add(rel)
             clean.append(rel)
-    return clean
+    return clean or [module_root]
 
 
 def _changed_file_set(result: CommandResult) -> set[str]:
@@ -1880,7 +1879,26 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         changed_files,
         module_root_rel,
     )
+
+    def run_deploy_qa(require_runtime_tests: bool) -> bool:
+        report = self_run(SelfRunRequest(
+            project_path=str(project_path),
+            module_name=payload.module_name,
+            module_root_rel=module_root_rel,
+            run_pytest=True,
+            require_runtime_tests=require_runtime_tests,
+            include_git_status=True,
+            timeout_seconds=min(payload.timeout_seconds, 600),
+        ))
+        if report.status == "failed":
+            _fail("qa_self_run", report)
+            return False
+        _step("qa_self_run", report.status, report)
+        return True
+
     if no_changes_detected and not payload.execution_workspace_id:
+        if payload.require_runtime_tests and not run_deploy_qa(require_runtime_tests=True):
+            return
         try:
             verify_result = verify_deployed_module(DeployedModuleVerifyRequest(
                 project_path=str(project_path),
@@ -2022,10 +2040,12 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
 
     idempotent_clean_retry = False
     idempotent_head_path_gate: CommandResult | None = None
+    published_runtime_verified = False
     if payload.execution_workspace_id:
         from ..services.published_workspace_service import validate_published_workspace
         try:
             published = validate_published_workspace(payload)
+            published_runtime_verified = bool({"unit", "orm"} & set(published.get("passed_layers", [])))
             idempotent_head_path_gate = _assert_head_commit_contains_paths(git, project_path, deploy_paths)
             if idempotent_head_path_gate.exit_code != 0:
                 _fail('published_commit_path_gate', idempotent_head_path_gate)
@@ -2036,18 +2056,29 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
             _fail('adopt_verified_execution_commit', error=str(exc.detail))
             return
 
-    if payload.run_qa:
-        qa_report = self_run(SelfRunRequest(
-            project_path=str(project_path),
-            module_name=payload.module_name,
-            module_root_rel=module_root_rel,
-            run_pytest=True,
-            include_git_status=True,
-            timeout_seconds=min(payload.timeout_seconds, 600),
-        ))
-        _step("qa_self_run", qa_report.status, qa_report)
-        if qa_report.status == "failed":
-            _fail("qa_self_run", qa_report)
+    def snapshot_deploy_tree(paths):
+        snapshot = getattr(git, "prospective_commit_tree", None)
+        return snapshot(str(project_path), paths) if callable(snapshot) else None
+
+    def push_verified_commit(sha, expected_tree):
+        if expected_tree is not None:
+            if git.commit_tree(str(project_path), sha) != expected_tree:
+                return CommandResult(command=["git", "rev-parse", sha], cwd=str(project_path), exit_code=1,
+                                     stderr="Committed tree differs from verified deploy source. Push blocked.")
+            return git.push(str(project_path), payload.remote, branch, True, min(payload.timeout_seconds, 600), verified_sha=sha)
+        return git.push(str(project_path), payload.remote, branch, True, min(payload.timeout_seconds, 600))
+
+    expected_deploy_tree = None
+    if not idempotent_clean_retry:
+        try:
+            expected_deploy_tree = snapshot_deploy_tree(deploy_paths)
+        except HTTPException as exc:
+            _fail("snapshot_deploy_tree", error=str(exc.detail))
+            return
+
+    require_local_runtime_tests = payload.require_runtime_tests and not published_runtime_verified
+    if payload.run_qa or require_local_runtime_tests:
+        if not run_deploy_qa(require_local_runtime_tests):
             return
 
     verify_files = _pre_push_verify_files(
@@ -2070,6 +2101,9 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
             "verification_proof_id": payload.verification_proof_id,
             "message": "Reused the code-change verifier result because HEAD and the complete binary working-tree diff are unchanged.",
         })
+    elif payload.verification_proof_id:
+        _fail("verification_proof_stale", error="Deploy verification proof expired or the source changed. Rerun the code-change checks before deploying.")
+        return
     elif verify_files:
         verify_result = SyntaxVerifierService().verify(SyntaxVerifyRequest(
             written_files=verify_files,
@@ -2142,6 +2176,13 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         push_started_epoch = int(time.time())
         _step("git_push", "skipped", {"message": "Skipped duplicate push; remote SHA will be verified before Odoo.sh polling.", "sha": pushed_sha})
     else:
+        try:
+            if expected_deploy_tree is not None and snapshot_deploy_tree(deploy_paths) != expected_deploy_tree:
+                _fail("verified_tree_changed", error="Deploy source changed during verification. Rerun verification before committing.")
+                return
+        except HTTPException as exc:
+            _fail("snapshot_deploy_tree", error=str(exc.detail))
+            return
         commit_result = git.commit(str(project_path), payload.commit_message, deploy_paths, min(payload.timeout_seconds, 300))
         if commit_result.exit_code != 0:
             _fail("git_commit", commit_result)
@@ -2175,7 +2216,11 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         _step("git_head_sha", "passed", sha_result)
 
         push_started_epoch = int(time.time())
-        push_result = git.push(str(project_path), payload.remote, branch, True, min(payload.timeout_seconds, 600))
+        try:
+            push_result = push_verified_commit(pushed_sha, expected_deploy_tree)
+        except HTTPException as exc:
+            _fail("git_push", error=str(exc.detail))
+            return
         if push_result.exit_code != 0:
             _fail("git_push", push_result)
             return
@@ -2390,11 +2435,14 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
             error_pack=error_pack,
             fallback_files=verify_files,
         )
+        retry_paths = [Path(path).resolve().relative_to(project_path).as_posix() for path in implicated_files] or deploy_paths
+        retry_paths = list(dict.fromkeys(retry_paths))
         verifier_payload = None
         verifier_blocked = False
         verifier_error = None
         if implicated_files:
             try:
+                retry_tree = snapshot_deploy_tree(retry_paths)
                 verifier_payload = SyntaxVerifierService().verify(SyntaxVerifyRequest(
                     written_files=implicated_files,
                     fix_cycle=attempt,
@@ -2430,13 +2478,6 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
             fix_cycle_blocked_by_verifier = True
             return False
 
-        retry_paths: list[str]
-        if implicated_files:
-            retry_paths = [Path(path).resolve().relative_to(project_path).as_posix() for path in implicated_files]
-        else:
-            retry_paths = deploy_paths
-        retry_paths = list(dict.fromkeys(retry_paths or deploy_paths))
-
         commit_result = git.commit(
             str(project_path),
             f"{payload.commit_message} [safe-deploy fix cycle {attempt}]",
@@ -2459,7 +2500,11 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         pushed_sha = sha_result.stdout.strip()
         push_started_epoch = int(time.time())
 
-        push_result = git.push(str(project_path), payload.remote, branch, True, min(payload.timeout_seconds, 600))
+        try:
+            push_result = push_verified_commit(pushed_sha, retry_tree)
+        except HTTPException as exc:
+            _step(f"fix_cycle_{attempt}_git_push", "failed", None, str(exc.detail))
+            return False
         _step(f"fix_cycle_{attempt}_git_push", "passed" if push_result.exit_code == 0 else "failed", push_result)
         if push_result.exit_code != 0:
             return False

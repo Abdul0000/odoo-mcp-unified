@@ -59,6 +59,11 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
         create_module=payload.create_module,
         module_contract=payload.module_contract,
     ))
+    static_status = (
+        "failed" if any(item.severity == Severity.error for item in findings)
+        else "warning" if any(item.severity == Severity.warning for item in findings)
+        else "passed"
+    )
 
     project_path_valid = project_path.exists() and project_path.is_dir()
     if not project_path_valid:
@@ -89,6 +94,7 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
 
     selected_test_strategy = "none"
     selected_test_targets: list[str] = []
+    runtime_status = "not_requested"
     if project_path_valid and payload.run_pytest:
         selected_test_strategy, selected_test_targets = _module_test_strategy(
             module_path,
@@ -102,6 +108,7 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
                 targets=selected_test_targets,
             )
             commands.append(pytest_result)
+            runtime_status = "passed" if pytest_result.exit_code == 0 else "failed"
             if pytest_result.exit_code != 0:
                 findings.append(
                     Finding(
@@ -112,6 +119,7 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
                     )
                 )
         elif selected_test_strategy == "odoo_native":
+            runtime_status = "deferred"
             findings.append(
                 Finding(
                     severity=Severity.info,
@@ -124,17 +132,29 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
                 )
             )
         else:
+            runtime_status = "skipped" if payload.test_strategy == "none" else "no_tests_found"
             findings.append(
                 Finding(
                     severity=Severity.info,
                     code="NO_TESTS_FOUND",
-                    message="No tests folder found. Static validation completed only.",
+                    message="Runtime tests were explicitly skipped." if payload.test_strategy == "none" else "No tests found. Static validation completed only.",
                 )
             )
+    elif payload.run_pytest:
+        runtime_status = "unavailable"
+
+    if payload.require_runtime_tests and runtime_status not in {"passed", "failed"}:
+        findings.append(Finding(
+            severity=Severity.error,
+            code="REQUIRED_RUNTIME_TESTS_UNVERIFIED",
+            message=f"Required runtime tests did not pass: {runtime_status}.",
+            hint="For native Odoo tests, run the required checks in a test-enabled execution workspace.",
+        ))
 
     error_count = sum(1 for item in findings if item.severity == Severity.error)
     warning_count = sum(1 for item in findings if item.severity == Severity.warning)
-    status = "failed" if error_count else "warning" if warning_count else "passed"
+    incomplete = runtime_status in {"deferred", "no_tests_found", "unavailable"}
+    status = "failed" if error_count else "warning" if warning_count or incomplete else "passed"
 
     return SelfRunReport(
         status=status,
@@ -149,7 +169,9 @@ def self_run(payload: SelfRunRequest) -> SelfRunReport:
             "infos": sum(1 for item in findings if item.severity == Severity.info),
             "commands_run": len(commands),
             "project_path_valid": project_path_valid,
-            "module_structure_complete": error_count == 0,
+            "module_structure_complete": static_status != "failed",
+            "static_status": static_status,
+            "runtime_test_status": runtime_status,
             "test_strategy": selected_test_strategy,
             "test_targets": selected_test_targets[:20],
         },

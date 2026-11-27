@@ -147,6 +147,7 @@ class SelfRunRequest(BaseProjectRequest):
     create_module: bool = Field(default=False, description="Whether this task creates a new addon; used by the module contract gate.")
     module_contract: dict[str, Any] = Field(default_factory=dict, description="Persisted project/module requirements merged with the current task contract.")
     run_pytest: bool = Field(default=True)
+    require_runtime_tests: bool = Field(default=False, description="Fail QA unless the selected runtime tests actually pass. Static checks alone do not satisfy this requirement.")
     test_strategy: Literal["auto", "pytest", "odoo_native", "none"] = Field(
         default="auto",
         description=(
@@ -2260,10 +2261,11 @@ class SafeDeployModuleRequest(BaseProjectRequest, ApprovalMixin):
         description="Resolved repo-relative addon root. Defaults to module_name for root-level addons.",
     )
     commit_message: str = Field(..., min_length=3, max_length=300)
-    paths: list[str] = Field(default_factory=list, description="Relative paths to add before commit. Empty means git add -A.")
+    paths: list[str] = Field(default_factory=list, description="Relative paths to commit within the addon. Empty means the target addon only.")
     remote: str = Field(default="origin")
     branch: str | None = Field(default=None, description="Defaults to current branch or TARGET_GIT_BRANCH")
     run_qa: bool = Field(default=True, description="Run qa.self_run by default so deploy failures surface before long Odoo.sh polling. Set False only for an explicit, intentional bypass.")
+    require_runtime_tests: bool = Field(default=False, description="Require runtime test proof from deploy QA or the adopted execution workspace.")
     verification_proof_id: str | None = Field(
         default=None,
         pattern=r"^vfy_[a-f0-9]{32}$",

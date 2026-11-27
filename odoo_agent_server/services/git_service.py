@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from fastapi import HTTPException, status
@@ -15,6 +16,10 @@ from .repo_service import RepoService
 from .lock_service import RepoLockService
 from .source_artifact_policy import validate_git_artifacts
 from .git_identity import same_repository
+
+
+def path_in_commit_scope(path: str, scope: list[str]) -> bool:
+    return any(path == item or path.startswith(item.rstrip("/") + "/") for item in scope)
 
 
 class GitService:
@@ -277,6 +282,34 @@ class GitService:
         return CommandResult(command=command, cwd=str(project), exit_code=0,
                              stdout="HEAD already contains the fetched remote tip; source unchanged.\n")
 
+    def prospective_commit_tree(self, project_path: str, paths: list[str], timeout_seconds: int = 60) -> str:
+        """Snapshot a scoped commit without altering the checkout's real index."""
+        project = self._project(project_path)
+        with tempfile.TemporaryDirectory(prefix="odoo-deploy-index-") as temporary:
+            env = {**self._ssh_env(), "GIT_INDEX_FILE": str(Path(temporary) / "index")}
+            for args in (["read-tree", "HEAD"], ["--literal-pathspecs", "add", "-A", "--", *paths], ["write-tree"]):
+                result = self._run(["git", *args], project, timeout_seconds, env=env)
+                if result.exit_code:
+                    raise HTTPException(409, f"Cannot snapshot deploy tree: {result.stderr or result.stdout}")
+        return result.stdout.strip()
+
+    def commit_tree(self, project_path: str, sha: str) -> str:
+        result = self._run(["git", "rev-parse", "--verify", f"{sha}^{{tree}}"], self._project(project_path), 20)
+        if result.exit_code:
+            raise HTTPException(409, "Cannot read the committed deploy tree")
+        return result.stdout.strip()
+
+    def _staged_scope_error(self, project: Path, scope: list[str], timeout_seconds: int) -> CommandResult | None:
+        command = ["git", "diff", "--cached", "--no-renames", "--name-only", "-z", "--"]
+        result = self._run(command, project, timeout_seconds)
+        if result.exit_code:
+            return result
+        if len(result.stdout) >= 20000:
+            return result.model_copy(update={"exit_code": 1, "stderr": "Staged path list exceeds the review limit. Split the commit."})
+        if any(not path_in_commit_scope(path, scope) for path in result.stdout.split("\0") if path):
+            return result.model_copy(update={"exit_code": 1, "stderr": "Unrelated staged paths exist. Preserve them in a separate commit or use an isolated workspace."})
+        return None
+
     def commit(self, project_path: str, message: str, paths: list[str], timeout_seconds: int = 60) -> CommandResult:
         project = self._project(project_path)
         with RepoLockService().locked(str(project), owner="git.commit", timeout_seconds=min(timeout_seconds, 120)):
@@ -291,14 +324,22 @@ class GitService:
             if identity_result.exit_code != 0:
                 return identity_result
             if paths:
-                for rel in paths:
-                    self.repo.target(str(project), rel)
-                add_command = ["git", "add", "--", *paths]
+                scope = [self.repo.target(str(project), rel).relative_to(project).as_posix() for rel in paths]
+                if "." in scope:
+                    raise HTTPException(400, "Explicit commit paths must identify files or directories below the repository root")
+                scope_error = self._staged_scope_error(project, scope, timeout_seconds)
+                if scope_error is not None:
+                    return scope_error
+                add_command = ["git", "--literal-pathspecs", "add", "--", *scope]
             else:
                 add_command = ["git", "add", "-A"]
             add_result = self._run(add_command, project, timeout_seconds)
             if add_result.exit_code != 0:
                 return add_result
+            if paths:
+                scope_error = self._staged_scope_error(project, scope, timeout_seconds)
+                if scope_error is not None:
+                    return scope_error
             diff_result = self._run(["git", "diff", "--cached", "--quiet"], project, timeout_seconds)
             if diff_result.exit_code == 0:
                 return CommandResult(command=["git", "commit", "-m", message], cwd=str(project), exit_code=1, stderr="No staged changes to commit.")
@@ -314,7 +355,7 @@ class GitService:
             return CommandResult(command=["git", "revert", sha], cwd=str(project), exit_code=2, stderr="Unsafe or empty SHA for revert.")
         return self._run(["git", "revert", "--no-edit", sha], project, timeout_seconds)
 
-    def push(self, project_path: str, remote: str = "origin", branch: str | None = None, set_upstream: bool = True, timeout_seconds: int = 120) -> CommandResult:
+    def push(self, project_path: str, remote: str = "origin", branch: str | None = None, set_upstream: bool = True, timeout_seconds: int = 120, *, verified_sha: str | None = None) -> CommandResult:
         project = self._project(project_path)
         if not branch:
             branch_result = self.current_branch(project_path)
@@ -332,7 +373,10 @@ class GitService:
             return validation
 
         command = ["git", "push"]
-        if set_upstream:
+        source = verified_sha or "HEAD"
+        if verified_sha:
+            command.extend(["--", remote, f"{verified_sha}:refs/heads/{branch}"])
+        elif set_upstream:
             command.extend(["-u", remote, f"HEAD:{branch}"])
         else:
             command.extend([remote, f"HEAD:{branch}"])
@@ -343,16 +387,20 @@ class GitService:
                 base = git(["rev-parse", "--verify", tracking], project).strip()
             except HTTPException:
                 base = None
-            validate_git_artifacts(project, ["diff", "--name-only", "-z", "--diff-filter=ACMRT", base, "HEAD", "--"]
-                                   if base else ["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+            validate_git_artifacts(project, ["diff", "--name-only", "-z", "--diff-filter=ACMRT", base, source, "--"]
+                                   if base else ["ls-tree", "-r", "-z", "--name-only", source])
             result = self._run(command, project, timeout_seconds)
             failure_text = ((result.stderr or "") + "\n" + (result.stdout or "")).lower()
             if result.exit_code != 0 and any(marker in failure_text for marker in ("non-fast-forward", "fetch first", "remote contains work")):
                 return CommandResult(command=command, cwd=str(project), exit_code=1,
                                      stderr="SYNC_REQUIRED: Remote advanced. Fetch/merge in an isolated execution workspace, rerun verification, then retry normal push. No automatic unverified rebase/push was performed.")
         if result.exit_code == 0:
-            sha = self.head_sha(str(project)).stdout.strip()
+            current_sha = self.head_sha(str(project)).stdout.strip()
+            sha = verified_sha or current_sha
             result.stdout = (result.stdout or "") + f"\nPUSH_OK\nbranch={branch}\nsha={sha}\n"
+            if verified_sha and current_sha != verified_sha:
+                result.stdout += "CODING_WORKSPACE_SYNC=deferred\n"
+                return result
             # Workspace context is an optimization, never a push dependency.
             # Rebind unchanged module snapshots to the pushed SHA and refresh
             # only modules whose source fingerprint changed.
@@ -379,7 +427,7 @@ class GitService:
                 result.stdout += "CODING_WORKSPACE_SYNC=deferred\n"
         return result
 
-    def _run(self, command: list[str], cwd: Path, timeout_seconds: int) -> CommandResult:
+    def _run(self, command: list[str], cwd: Path, timeout_seconds: int, *, env: dict[str, str] | None = None) -> CommandResult:
         try:
             completed = subprocess.run(
                 command,
@@ -388,7 +436,7 @@ class GitService:
                 text=True,
                 timeout=timeout_seconds,
                 check=False,
-                env=self._ssh_env(),
+                env=env if env is not None else self._ssh_env(),
             )
             return CommandResult(
                 command=[mask_repo_url(part) for part in command],

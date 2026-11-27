@@ -1637,7 +1637,8 @@ def test_run_safe_deploy_runs_qa_by_default_when_omitted(tmp_path, monkeypatch):
 
 
 
-def test_safe_deploy_no_changes_verifies_odoosh_source_and_confirms_already_deployed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("require_runtime", [False, True])
+def test_safe_deploy_no_changes_verifies_odoosh_source_and_confirms_already_deployed(tmp_path, monkeypatch, require_runtime):
     monkeypatch.setattr(settings, "allowed_roots_raw", str(tmp_path))
     monkeypatch.setattr(settings, "state_dir", str(tmp_path / "state"))
     project = tmp_path / "repo"
@@ -1675,6 +1676,14 @@ def test_safe_deploy_no_changes_verifies_odoosh_source_and_confirms_already_depl
     monkeypatch.setattr(workflow, "GitService", lambda: FakeGit())
     monkeypatch.setattr(workflow, "OdooShService", lambda: FakeOdooSh())
     monkeypatch.setattr(workflow, "submit_background", fake_submit)
+    if require_runtime:
+        from types import SimpleNamespace
+
+        def failed_qa(request):
+            assert request.require_runtime_tests is True
+            return SimpleNamespace(status="failed", model_dump=lambda **_: {"status": "failed"})
+
+        monkeypatch.setattr(workflow, "self_run", failed_qa)
 
     result = asyncio.run(workflow.safe_deploy_module(SafeDeployModuleRequest(
         project_path=str(project),
@@ -1682,11 +1691,17 @@ def test_safe_deploy_no_changes_verifies_odoosh_source_and_confirms_already_depl
         commit_message="Deploy x_module",
         paths=["x_module/models/a.py"],
         run_qa=False,
+        require_runtime_tests=require_runtime,
         wait_for_result=True,
         wait_timeout_seconds=5,
     )))
 
     finished = JsonStore().get_job(result.job_id)
+    if require_runtime:
+        assert finished.status == JobStatus.failed
+        assert finished.result["failed_step"] == "qa_self_run"
+        assert calls == {"verify_user": 0, "list": 0, "commit": 0, "push": 0}
+        return
     assert result.status == "passed"
     assert result.summary["no_changes_detected"] is True
     assert result.summary["verified_already_deployed"] is True
@@ -2000,6 +2015,28 @@ def _retry_project(tmp_path, monkeypatch, success_on=None, max_fix_cycles=5):
         max_fix_cycles=max_fix_cycles,
     )
     return store, job, payload, calls
+
+
+@pytest.mark.parametrize(
+    "trees, committed_tree, expected_step, expected_commits",
+    [
+        (("verified", "changed"), "changed", "verified_tree_changed", 0),
+        (("verified", "verified"), "changed", "git_push", 1),
+    ],
+)
+def test_safe_deploy_blocks_changed_tree(tmp_path, monkeypatch, trees, committed_tree, expected_step, expected_commits):
+    store, job, payload, calls = _retry_project(tmp_path, monkeypatch)
+    snapshots = iter(trees)
+    monkeypatch.setattr(_SafeDeployRetryGit, "prospective_commit_tree", lambda *_: next(snapshots), raising=False)
+    monkeypatch.setattr(_SafeDeployRetryGit, "commit_tree", lambda *_: committed_tree, raising=False)
+
+    workflow._run_safe_deploy(payload, job.id)
+
+    finished = store.get_job(job.id)
+    assert finished.status == JobStatus.failed
+    assert finished.result["failed_step"] == expected_step
+    assert calls["commit"] == expected_commits
+    assert calls["push"] == 0
 
 
 @pytest.mark.slow

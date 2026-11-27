@@ -174,3 +174,41 @@ def test_commit_paths_cannot_turn_into_git_add_options(repos):
     assert git(local, "show", "HEAD:-A").stdout == "requested file\n"
     assert git(local, "ls-files", "--", "unrelated.py").stdout == ""
     assert (local / "unrelated.py").read_text() == "UNRELATED = True\n"
+
+
+def test_scoped_commit_preserves_existing_index_and_matches_verified_tree(repos):
+    local, _, _ = repos
+    (local / "hello.py").write_text("VALUE = 'updated'\n")
+    (local / "unrelated.py").write_text("UNRELATED = True\n")
+    git(local, "add", "--", "unrelated.py")
+    service = GitService()
+    before = snapshot(local)
+    tree = service.prospective_commit_tree(str(local), ["hello.py"])
+    result = service.commit(str(local), "scoped edit", ["hello.py"])
+    assert result.exit_code != 0 and "Unrelated staged paths" in result.stderr
+    assert snapshot(local) == before
+
+    git(local, "reset", "HEAD", "--", "unrelated.py")
+    result = service.commit(str(local), "scoped edit", ["hello.py"])
+    assert result.exit_code == 0, result.stderr
+    sha = git(local, "rev-parse", "HEAD").stdout.strip()
+    assert service.commit_tree(str(local), sha) == tree
+    assert git(local, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").stdout.strip() == "hello.py"
+
+
+def test_verified_push_uses_pinned_commit_when_local_head_has_advanced(repos):
+    local, _, bare = repos
+    (local / "hello.py").write_text("VALUE = 'verified'\n")
+    git(local, "add", "hello.py")
+    git(local, "commit", "-m", "verified edit")
+    verified_sha = git(local, "rev-parse", "HEAD").stdout.strip()
+    (local / "hello.py").write_text("VALUE = 'later'\n")
+    git(local, "add", "hello.py")
+    git(local, "commit", "-m", "later local edit")
+    later_sha = git(local, "rev-parse", "HEAD").stdout.strip()
+
+    result = GitService().push(str(local), branch="staging", verified_sha=verified_sha)
+
+    assert result.exit_code == 0, result.stderr
+    assert git(bare, "rev-parse", "staging").stdout.strip() == verified_sha
+    assert git(local, "rev-parse", "HEAD").stdout.strip() == later_sha

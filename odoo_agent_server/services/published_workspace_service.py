@@ -43,4 +43,5 @@ def validate_published_workspace(payload):
     touched = git(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", sha, "--", root], client.path).splitlines()
     if not touched:
         raise HTTPException(409, "Published commit did not change the selected module")
-    return {"sha": sha, "workspace_id": wid, "paths": touched}
+    return {"sha": sha, "workspace_id": wid, "paths": touched,
+            "passed_layers": status["verification"].get("passed_layers", [])}

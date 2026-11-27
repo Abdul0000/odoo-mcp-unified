@@ -52,3 +52,4 @@ class TaskDeploy(TaskId):
     module_root_rel: str | None = None
     approval_id: str | None = None
     verification_assertion: dict[str, Any] | None = None
+    require_runtime_tests: bool = False

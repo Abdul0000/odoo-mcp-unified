@@ -6474,6 +6474,11 @@ async def _workflow_odoo_code_change_impl(payload: OdooCodeChangeRequest) -> dic
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     verification_started = time.perf_counter()
     phase_started("qa_and_core_verification")
+    verified_fingerprint = (
+        VerificationProofService.fingerprint(project, module_root_rel, deploy_paths)
+        if payload.auto_deploy else None
+    )
+    require_runtime_tests = "tests" in (module_contract.get("required_layers") or [])
     qa = self_run(SelfRunRequest(
         project_path=project_path,
         client_name=client_name,
@@ -6482,9 +6487,23 @@ async def _workflow_odoo_code_change_impl(payload: OdooCodeChangeRequest) -> dic
         task_description=(persisted_requirements or payload.task_description)[-20000:],
         create_module=payload.create_module,
         module_contract=module_contract,
-        run_pytest="tests" in (module_contract.get("required_layers") or []),
+        run_pytest=require_runtime_tests,
+        require_runtime_tests=require_runtime_tests,
         include_git_status=True,
     ))
+    if any(item.code == "REQUIRED_RUNTIME_TESTS_UNVERIFIED" for item in qa.findings):
+        coding_sessions.mark(coding_session_id, "runtime_tests_unverified")
+        return {
+            "status": "runtime_tests_unverified",
+            "message": "This task requires passing runtime tests. Preserve the edits and use a test-enabled execution workspace for native Odoo tests before publishing.",
+            "client_name": client_name,
+            "project_path": project_path,
+            "module_name": effective_module_name,
+            "coding_session_id": coding_session_id,
+            "qa": qa.model_dump(mode="json"),
+            "success_allowed": False,
+            "completion_required": True,
+        }
     verify = verify_against_core(SyntaxVerifyRequest(
         written_files=verify_files_abs,
         project_path=project_path,
@@ -6756,6 +6775,7 @@ async def _workflow_odoo_code_change_impl(payload: OdooCodeChangeRequest) -> dic
         paths=deploy_paths,
         verifier_result=verify.model_dump(mode="json"),
         accepted=bool(not verify.push_blocked or override_decision["accepted"]),
+        verified_fingerprint=verified_fingerprint,
     )
     deploy_payload = SafeDeployModuleRequest(
         client_name=client_name,

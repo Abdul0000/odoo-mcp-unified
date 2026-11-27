@@ -1,3 +1,7 @@
+import pytest
+
+from odoo_agent_server.schemas import VerifySeverity
+from odoo_agent_server.services import syntax_verifier_service
 from odoo_agent_server.services.syntax_verifier_service import SyntaxVerifierService
 
 
@@ -77,3 +81,29 @@ def test_path_naming_does_not_claim_bundle_ownership(tmp_path):
         if finding.check in {"manifest_pos_asset_bundle", "manifest_website_asset_bundle"}
     ]
     assert bundle_findings == []
+
+
+@pytest.mark.parametrize("operation", ["replace", "before", "after", "remove"])
+def test_asset_directives_resolve_installed_dependency(tmp_path, monkeypatch, operation):
+    addon = tmp_path / "custom" / "sample"
+    web = tmp_path / "core" / "addons" / "web"
+    local = _write_asset(addon, "static/src/custom.js")
+    target = _write_asset(web, "static/src/main.js")
+    monkeypatch.setattr(syntax_verifier_service, "_iter_module_dirs", lambda name, client: [web] if name == "web" else [])
+    directive = (operation, target) if operation == "remove" else (operation, target, local)
+    content = repr({"depends": ["web"], "assets": {"web.assets_web": [directive]}})
+    assert SyntaxVerifierService()._verify_manifest_assets(str(addon / "__manifest__.py"), content) == []
+
+    (web / "static/src/main.js").unlink()
+    findings = SyntaxVerifierService()._verify_manifest_assets(str(addon / "__manifest__.py"), content)
+    assert [(item.check, item.severity) for item in findings] == [("manifest_asset_exists", VerifySeverity.CRITICAL)]
+
+
+@pytest.mark.parametrize("major, expected", [(17, True), (18, False), (19, False)])
+def test_headerless_native_javascript_uses_addon_series(tmp_path, major, expected):
+    addon = tmp_path / "sample"
+    _write_asset(addon, "static/src/example.js")
+    (addon / "__manifest__.py").write_text(repr({"version": f"{major}.0.1.0.0"}))
+    source = 'import { value } from "./other";\nexport const answer = value;\n'
+    findings = SyntaxVerifierService()._verify_js_owl(str(addon / "static/src/example.js"), source, set())
+    assert any(item.check == "js_odoo_module_header" for item in findings) == expected
