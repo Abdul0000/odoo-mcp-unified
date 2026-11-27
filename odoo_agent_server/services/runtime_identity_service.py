@@ -34,7 +34,9 @@ def _commit_identity() -> tuple[str, str]:
             return value, f"environment:{key}"
     try:
         result = subprocess.run(
-            ["git", "-C", str(_PROJECT_ROOT), "rev-parse", "HEAD"],
+            # The API and isolated worker load the same deployed code under
+            # different service accounts. Trust only this module's checkout.
+            ["git", "-c", f"safe.directory={_PROJECT_ROOT}", "-C", str(_PROJECT_ROOT), "rev-parse", "HEAD"],
             capture_output=True,
             text=True,
             timeout=2,
