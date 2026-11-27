@@ -781,10 +781,10 @@ _TOOL_DESCRIPTORS = [
         name="odoo.query",
         title="Smart Odoo functional query",
         description=(
-            "Best tool for simple functional Odoo questions from any MCP client: list users, employees, "
-            "draft invoices, unpaid invoices, customers, vendors, products, sale orders, purchase orders, or modules. "
-            "Takes a natural-language query and returns parsed model/domain/fields plus live Odoo records. "
-            "Runs read-only Odoo shell through the selected client's Odoo.sh SSH context."
+            "Read any Odoo model with explicit model/domain/fields, or use query text for simple lists "
+            "(users, employees, invoices, partners, products, orders, modules). "
+            "Complex filters require structured parameters. Returns parsed parameters and live records "
+            "under the selected client's access rules."
         ),
         read_only=True,
     ),
@@ -807,7 +807,7 @@ _TOOL_DESCRIPTORS = [
     ToolDescriptor(name="odoo.module_update",
         title="Upgrade Odoo module", description="[LEGACY] Direct button_immediate_upgrade — use odoo.module_deploy instead", requires_approval=True, deprecated=True),
     ToolDescriptor(name="odoo.search_read",
-        title="Query Odoo records", description="Run Odoo search_read safely. Uses Odoo.sh SSH first, then HTTPS JSON-RPC read-only fallback when SSH is refused/unavailable for a client.", read_only=True),
+        title="Query Odoo records", description="Read any Odoo model with explicit fields and domain conditions [[field, operator, value]]. Supports dotted relational filters and prefix &, |, !. Uses the selected client's configured read transport and access rules.", read_only=True),
     ToolDescriptor(
         name="odoo.feature_inspect",
         title="Inspect live Odoo feature",
@@ -1390,7 +1390,10 @@ def _search_read_via_shell(
         "odoo": dumped,
         "attempt": dumped,
         "ssh_fallback_used": False,
-        "message": "Client-scoped Odoo query completed." if ok else "Client-scoped Odoo query failed; original transport error preserved.",
+        "message": "Client-scoped Odoo query completed." if ok else (
+            dumped.get("error") or "Client-scoped Odoo query failed."
+            if isinstance(dumped, dict) else "Client-scoped Odoo query failed."
+        ),
     }
 
 
@@ -1415,6 +1418,24 @@ def _odoo_functional_query(req: OdooFunctionalQueryRequest) -> object:
     OdooService owns transport selection; the router never retries an HTTPS
     authentication/access error with an elevated SSH identity.
     """
+    if req.model:
+        data = _search_read_via_shell(
+            model=req.model, domain=req.domain, fields=req.fields,
+            limit=req.limit, offset=req.offset, order=req.order,
+            context=req.context, client_name=req.client_name, query_text=req.query,
+        )
+        return {
+            **data, "intent": "structured",
+            "parsed": {"model": req.model, "domain": req.domain, "fields": req.fields,
+                       "limit": req.limit, "offset": req.offset, "order": req.order},
+        }
+    # Keyword templates cannot safely translate arbitrary conditions. Require a
+    # structured domain instead of returning records that silently omit them.
+    if re.search(r"[<>=]|\b(?:where|with|whose|above|below|over|under|greater|less|more than|at least|at most)\b", req.query or "", re.I):
+        return {
+            "status": "failed",
+            "error": "This filter needs an explicit model, domain and fields. Discover them with odoo.list_models/odoo.fields_get, then call odoo.query or odoo.search_read with structured parameters.",
+        }
     text = (req.query or "").strip().lower()
     limit = req.limit
 

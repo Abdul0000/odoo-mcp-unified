@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from .odoo_domain import normalize_domain
+
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
@@ -1524,6 +1526,8 @@ class OdooSearchReadRequest(BaseModel):
     order: str | None = Field(default=None, description="Optional Odoo order string, e.g. 'create_date desc'")
     context: dict[str, Any] | None = Field(default=None, description="Optional Odoo context passed to search_read")
 
+    _normalize_domain = field_validator("domain", mode="before")(normalize_domain)
+
 
 class OdooFeatureInspectRequest(BaseModel):
     """One-shell, read-only live registry inspection for a bounded feature."""
@@ -1572,6 +1576,8 @@ class OdooReadGroupRequest(BaseModel):
     lazy: bool = Field(default=False, description="Return all requested grouping levels when false")
     context: dict[str, Any] | None = Field(default=None, description="Optional Odoo context passed to read_group")
     timeout_seconds: int = Field(default=120, ge=15, le=300)
+
+    _normalize_domain = field_validator("domain", mode="before")(normalize_domain)
 
 
 class OdooFieldsGetRequest(BaseModel):
@@ -1848,9 +1854,24 @@ class OdooShQueryRequest(BaseModel):
 
 
 class OdooFunctionalQueryRequest(BaseModel):
-    client_name: str | None = Field(default=None, description="Client name from ODOO_CLIENTS. If omitted, odoo.query tries to infer an exact client name from the text.")
-    query: str = Field(..., min_length=1, description="Natural-language Odoo functional read query, e.g. list users, draft invoices, unpaid invoices, top customers")
-    limit: int = Field(default=10, ge=1, le=100, description="Maximum records to return")
+    client_name: str | None = None
+    query: str | None = Field(default=None, min_length=1, description="Simple read text; use model/domain/fields for filters.")
+    model: str | None = None
+    domain: list[Any] = Field(default_factory=list)
+    fields: list[str] = Field(default_factory=list)
+    offset: int = Field(default=0, ge=0)
+    order: str | None = None
+    context: dict[str, Any] | None = None
+    limit: int = Field(default=10, ge=1, le=100)
+    _normalize_domain = field_validator("domain", mode="before")(normalize_domain)
+
+    @model_validator(mode="after")
+    def require_query_or_model(self):
+        if not self.model and not self.query:
+            raise ValueError("query or model is required")
+        if not self.model and (self.domain or self.fields or self.offset or self.order or self.context):
+            raise ValueError("model is required with structured query parameters")
+        return self
 
 
 class OdooResult(BaseModel):

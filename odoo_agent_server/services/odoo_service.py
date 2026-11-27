@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from ..config import settings
+from ..odoo_domain import normalize_domain
 from ..schemas import CommandResult, OdooResult
 from .client_resolver_service import ClientResolverService, ResolvedClient
 from .odoosh_service import OdooShService
@@ -51,6 +52,10 @@ class OdooService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 120,
     ) -> OdooResult:
+        try:
+            domain = normalize_domain(domain)
+        except ValueError as exc:
+            return OdooResult(status="failed", error=f"Invalid Odoo domain: {exc}")
         if timeout_seconds <= 0:
             return OdooResult(status="failed", database=self._database(), error="Odoo read deadline exhausted before transport")
         deadline = time.monotonic() + timeout_seconds
@@ -99,6 +104,10 @@ class OdooService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 120,
     ) -> OdooResult:
+        try:
+            domain = normalize_domain(domain)
+        except ValueError as exc:
+            return OdooResult(status="failed", error=f"Invalid Odoo domain: {exc}")
         if timeout_seconds <= 0:
             return OdooResult(status="failed", database=self._database(), error="Odoo read deadline exhausted before transport")
         deadline = time.monotonic() + timeout_seconds

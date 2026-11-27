@@ -11,6 +11,7 @@ import httpx
 from .deadline_service import remaining
 from .http_client_pool import odoo_http_clients
 from ..config import settings
+from ..odoo_domain import normalize_domain
 from ..schemas import OdooResult
 from .client_resolver_service import ResolvedClient
 
@@ -164,6 +165,10 @@ class OdooJsonRpcService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 60,
     ) -> OdooResult:
+        try:
+            domain = normalize_domain(domain)
+        except ValueError as exc:
+            return OdooResult(status="failed", error=f"Invalid Odoo domain: {exc}")
         if not self.configured():
             return OdooResult(status="failed", base_url=self._base_url(), database=self._db(), error="Odoo HTTPS transport is not configured for this client.")
         if not re.fullmatch(r"[a-zA-Z0-9_.]+", model or ""):
@@ -238,6 +243,10 @@ class OdooJsonRpcService:
         context: dict[str, Any] | None = None,
         timeout_seconds: int = 60,
     ) -> OdooResult:
+        try:
+            domain = normalize_domain(domain)
+        except ValueError as exc:
+            return OdooResult(status="failed", error=f"Invalid Odoo domain: {exc}")
         if not self.configured():
             return OdooResult(status="failed", base_url=self._base_url(), database=self._db(), error="Odoo HTTPS JSON-RPC fallback is not configured for this client.")
         if not re.fullmatch(r"[a-zA-Z0-9_.]+", model or ""):

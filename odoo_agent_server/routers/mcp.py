@@ -738,6 +738,11 @@ _CHATGPT_QUICK_WAIT_TOOLS = {
 
 
 _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
+    "odoo.query": "Read any model via model/domain/fields; optional query text supports simple lists. Use structured parameters for filters.",
+    "odoo.search_read": "Read model/domain/fields with paging, order and context under the selected client's access rules.",
+    "odoo.read_group": "Aggregate fields by groupby with a domain under the selected client's access rules.",
+    "odoo.fields_get": "Discover fields, types, relations and storage on a live model.",
+    "odoo.list_models": "Discover live technical models by name.",
     "ws.open": "Open current GitHub/GitLab module; resume saved edits. fresh=true discards WIP.",
     "ws.status": "Read unpublished files, WIP/client/default branches and provider links.",
     "ws.scaffold": "Generate Odoo module skeleton in the workspace; inspect/edit before commit.",
