@@ -741,6 +741,11 @@ class TaskService:
                 pending.discard(value)
             task["refs"]["pending_" + key + "s"] = sorted(pending)
         claims = task.setdefault("claims", {})
+        linked_deploy_result = (
+            not reviewed_deploy(task)
+            or name == "workflow.safe_deploy_module"
+            or (task["refs"].get("deploy_job_id") and result.get("job_id") == task["refs"]["deploy_job_id"])
+        )
         # Never infer deployment or business correctness from an exit code or push.
         if name == "execution.status":
             # Publish receipts describe the operation, not the current tree.
@@ -767,7 +772,8 @@ class TaskService:
                 )
             task["phase"] = str(result.get("phase") or result.get("status") or "inspect")
         elif name in {"workflow.safe_deploy_module", "workflow.resume_job", "jobs.get", "workflow.verify_deployed_module"}:
-            claims["deployment_verified"] = result.get("deploy_confirmed") is True and result.get("success_allowed") is True
+            if linked_deploy_result:
+                claims["deployment_verified"] = result.get("deploy_confirmed") is True and result.get("success_allowed") is True
             task["phase"] = str(result.get("status") or "deploy")
         elif name in {"odoo.record_create", "odoo.record_write", "odoo.record_action", "odoo.flow_test"}:
             claims["functional_verified"] = result.get("verified") is True and result.get("success_allowed") is True
@@ -779,13 +785,11 @@ class TaskService:
             published = result.get("commit") or result.get("published_commit")
             if isinstance(published, str) and re.fullmatch("[0-9a-f]{40}", published):
                 task["published_commit_sha"] = published
-        if reviewed_deploy(task) and name in {"jobs.get", "workflow.resume_job", "workflow.verify_deployed_module"}:
-            if not task["refs"].get("deploy_job_id") or result.get("job_id") != task["refs"]["deploy_job_id"]:
-                claims["deployment_verified"] = False
         expected_sha = (task.get("review") or {}).get("merged_sha") or task.get("published_commit_sha")
         observed_sha = result.get("sha") or result.get("commit") or result.get("published_commit")
         if (
             name in {"jobs.get", "workflow.safe_deploy_module", "workflow.resume_job", "workflow.odoo_code_change", "workflow.odoo_debug_and_fix", "workflow.frontend_visual_implement"}
+            and linked_deploy_result
             and claims.get("deployment_verified")
             and expected_sha
             and observed_sha != expected_sha
