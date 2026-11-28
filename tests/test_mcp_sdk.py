@@ -121,8 +121,13 @@ def test_sdk_prompts_and_resources_are_readable_and_unknown_uris_cannot_read_fil
         prompts = rpc(client, "prompts/list").json()["result"]["prompts"]
         assert {p["name"] for p in prompts} == {"client_check_system_prompt", "mcp_system_prompt"}
         resources = rpc(client, "resources/list").json()["result"]["resources"]
-        assert len(resources) == 2
+        assert len(resources) == 3
         for resource in resources:
+            if resource["name"] == "readiness_incidents":
+                incident = rpc(client, "resources/read", {"uri": resource["uri"]}).json()["result"]["contents"][0]
+                assert incident["mimeType"] == "application/json"
+                assert isinstance(json.loads(incident["text"])["incidents"], list)
+                continue
             text = rpc(client, "resources/read", {"uri": resource["uri"]}).json()["result"]["contents"][0]
             prompt = rpc(client, "prompts/get", {"name": resource["name"]}).json()["result"]
             assert text["mimeType"] == "text/plain"

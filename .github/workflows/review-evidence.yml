@@ -1,0 +1,28 @@
+name: Review evidence
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    if: '!github.event.pull_request.draft'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check links to intent and design
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from deploy.release_gate import trace_links
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
+              event = json.load(stream)
+          trace_links(event["pull_request"].get("body") or "")
+          PY

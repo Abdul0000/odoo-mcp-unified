@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import json
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
@@ -52,6 +53,7 @@ _RESOURCES = {
     "odoo-mcp://instructions/client-check": "client_check_system_prompt",
     "odoo-mcp://instructions/workflow": "mcp_system_prompt",
 }
+_READINESS_URI = "odoo-mcp://incidents/readiness"
 _PATHS = {"/mcp", "/claude/mcp", "/chatgpt/mcp", "/grok/mcp", "/qwen/mcp"}
 
 
@@ -202,10 +204,22 @@ async def _list_resources(ctx: ServerRequestContext, params: PaginatedRequestPar
         Resource(uri=uri, name=name, title=_PROMPTS[name][0],
                  description=_PROMPTS[name][1], mime_type="text/plain")
         for uri, name in _RESOURCES.items()
-    ], ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
+    ] + [Resource(uri=_READINESS_URI, name="readiness_incidents", title="Connector readiness incidents",
+                  description="Readiness evidence for task triage and follow-up.", mime_type="application/json")],
+                               ttl_ms=settings.mcp_cache_ttl_seconds * 1000, cache_scope="private")
 
 
 async def _read_resource(ctx: ServerRequestContext, params: ReadResourceRequestParams) -> ReadResourceResult:
+    if params.uri == _READINESS_URI:
+        from .services.sdlc_incidents import readiness_incidents
+
+        try:
+            data = await run_in_threadpool(readiness_incidents)
+        except HTTPException as exc:
+            raise MCPError(code=-32603, message="Readiness incident state is unavailable") from exc
+        return ReadResourceResult(contents=[TextResourceContents(
+            uri=params.uri, mime_type="application/json", text=json.dumps(data),
+        )], ttl_ms=0, cache_scope="private")
     name = _RESOURCES.get(params.uri)
     if name is None:
         raise MCPError(code=-32602 if ctx.protocol_version >= "2026-07-28" else -32002, message="Resource not found")

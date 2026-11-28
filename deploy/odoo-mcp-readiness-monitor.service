@@ -1,0 +1,15 @@
+[Unit]
+Description=Record sustained Odoo MCP readiness incidents
+
+[Service]
+Type=oneshot
+User=odoo-mcp
+Group=odoo-mcp
+Environment=ODOO_AGENT_STATE_DIR=/var/lib/odoo-mcp
+EnvironmentFile=-/etc/odoo-mcp/readiness-monitor.env
+ExecStart=/usr/bin/python3 /usr/local/libexec/odoo-mcp/readiness_monitor.py ${ODOO_AGENT_STATE_DIR}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+TimeoutStartSec=15

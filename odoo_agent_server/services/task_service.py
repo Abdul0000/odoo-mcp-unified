@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from ..config import get_odoo_clients, settings
 from .client_admin_service import ClientAdminService
 from .client_settings_store import atomic_json
+from .task_review_service import reconcile_review, review_branch, reviewed_deploy
 
 class TaskBusy(HTTPException):
     """Transient contention, distinct from validation/authorization failures."""
@@ -146,7 +147,7 @@ class TaskService:
         client = ClientAdminService()._client(request.client_name)
         task_id = hashlib.sha256((str(client["name"]).casefold() + "\0" + request.request_id).encode()).hexdigest()[:32]
         contract = request.model_dump(exclude={"plan_approval_id"})
-        for optional in ("risk_level", "accepted_plan"):
+        for optional in ("risk_level", "accepted_plan", "sdlc"):
             if contract[optional] is None:
                 contract.pop(optional)
         contract["client_name"] = client["name"]
@@ -159,6 +160,12 @@ class TaskService:
             else:
                 if request.risk_level == "high" and request.accepted_plan is None:
                     raise HTTPException(409, "High-risk work requires a versioned implementation plan")
+                if request.sdlc and not request.accepted_plan:
+                    raise HTTPException(409, "Linked intent and design require an accepted implementation plan")
+                if request.sdlc and request.sdlc.incident_id:
+                    from .sdlc_incidents import readiness_incidents
+                    if not any(row["id"] == request.sdlc.incident_id for row in readiness_incidents()["incidents"]):
+                        raise HTTPException(404, "Readiness incident is not in the triage queue")
                 if sum(1 for _ in self.root.glob("*.json")) >= settings.job_max_count:
                     raise HTTPException(429, "Task retention capacity reached; archive completed task checkpoints before creating more.")
                 approval = None
@@ -170,7 +177,8 @@ class TaskService:
                     approval = ApprovalService()
                     approval.ensure_allowed("task.accept_plan", request.plan_approval_id,
                                             {"task_id": task_id, "contract_sha256": fingerprint,
-                                             "plan": plan},
+                                             "plan": plan,
+                                             **({"sdlc": contract["sdlc"]} if request.sdlc else {})},
                                             force=True, bind_payload=True)
                 task = {
                     "task_id": task_id,
@@ -191,6 +199,8 @@ class TaskService:
                     "accepted_plan": plan,
                     "plan_approval_id": request.plan_approval_id if approval else None,
                 }
+                if request.sdlc:
+                    task["sdlc"] = contract["sdlc"]
                 self.save(task)
                 if approval:
                     approval.mark_consumed(request.plan_approval_id)
@@ -310,6 +320,22 @@ class TaskService:
             out.update(state_class="running", terminal=False, next_call={"tool": "task_resume", "arguments": {"task_id": task["task_id"]}})
             return out
         if snapshot["claims"].get("push_verified") and task["target"] == "deploy":
+            if reviewed_deploy(task):
+                review = task.get("review") or {}
+                if review.get("state") == "pending":
+                    out.update(status="awaiting_review", state_class="input_required", terminal=False, input_required=True,
+                               input_request={"kind": "repository_review", "url": review["url"],
+                                              "prompt": "An independent reviewer must approve and merge this request.",
+                                              "resume_call": {"tool": "task_resume", "arguments": {"task_id": task["task_id"]}}})
+                    return out
+                if review.get("state") in {"closed", "unavailable", "uncertain"}:
+                    out.update(status="review_blocked", state_class="blocked", terminal=True, completion_required=False,
+                               message=review.get("error") or "Review was closed or could not be reconciled.")
+                    return out
+                if review.get("state") != "merged":
+                    out.update(state_class="action_required", terminal=False, next_call={"tool": "task_run", "arguments": {
+                        "task_id": task["task_id"], "tool": "repository_review"}})
+                    return out
             if not task.get("module_name"):
                 out.update(
                     state_class="action_required",
@@ -325,7 +351,7 @@ class TaskService:
             out.update(
                 state_class="action_required",
                 terminal=False,
-                next_call={"tool": "task_deploy", "arguments": {"task_id": task["task_id"], "step_id": "deploy-" + task.get("commit_sha", task["task_id"])[:24]}},
+                next_call={"tool": "task_deploy", "arguments": {"task_id": task["task_id"], "step_id": "deploy-" + (task.get("review", {}).get("merged_sha") or task.get("commit_sha") or task["task_id"])[:24]}},
             )
             return out
         if task["refs"].get("pending_job_ids") or task["refs"].get("pending_operation_ids"):
@@ -406,6 +432,20 @@ class TaskService:
                 candidates = task["refs"].get("pending_" + key + "s") or task["refs"].get(key + "s", [])
                 if len(candidates) == 1:
                     args[key] = candidates[0]
+        if reviewed_deploy(task):
+            if task.get("review") and (
+                name in {"execution.publish", "execution.workspace_sync", "execution.task_plan"}
+                or (name == "execution.files" and args.get("operation") not in {"list", "read", "search", "diff"})
+            ):
+                raise HTTPException(409, "The review pins this task's source; open a follow-up task for changes")
+            branch = review_branch(task["task_id"])
+            if name in {"execution.workspace_open", "execution.publish"}:
+                if args.get("branch") and args["branch"] != branch:
+                    raise HTTPException(409, "Use the task review branch for workspace setup and publishing")
+                args["branch"] = branch
+            if name in {"workflow.safe_deploy_module", "workflow.odoo_code_change", "workflow.odoo_debug_and_fix",
+                        "workflow.frontend_visual_implement", "workflow.resume_continuation", "workflow.module_install_and_check"}:
+                raise HTTPException(409, "Use task_deploy after reviewed merge for this task")
         if name == "execution.workspace_open":
             args.setdefault("task_description", task["description"])
             if args.get("accepted_plan") and args["accepted_plan"] != task.get("accepted_plan"):
@@ -482,7 +522,9 @@ class TaskService:
                 raise HTTPException(409, "Task project must match the configured client checkout")
         if name in {"jobs.get", "workflow.resume_job"} and not args.get("job_id"):
             raise HTTPException(409, "Resume requires the exact task-linked job_id")
-        if args.get("branch") and args["branch"] != task["branch"]:
+        allowed_branch = (review_branch(task["task_id"]) if reviewed_deploy(task)
+                          and name in {"execution.workspace_open", "execution.publish"} else task["branch"])
+        if args.get("branch") and args["branch"] != allowed_branch:
             raise HTTPException(409, "Task branch differs from its pinned client branch")
         if name == "execution.workspace_open" and task["refs"].get("workspace_id"):
             expected = hashlib.sha256(("workspace:" + str(args.get("request_id", ""))).encode()).hexdigest()[:32]
@@ -498,7 +540,7 @@ class TaskService:
     async def guided(self, task_id, dispatch):
         """One server-selected step; never invent code, tests or approval intent."""
         import asyncio
-        from ..task_schemas import TaskRun
+        from ..task_schemas import TaskDeploy, TaskRun
 
         state = await self.resume(task_id, dispatch)
         if state.get("success_allowed") or state.get("input_required") or state.get("state_class") == "blocked" or state.get("uncertain_steps"):
@@ -506,6 +548,8 @@ class TaskService:
         call = state.get("next_call") or {}
         if call.get("tool") == "task_run":
             return await self.run(TaskRun.model_validate(call["arguments"]), dispatch)
+        if call.get("tool") == "task_deploy" and reviewed_deploy(state["task"]):
+            return await self.deploy(TaskDeploy.model_validate(call["arguments"]), dispatch)
         argument = state.get("argument_request") or {}
         proposed = argument.get("arguments") or {}
         if proposed.get("tool") == "execution_task_plan":
@@ -558,6 +602,10 @@ class TaskService:
             if request.arguments:
                 raise HTTPException(422, "Supply tool with arguments, or task_id alone to follow the server next step")
             return await self.guided(request.task_id, dispatch)
+        if request.tool == "repository_review":
+            if request.arguments:
+                raise HTTPException(422, "Review uses the task's pinned branch and scope")
+            return await self.prepare_review(request.task_id)
         with self.lock(request.task_id):
             task = self.read(request.task_id)
             if not self.current(task):
@@ -731,7 +779,10 @@ class TaskService:
             published = result.get("commit") or result.get("published_commit")
             if isinstance(published, str) and re.fullmatch("[0-9a-f]{40}", published):
                 task["published_commit_sha"] = published
-        expected_sha = task.get("published_commit_sha")
+        if reviewed_deploy(task) and name in {"jobs.get", "workflow.resume_job", "workflow.verify_deployed_module"}:
+            if not task["refs"].get("deploy_job_id") or result.get("job_id") != task["refs"]["deploy_job_id"]:
+                claims["deployment_verified"] = False
+        expected_sha = (task.get("review") or {}).get("merged_sha") or task.get("published_commit_sha")
         observed_sha = result.get("sha") or result.get("commit") or result.get("published_commit")
         if (
             name in {"jobs.get", "workflow.safe_deploy_module", "workflow.resume_job", "workflow.odoo_code_change", "workflow.odoo_debug_and_fix", "workflow.frontend_visual_implement"}
@@ -757,6 +808,50 @@ class TaskService:
                 if not expected_sha or result[key] == expected_sha:
                     task["commit_sha"] = result[key]
         task["events"] = [*task["events"], event][-100:]
+
+    async def refresh_review(self, task, *, create=False):
+        from .client_resolver_service import ClientResolverService
+
+        client = ClientResolverService().resolve_client(task["client_name"], require_complete=False)
+        previous = task.get("review") or {}
+        head = previous.get("head_sha") or task.get("published_commit_sha")
+        try:
+            review = await asyncio.to_thread(reconcile_review, client, task, head, create=create)
+        except HTTPException as exc:
+            review = {**previous, "head_sha": head, "state": "unavailable", "error": scrub(exc.detail)}
+        if review is None:
+            review = {**previous, "head_sha": head, "state": "uncertain",
+                      "error": "Review creation outcome is unknown. Reconcile the task branch before retrying."}
+        task["review"] = review
+        task["phase"] = "review_" + review["state"]
+        return review
+
+    async def prepare_review(self, task_id):
+        from .execution_service import ExecutionService
+
+        with self.lock(task_id):
+            task = self.read(task_id)
+            if not self.current(task) or not reviewed_deploy(task):
+                raise HTTPException(409, "Review requires a current deploy task with linked intent and design")
+            wid = task["refs"].get("workspace_id")
+            if not wid:
+                raise HTTPException(409, "Open and verify the task workspace before review")
+            status = await asyncio.to_thread(ExecutionService().status, wid)
+            if (status.get("published_branch") != review_branch(task_id) or not status.get("success_allowed")
+                    or not status.get("pushed") or not status.get("fresh_verification")
+                    or not status.get("verification", {}).get("ready")):
+                raise HTTPException(409, "Review requires a fresh verified push to the task review branch")
+            self.observe(task, "execution.workspace_status", status)
+            create = not task.get("review")
+            if create:
+                if any(step["status"] in {"dispatched", "reconciliation_required"} and not step.get("read_only")
+                       for step in task["steps"].values()):
+                    raise HTTPException(409, "Reconcile the task's uncertain mutation before opening a review")
+                task["review"] = {"state": "opening", "head_sha": task.get("published_commit_sha")}
+                await self.checkpoint(task)
+            await self.refresh_review(task, create=create)
+            await self.checkpoint(task)
+            return self.envelope(task)
 
     async def resume(self, task_id, dispatch):
         with self.lock(task_id):
@@ -869,6 +964,9 @@ class TaskService:
                     self.observe(task, "workflow.odoo_debug_and_fix", latest)
                 except HTTPException:
                     pass
+            if (reviewed_deploy(task) and task.get("review") and task.get("claims", {}).get("push_verified")
+                    and not pending_jobs and not uncertain and not task["claims"].get("deployment_verified")):
+                await self.refresh_review(task)
             await self.checkpoint(task)
             return self.envelope(
                 task,
@@ -909,6 +1007,10 @@ class TaskService:
             previous = task["steps"].get(request.step_id)
             if previous and previous["fingerprint"] != fingerprint:
                 raise HTTPException(409, "step_id already belongs to another deployment")
+            if reviewed_deploy(task) and not previous and any(
+                step.get("tool") == "task.deploy" for step in task["steps"].values()
+            ):
+                raise HTTPException(409, "This reviewed deployment already has a step; use task_resume or its approval reply")
             if previous and not (previous.get("status") == "awaiting_approval" and request.approval_id == previous.get("approval_id")):
                 if previous["fingerprint"] != fingerprint:
                     raise HTTPException(409, "step_id already belongs to another deployment")
@@ -917,6 +1019,15 @@ class TaskService:
             if not (status.get("pushed") and status.get("success_allowed")):
                 raise HTTPException(409, "Publish and verify the exact task commit before deployment")
             client = ClientResolverService().resolve_client(task["client_name"], require_complete=False)
+            if reviewed_deploy(task):
+                if not task.get("review"):
+                    raise HTTPException(409, "Open and merge the task review before deploying")
+                await self.refresh_review(task)
+                await self.checkpoint(task)
+                if task["review"]["state"] != "merged":
+                    self.observe(task, "execution.workspace_status", status)
+                    await self.checkpoint(task)
+                    return self.envelope(task)
             await asyncio.to_thread(RepoService().sync_configured_checkout, client)
             payload = SafeDeployModuleRequest(
                 client_name=client.name,
@@ -926,6 +1037,7 @@ class TaskService:
                 branch=client.branch,
                 commit_message=task["description"][:300],
                 execution_workspace_id=wid,
+                review_task_id=task["task_id"] if reviewed_deploy(task) else None,
                 verification_assertion=request.verification_assertion,
                 require_runtime_tests=request.require_runtime_tests,
                 approval_id=request.approval_id,
@@ -937,7 +1049,9 @@ class TaskService:
             from .deploy_impact_service import classify_deploy_impact
             from .execution_service import git
 
-            diff = await asyncio.to_thread(git, ["show", "--format=", "--no-ext-diff", "--no-textconv", evidence["sha"], "--", *(evidence["paths"])], client.path)
+            change = (["diff", evidence["base_sha"], evidence["sha"]] if evidence.get("base_sha")
+                      else ["show", "--format=", evidence["sha"]])
+            diff = await asyncio.to_thread(git, [*change, "--no-ext-diff", "--no-textconv", "--", *evidence["paths"]], client.path)
             impact = classify_deploy_impact(
                 project_path=client.path, module_name=task["module_name"], changed_paths=evidence["paths"], git_diff=diff, deploy_mode="always_upgrade" if len(diff) >= 32000 else "auto"
             )

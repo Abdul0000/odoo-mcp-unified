@@ -2275,6 +2275,7 @@ class CapabilityCheckResult(BaseModel):
 
 class SafeDeployModuleRequest(BaseProjectRequest, ApprovalMixin):
     execution_workspace_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$", description="Adopt an exact-tree verified already-pushed execution commit; skip duplicate commit/push, retain deploy/upgrade checks.")
+    review_task_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     client_name: str | None = Field(default=None, description="Client name from ODOO_CLIENTS. When omitted, resolves from project_path when possible.")
     module_name: str = Field(..., description="Technical module folder/name to deploy and update")
     module_root_rel: str | None = Field(

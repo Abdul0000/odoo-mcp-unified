@@ -759,8 +759,8 @@ _PROVIDER_COMPACT_TOOL_DESCRIPTIONS = {
     'execution.process_poll': 'Read bounded command output and exit status.',
     'execution.process_input': 'Send bounded stdin; eof closes input.',
     'execution.process_cancel': 'Cancel command and its container.',
-    "task.open": "Pin client/target and open a durable task.",
-    "task.run": "task_id alone follows server next step; IDs auto-bind. Supply tool/arguments for edits.",
+    "task.open": "Pin client/target. Use sdlc for approved intent/design links with an accepted_plan.",
+    "task.run": "Run the next task step, including repository review handoff. Supply tool/arguments for edits.",
     "task.status": "Reconcile task proof read-only.",
     "task.resume": "Poll existing work after interruption; no write replay.",
     "task.list": "List recent durable client tasks.",
@@ -940,6 +940,10 @@ def _remote_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
         if "$ref" in value:
             ref = str(value.get("$ref") or "")
             definition_name = ref.rsplit("/", 1)[-1]
+            if definition_name == "SdlcReferences":
+                return {"type": "object", "properties": {
+                    key: {"type": "string"} for key in ("intent", "design", "incident_id")
+                }, "required": ["intent", "design"]}
             if definition_name in {
                 "OdooDebugRecordAssertion",
                 "OdooDebugReportReplay",
@@ -1446,6 +1450,13 @@ def mcp_operation_metrics() -> dict[str, Any]:
     """Authenticated bounded counters; no arguments, credentials or client data."""
     from ..services.mcp_telemetry import metrics_snapshot
     return {"scope": "api_process", "tools": metrics_snapshot()}
+
+
+@router.get("/incidents")
+def mcp_readiness_incidents() -> dict[str, Any]:
+    """Read the operator's readiness triage queue."""
+    from ..services.sdlc_incidents import readiness_incidents
+    return readiness_incidents()
 
 
 @router.get("/client-check-prompt")

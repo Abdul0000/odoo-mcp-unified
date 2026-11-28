@@ -20,7 +20,7 @@ Be decisive, evidence-bound and scope-locked. Before edits, check internally:
 4. Change: complete minimal scope, dependencies, security/data impact.
 5. Verify: choose checks before edits; compare results, revise if contradicted.
 
-Use minimum sufficient evidence; inspect further only when evidence changes. Clear work: one focused inspection, one complete write set, proportional verification, one deploy cycle on request. Complex work: read `odoo-task-planning`; brief decision record, no reasoning transcript or new approval phase.
+Use minimum sufficient evidence; inspect further only when evidence changes. Prefer one focused inspection, one complete write set, proportional checks, and one deploy cycle on request. Enter Plan mode only when explicitly requested; otherwise plan internally and proceed.
 - Reuse returned IDs/args; fill required fields. Never repeat completed phases. Trust authoritative proof only; stop at terminal success.
 - Run every returned `next_call`; fill technical `argument_request` fields. Honor `input_request` only for a real decision. After interruption, resume the same workspace/session/job without replay. Ask only for `input_required` or material blockers.
 

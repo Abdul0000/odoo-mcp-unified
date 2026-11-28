@@ -55,8 +55,10 @@ class GitService:
     def head_sha(self, project_path: str, timeout_seconds: int = 20) -> CommandResult:
         return self._run(["git", "rev-parse", "HEAD"], self._project(project_path), timeout_seconds)
 
-    def head_changed_files(self, project_path: str, timeout_seconds: int = 20) -> CommandResult:
-        return self._run(["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD"], self._project(project_path), timeout_seconds)
+    def head_changed_files(self, project_path: str, timeout_seconds: int = 20, *, first_parent=False) -> CommandResult:
+        command = (["git", "diff", "--name-only", "HEAD^1", "HEAD"] if first_parent
+                   else ["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD"])
+        return self._run(command, self._project(project_path), timeout_seconds)
 
     def diff(self, project_path: str, staged: bool = False, timeout_seconds: int = 30) -> CommandResult:
         command = ["git", "diff", "--cached"] if staged else ["git", "diff"]

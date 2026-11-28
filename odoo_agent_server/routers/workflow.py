@@ -1369,10 +1369,10 @@ def _safe_deploy_already_deployed_result(
     }
 
 
-def _assert_head_commit_contains_paths(git: GitService, project_path: Path, deploy_paths: list[str]) -> CommandResult:
+def _assert_head_commit_contains_paths(git: GitService, project_path: Path, deploy_paths: list[str], *, first_parent=False) -> CommandResult:
     if not hasattr(git, "head_changed_files"):
         return CommandResult(command=["git", "head-commit-path-gate", "legacy-fake"], cwd=str(project_path), exit_code=0, stdout="Skipped only because GitService test double has no head_changed_files().\n")
-    changed = git.head_changed_files(str(project_path))
+    changed = git.head_changed_files(str(project_path), first_parent=True) if first_parent else git.head_changed_files(str(project_path))
     if changed.exit_code != 0:
         return changed
     head_files = {line.strip() for line in (changed.stdout or "").splitlines() if line.strip()}
@@ -2046,7 +2046,7 @@ def _run_safe_deploy(payload: SafeDeployModuleRequest, job_id: str) -> None:
         try:
             published = validate_published_workspace(payload)
             published_runtime_verified = bool({"unit", "orm"} & set(published.get("passed_layers", [])))
-            idempotent_head_path_gate = _assert_head_commit_contains_paths(git, project_path, deploy_paths)
+            idempotent_head_path_gate = _assert_head_commit_contains_paths(git, project_path, deploy_paths, first_parent=bool(published.get("base_sha")))
             if idempotent_head_path_gate.exit_code != 0:
                 _fail('published_commit_path_gate', idempotent_head_path_gate)
                 return

@@ -1,0 +1,42 @@
+name: Live agent evaluations
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: agent-evals
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Score live model decisions
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ODOO_AGENT_EVAL_MODEL: ${{ vars.ODOO_AGENT_EVAL_MODEL }}
+        run: |
+          test -n "$OPENAI_API_KEY" && test -n "$ODOO_AGENT_EVAL_MODEL" || {
+            echo "::error::Configure OPENAI_API_KEY and ODOO_AGENT_EVAL_MODEL in the agent-evals environment"
+            exit 1
+          }
+          set -o pipefail
+          python -m tests.evals.live | tee agent-evals.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-evals
+          path: agent-evals.json

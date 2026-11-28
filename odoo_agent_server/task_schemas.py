@@ -5,6 +5,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from .execution_schemas import AcceptedPlan
 
 
+class SdlcReferences(BaseModel):
+    """Links to the authoritative records for this change."""
+
+    model_config = ConfigDict(extra="forbid")
+    intent: str = Field(max_length=300, pattern=r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/%+-]+)+$")
+    design: str = Field(max_length=300, pattern=r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~/%+-]+)+$")
+    incident_id: str | None = Field(default=None, pattern=r"^mcp-ready-[a-f0-9]{16}$")
+
+
 class TaskOpen(BaseModel):
     model_config = ConfigDict(extra="forbid")
     client_name: str
@@ -15,6 +24,7 @@ class TaskOpen(BaseModel):
     risk_level: Literal["routine", "high"] | None = None
     accepted_plan: AcceptedPlan | None = None
     plan_approval_id: str | None = None
+    sdlc: SdlcReferences | None = None
 
 
 class TaskId(BaseModel):

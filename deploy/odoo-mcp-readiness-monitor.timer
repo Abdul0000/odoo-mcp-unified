@@ -1,0 +1,10 @@
+[Unit]
+Description=Check Odoo MCP readiness every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=odoo-mcp-readiness-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -55,6 +55,29 @@ def test_high_risk_plan_needs_bound_approval(task):
     assert opened["plan_approval_id"] == approval_id
 
 
+def test_sdlc_links_are_bound_to_the_approved_plan(task):
+    from odoo_agent_server.schemas import ApprovalStatus
+    from odoo_agent_server.services.store_service import JsonStore
+
+    ledger, _, service, wid, _ = task
+    args = dict(client_name="Alpha", request_id="linked-intent-001", description="Fix calculation", target="push",
+                sdlc={"intent": "https://example.test/issues/1", "design": "https://example.test/docs/1"})
+    with pytest.raises(HTTPException, match="accepted implementation plan"):
+        ledger.open(TaskOpen(**args))
+    args["accepted_plan"] = {"revision": "revision-1", "base_sha": service.workspace(wid)["base_sha"],
+                             "scope_paths": ["hello.py"], "acceptance_criteria": ["Calculation passes"],
+                             "required_layers": ["unit"]}
+    with pytest.raises(HTTPException) as exc:
+        ledger.open(TaskOpen(**args))
+    approval_id = exc.value.detail["approval_id"]
+    JsonStore().set_approval_status(approval_id, ApprovalStatus.approved)
+    changed = dict(args, sdlc=args["sdlc"] | {"design": "https://example.test/docs/2"})
+    with pytest.raises(HTTPException):
+        ledger.open(TaskOpen(**changed, plan_approval_id=approval_id))
+    result = ledger.open(TaskOpen(**args, plan_approval_id=approval_id))
+    assert result["sdlc"]["design"] == args["sdlc"]["design"]
+
+
 def test_task_contract_idempotency_and_configuration_invalidation(task, monkeypatch):
     ledger, tid, _, _, clients = task
     again = ledger.open(TaskOpen(client_name="Alpha", request_id="durable-task-001", description="Fix calculation", target="push", module_name="addon"))
@@ -256,7 +279,8 @@ def test_debug_diagnosis_uses_trusted_infrastructure_evidence(message, category)
     assert _debug_infer_diagnosis(session).failure_category == "unknown"
 
 
-def test_real_edit_test_commit_push_and_published_handoff(task, monkeypatch):
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_real_edit_test_commit_push_and_published_handoff(task, monkeypatch, reviewed):
     import subprocess
     import sys
     from odoo_agent_server.routers.tools import _dispatch
@@ -265,6 +289,20 @@ def test_real_edit_test_commit_push_and_published_handoff(task, monkeypatch):
     from odoo_agent_server.schemas import SafeDeployModuleRequest
 
     ledger, tid, svc, wid, clients = task
+    source = clients[0]["path"]
+    branch = "staging"
+    review_state = {}
+    if reviewed:
+        from odoo_agent_server.services.task_review_service import review_branch
+
+        branch = review_branch(tid)
+        subprocess.run(["git", "checkout", "-b", branch], cwd=svc.root(wid), capture_output=True, check=True)
+        svc.store.update(wid, "workspace", branch=branch)
+        row = ledger.read(tid)
+        row.update(target="deploy", sdlc={"intent": "https://example.test/issues/1", "design": "https://example.test/docs/1"})
+        ledger.save(row)
+        review_state.update(state="pending", url="https://example.test/pull/1",
+                            head_sha=None, merged_sha=None)
 
     async def step(identifier, tool, args):
         return await ledger.run(TaskRun(task_id=tid, step_id=identifier, tool=tool, arguments=args), _dispatch)
@@ -283,13 +321,52 @@ def test_real_edit_test_commit_push_and_published_handoff(task, monkeypatch):
     worker_for(svc, monkeypatch).execute(svc.store.claim("process"))
     assert svc.poll(process["process_id"])["status"] == "succeeded"
     published = svc.publish(WorkspacePublish(workspace_id=wid, message="Fix calculation", request_id="task-publish-001"))
-    snapshot = asyncio.run(ledger.resume(tid, _dispatch))["task"]
-    assert snapshot["success_allowed"] and snapshot["claims"]["push_verified"]
-    source = clients[0]["path"]
-    subprocess.run(["git", "pull", "--ff-only", "origin", "staging"], cwd=source, capture_output=True, check=True)
-    payload = SafeDeployModuleRequest(client_name="Alpha", project_path=source, module_name="addon", execution_workspace_id=wid, commit_message="Deploy exact published commit")
+    state = asyncio.run(ledger.resume(tid, _dispatch))
+    assert state["task"]["claims"]["push_verified"]
+    sha = published["commit"]
+    if reviewed:
+        from odoo_agent_server.task_schemas import TaskDeploy
+
+        review_state["head_sha"] = sha
+        calls = []
+
+        def provider(client, task, head, *, create=False):
+            assert head == sha
+            calls.append(create)
+            return dict(review_state)
+
+        monkeypatch.setattr("odoo_agent_server.services.task_service.reconcile_review", provider)
+        assert state["next_call"]["arguments"]["tool"] == "repository_review"
+        with pytest.raises(HTTPException, match="merge the task review"):
+            asyncio.run(ledger.deploy(TaskDeploy(task_id=tid, step_id="deploy-before-review"), _dispatch))
+        awaiting = asyncio.run(ledger.run(TaskRun.model_validate(state["next_call"]["arguments"]), _dispatch))
+        assert awaiting["status"] == "awaiting_review" and calls == [True]
+        assert asyncio.run(ledger.resume(tid, _dispatch))["status"] == "awaiting_review"
+        subprocess.run(["git", "fetch", "origin", branch], cwd=source, capture_output=True, check=True)
+        subprocess.run(["git", "-c", "user.name=Reviewer", "-c", "user.email=reviewer@example.test", "merge",
+                        "--no-ff", "--no-edit", "FETCH_HEAD"], cwd=source, capture_output=True, check=True)
+        subprocess.run(["git", "push", "origin", "staging"], cwd=source, capture_output=True, check=True)
+        merged_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+        assert merged_sha != sha
+        review_state.update(state="merged", merged_sha=merged_sha)
+        ready = asyncio.run(ledger.resume(tid, _dispatch))
+        assert ready["next_call"]["tool"] == "task_deploy" and calls == [True, False, False]
+        async def deploy_step(request, _dispatch):
+            return {"next_step": request.model_dump()}
+
+        with monkeypatch.context() as context:
+            context.setattr(ledger, "deploy", deploy_step)
+            guided = asyncio.run(ledger.run(TaskRun(task_id=tid), _dispatch))
+        assert guided["next_step"]["step_id"] == "deploy-" + merged_sha[:24]
+        sha = merged_sha
+    else:
+        assert state["success_allowed"]
+        subprocess.run(["git", "pull", "--ff-only", "origin", "staging"], cwd=source, capture_output=True, check=True)
+    payload = SafeDeployModuleRequest(client_name="Alpha", project_path=source, module_name="addon",
+                                      execution_workspace_id=wid, review_task_id=tid if reviewed else None,
+                                      commit_message="Deploy exact published commit")
     proof = validate_published_workspace(payload)
-    assert proof["sha"] == published["commit"] and "addon/calc.py" in proof["paths"]
+    assert proof["sha"] == sha and "addon/calc.py" in proof["paths"]
     # Exercise the no-local-diff adoption through the real safe-deploy pipeline.
     # Odoo boundaries are simulated; Git and exact-tree checks remain real.
     from odoo_agent_server.routers import workflow

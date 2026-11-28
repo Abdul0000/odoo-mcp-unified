@@ -26,6 +26,14 @@ if [[ "$(basename "$(readlink "$ROOT/current" 2>/dev/null || true)")" == "$COMMI
   echo "Already running latest commit $COMMIT; no restart required."
   exit 0
 fi
+if [[ "${DEPLOY_REQUIRE_RELEASE_APPROVAL:-0}" == 1 ]]; then
+  if [[ "$COMMIT" != "$EVENT_COMMIT" ]]; then
+    echo "Approved release is no longer the deployment branch head." >&2
+    exit 1
+  fi
+  "$PYTHON" /usr/local/libexec/odoo-mcp/release_gate.py check \
+    "${DEPLOY_GITHUB_REPOSITORY:-Abdul0000/odoo-mcp-unified}" "$BRANCH" "$COMMIT"
+fi
 RELEASE="$ROOT/releases/$COMMIT"
 if [[ ! -d "$RELEASE" ]]; then
   git clone --shared --no-checkout "$MIRROR" "$RELEASE"
@@ -77,6 +85,17 @@ if systemctl is-enabled --quiet odoo-mcp-execution.service; then
     --mount "type=bind,src=$RELEASE,dst=/workspace,readonly" --workdir /workspace \
     "$CANDIDATE_IMAGE" python -m pytest -q -p no:cacheprovider -o addopts=""
 fi
+if [[ "${DEPLOY_REQUIRE_RELEASE_APPROVAL:-0}" == 1 ]]; then
+  # Candidate verification can take minutes. Recheck before promotion.
+  REMOTE_HEAD="$(git --git-dir="$MIRROR" ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1)"
+  if [[ "$REMOTE_HEAD" != "$COMMIT" ]]; then
+    echo "Deployment branch advanced during candidate verification." >&2
+    exit 1
+  fi
+  "$PYTHON" /usr/local/libexec/odoo-mcp/release_gate.py check \
+    "${DEPLOY_GITHUB_REPOSITORY:-Abdul0000/odoo-mcp-unified}" "$BRANCH" "$COMMIT" >/dev/null
+fi
+
 OLD_IMAGE="$(docker image inspect --format '{{.Id}}' odoo-mcp-execution:local 2>/dev/null || true)"
 OLD_TARGET="$(readlink "$ROOT/current" 2>/dev/null || true)"
 OLD_VENV="$(readlink "$ROOT/venv" 2>/dev/null || true)"
